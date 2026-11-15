@@ -50,6 +50,52 @@ try {
     $longSnapshot = Assert-DatedCleanupSnapshot -Path $longRoot
     if ($longSnapshot.FileCount -ne 1) { throw 'Long path scan failed' }
     $count++
+    $single = Join-Path $testRoot 'reproducible.tar'
+    Set-Content -LiteralPath $single -Value 'original'
+    $singleBefore = Assert-DatedCleanupSnapshot -Path $single
+    if ($singleBefore.FileCount -ne 1 -or $singleBefore.DirectoryCount -ne 0) { throw 'File snapshot failed' }
+    $count++
+    Expect-Rejection { Assert-DatedCleanupTargetKind -Path $single -Spec ([pscustomobject]@{kind='cargo-cache'}) }
+    Expect-Rejection { Assert-DatedCleanupTargetKind -Path $single -Spec ([pscustomobject]@{kind='regenerable-git-archive'}) }
+    Expect-Rejection { Assert-DatedCleanupTargetKind -Path $single -Spec ([pscustomobject]@{kind='unknown-future-kind'}) }
+    Assert-DatedCleanupTargetKind -Path $tree -Spec ([pscustomobject]@{kind='cargo-cache'})
+    $count++
+    Add-Content -LiteralPath $single -Value 'mutation'
+    Expect-Rejection { Assert-DatedCleanupSnapshot -Path $single -Expected $singleBefore }
+    $fileAlias = Join-Path $testRoot 'file-alias.tar'
+    [void](New-Item -ItemType HardLink -Path $fileAlias -Target $single)
+    Expect-Rejection { Assert-DatedCleanupSnapshot -Path $single }
+    Remove-Item -LiteralPath $fileAlias
+    Remove-DatedCleanupTarget -Path $single -KeepNames @() -Before (Assert-DatedCleanupSnapshot -Path $single)
+    if (Test-Path -LiteralPath $single) { throw 'File removal failed' }
+    $count++
+    $partial = Join-Path $testRoot 'partial'
+    [void](New-Item -ItemType Directory -Path (Join-Path $partial 'nested') -Force)
+    Set-Content -LiteralPath (Join-Path $partial 'nested/cache.rlib') -Value 'cache'
+    $keep = @('syndocal.exe','syndocal.pdb')
+    foreach ($name in $keep) {
+        $outsideFile = Join-Path $testRoot $name
+        Set-Content -LiteralPath $outsideFile -Value "keep $name"
+        [void](New-Item -ItemType HardLink -Path (Join-Path $partial $name) -Target $outsideFile)
+    }
+    Expect-Rejection { Assert-DatedCleanupSnapshot -Path $partial }
+    $partialBefore = Assert-DatedCleanupSnapshot -Path $partial -KeepNames $keep
+    if ($partialBefore.FileCount -ne 1 -or $partialBefore.RetainedFiles.Count -ne 2) { throw 'Partial accounting failed' }
+    $count++
+    Add-Content -LiteralPath (Join-Path $partial 'syndocal.exe') -Value 'changed'
+    Expect-Rejection { Assert-DatedCleanupSnapshot -Path $partial -KeepNames $keep -Expected $partialBefore }
+    Expect-Rejection { Get-DatedCleanupKeepRecordSet -Path $partial -KeepNames @('../escape') }
+    $partialBefore = Assert-DatedCleanupSnapshot -Path $partial -KeepNames $keep
+    Remove-DatedCleanupTarget -Path $partial -KeepNames $keep -Before $partialBefore
+    $afterPartial = Get-DatedCleanupKeepRecordSet -Path $partial -KeepNames $keep
+    if ($afterPartial.Fingerprint -cne $partialBefore.RetainedFingerprint -or
+        @(Get-ChildItem -LiteralPath $partial).Count -ne 2) { throw 'Partial removal lost alias or left cache' }
+    $count++
+    Expect-Rejection { Assert-DatedCleanupReleaseCachePolicy -RepositoryRoot $testRoot -Path (Join-Path $testRoot 'target/release/syndocal.exe') -KeepNames @() }
+    Expect-Rejection { Assert-DatedCleanupReleaseCachePolicy -RepositoryRoot $testRoot -Path (Join-Path $testRoot 'target/release/deps') -KeepNames @() }
+    Expect-Rejection { Assert-DatedCleanupReleaseCachePolicy -RepositoryRoot $testRoot -Path (Join-Path $testRoot 'target/release/deps/child') -KeepNames $keep }
+    Assert-DatedCleanupReleaseCachePolicy -RepositoryRoot $testRoot -Path (Join-Path $testRoot 'target/release/build') -KeepNames @()
+    $count++
     Write-Output "PASS: $count dated cleanup safety checks"
 } finally {
     $verified = [IO.Path]::GetFullPath($testRoot)

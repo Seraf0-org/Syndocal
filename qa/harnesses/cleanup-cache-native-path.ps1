@@ -1,5 +1,5 @@
 # Native path, identity and checkpoint gates used by the dated cleanup.
-# Extracted unchanged from the retained historical cleanup harness.
+# Derived from the historical gates; ancestry supports directories and files.
 Set-StrictMode -Version Latest
 if (-not ("Syndocal.Cleanup.NativePathProbe" -as [type])) {
     Add-Type -TypeDefinition @'
@@ -253,7 +253,7 @@ function Assert-SyndocalCleanupNoReparseAncestry {
     $cursor = Get-Item -LiteralPath $full -Force
     while ($null -ne $cursor) {
         Assert-SyndocalCleanupNoReparseItem -Item $cursor
-        $parent = $cursor.Parent
+        $parent = if ($cursor -is [IO.DirectoryInfo]) { $cursor.Parent } else { $cursor.Directory }
         if ($null -eq $parent -or $parent.FullName -eq $cursor.FullName) {
             break
         }

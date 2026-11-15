@@ -1,0 +1,391 @@
+{
+  "schema": 1,
+  "base": "052b1c30c47832379bae809f8f01dcc1edae8c6a",
+  "targets": [
+    {
+      "root": "repo",
+      "relative": "target/release/deps",
+      "kind": "generated-cargo-cache-prune",
+      "keepNames": [
+        "syndocal.exe",
+        "syndocal.pdb"
+      ]
+    },
+    {
+      "root": "repo",
+      "relative": "target/release/build",
+      "kind": "generated-cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/release/.fingerprint",
+      "kind": "generated-cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/release/examples",
+      "kind": "generated-cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/release/incremental",
+      "kind": "generated-cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/browser-profiles",
+      "kind": "generated-qa-browser-profiles"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-0371c92b7c20-normal-2611060447/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103731200,
+      "sha256": "56cd987a077f631d6a9b971ee13a2e5ce5a0dff9d10519c2efc14cdf83b02e27",
+      "commit": "0371c92b7c206d55d2a93d26e019706dd385fb82",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-1f20dd12bdbe-normal-2611080047/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103772160,
+      "sha256": "fab7a2463addaab70f50eb7fe6fa1c2e437ca13f46a7d738596a13338a658732",
+      "commit": "1f20dd12bdbe24811b34ad93f85e4455c3016e7a",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-1f20dd12bdbe-normal-2611080105/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103772160,
+      "sha256": "fab7a2463addaab70f50eb7fe6fa1c2e437ca13f46a7d738596a13338a658732",
+      "commit": "1f20dd12bdbe24811b34ad93f85e4455c3016e7a",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-2eea47b5bdf1-normal-2611042022/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103321600,
+      "sha256": "03ff8c7ab1726226b27b3e54b5ef44569065649414caabed211da3403dfb2363",
+      "commit": "2eea47b5bdf12222937c5d789ece0b8a49d3a349",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-2eea47b5bdf1-normal-2611050055/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103321600,
+      "sha256": "03ff8c7ab1726226b27b3e54b5ef44569065649414caabed211da3403dfb2363",
+      "commit": "2eea47b5bdf12222937c5d789ece0b8a49d3a349",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-2eea47b5bdf1-normal-2611050543/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103321600,
+      "sha256": "03ff8c7ab1726226b27b3e54b5ef44569065649414caabed211da3403dfb2363",
+      "commit": "2eea47b5bdf12222937c5d789ece0b8a49d3a349",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-2eea47b5bdf1-normal-2611050631/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103321600,
+      "sha256": "03ff8c7ab1726226b27b3e54b5ef44569065649414caabed211da3403dfb2363",
+      "commit": "2eea47b5bdf12222937c5d789ece0b8a49d3a349",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-3d936f3a4d63-normal-2611110213/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103987200,
+      "sha256": "70dcb77ffbdd8825abc00e209d33b8b21710b524079344e08b1ce610facbd6b1",
+      "commit": "3d936f3a4d63f76e05b8a013b848235c9b564b28",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-3ee4421357dd-normal-2611102211/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103987200,
+      "sha256": "f1e7260aa2a20541c4ceeace856cab6d5e0f4ebbc6c1ee1ce808cf773b2b4b38",
+      "commit": "3ee4421357dd08e7f499d3b2b031742487540ed7",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-4ea71ddb5b7b-normal-2611060504/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103731200,
+      "sha256": "0e0c9dfe5afb1207c2b3c040f39cc4278f0f2e02d251742dda44c24dd6d31753",
+      "commit": "4ea71ddb5b7bf7fd8345131232ec93f8d8802380",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-5616c7634dd3-normal-2611141534/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103987200,
+      "sha256": "62dfae7c54dd62f4c6b04418c7473c0d40f2bb110a42694ac6b4e4e5923731a5",
+      "commit": "5616c7634dd3bcb688621a2fdc773f5a9965c4e7",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-5616c7634dd3-normal-2611142140/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103987200,
+      "sha256": "62dfae7c54dd62f4c6b04418c7473c0d40f2bb110a42694ac6b4e4e5923731a5",
+      "commit": "5616c7634dd3bcb688621a2fdc773f5a9965c4e7",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-5d200ce59049-normal-2611041631/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103321600,
+      "sha256": "f596b0cce0261ba736794cc3911f6fbb2a97efa44dea9a18ddcffae185d00778",
+      "commit": "5d200ce590496f46ca48441b35816f8255a0a141",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-6b14bad02848-normal-2611102013/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103956480,
+      "sha256": "63f00dc40d87815a82ce963938302709570854a5a0d9b2b139852c48efc5dc46",
+      "commit": "6b14bad028482696b2d43bfc1c5bea61dbc409bf",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-7424e147c708-normal-2611031708/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103321600,
+      "sha256": "bbc7092ee14bcf1c980e595267b9d7d0ef4f42dba9b505a18080703e72de809f",
+      "commit": "7424e147c70847c86d4a01213cc07e0f76733ef4",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-7e610388f0c8-normal-2611030319/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103280640,
+      "sha256": "76fd01b658989847716bfce3ea1debc022b0a61f89e727415db37ac082af980f",
+      "commit": "7e610388f0c8926b05b119d28c42c2975ccc7ba8",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-89875a92532c-normal-2611150442/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 104007680,
+      "sha256": "a4a57171a72389227af03e5b4d3d15324441b59a51d82e68fd89d934cd63b1c0",
+      "commit": "89875a92532ca482d4c5707a6eb542e4a197cf0d",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-8c94ee774c5c-normal-2611102235/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103987200,
+      "sha256": "3438c42bab556898da5f47f76f12105fe456325aa0556252639b3140fe986f74",
+      "commit": "8c94ee774c5c128c81cca9a9fe700add683e4fd0",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-90d3543f42c0-normal-2611102140/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103976960,
+      "sha256": "3df5c2de8d1e0a12df78905250319e9d797f8403704c5213da6b7548e56994e1",
+      "commit": "90d3543f42c00d409df73ceb011882fd5d9f62ff",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-969f008d6a78-normal-2611110248/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103987200,
+      "sha256": "27243cd3ed2054f704536953689bfbc14b0276ca3e6d520905f205c3c8ebc3bc",
+      "commit": "969f008d6a78cba15e2b2994117034e7ae0ed109",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-9d57a91d828c-normal-2611091733/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103946240,
+      "sha256": "190606156dadc11cb5b5aa4dc6903ac6a706183c4eea2a22589d280b96008f0a",
+      "commit": "9d57a91d828c1ace4f1727337a18a5367e0ff455",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-9d57a91d828c-normal-2611091812/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103946240,
+      "sha256": "190606156dadc11cb5b5aa4dc6903ac6a706183c4eea2a22589d280b96008f0a",
+      "commit": "9d57a91d828c1ace4f1727337a18a5367e0ff455",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-a7bacfec01d2-normal-2611110230/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103987200,
+      "sha256": "b4e4660aa5d766c3058ae9c7cc7e61cc9d6ae1db8bdaf261c9ea417d01cbd613",
+      "commit": "a7bacfec01d28d2af00ed7ddfaa9274f7fb7460d",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-b7deae29754c-normal-2611101805/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103956480,
+      "sha256": "20e6de06db28a293ed9ef1189a884721d4c71362662b5fdf3e6a1694145eac8d",
+      "commit": "b7deae29754ce392910096facef11b761a5f6be5",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-ba7be6d3b48b-timing-2611090534/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103884800,
+      "sha256": "3f16f44b169c84d39953413cfcb0c538575bda15ded9f97c61c61a3e70ff1fe2",
+      "commit": "ba7be6d3b48bb341d8a8412072c71e06da316afb",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-bde103b029d0-normal-2611141524/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103987200,
+      "sha256": "dce6cf2be820529e3c242732922e5521e9250b25abb2857fb151516854956268",
+      "commit": "bde103b029d0b89169ddce93cd98726c120551fa",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-c362ec47bad5-normal-2611110154/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103987200,
+      "sha256": "3314ddfd04bfb22cead3565d323b6b7719995ae03fd0d670e537fa3a03e5e63c",
+      "commit": "c362ec47bad5041255008ceafdbf9a359abd77d7",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-c58d7b459d7e-timing-2611091632/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103946240,
+      "sha256": "15769de9f50f20184f0a8c79551e74bad55e113da56eb1486c9c7f97630d5b98",
+      "commit": "c58d7b459d7ec19f4de76a4a3371bc9b3acf2b5c",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-c623601706bd-normal-2611110905/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103987200,
+      "sha256": "fe32398b75a89c022c1d076f8e91e92c1a2e83e13c16542d58c325bce289c6c0",
+      "commit": "c623601706bd35efb09fa67b1e68437323c8bf57",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-cb763fbd09cf-timing-2611091035/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103925760,
+      "sha256": "6c74bba41335b2b7164a1de052a3e6264b31e992d91243caf322cf197a03ef0c",
+      "commit": "cb763fbd09cf600b814876df65a476afd0708b65",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-cfdbdf650b19-normal-2611102020/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103956480,
+      "sha256": "8e3a894e63e9ea99e565cc32659537fd53bf8dfa9180e7fbb6b75388e7be722b",
+      "commit": "cfdbdf650b197c624858b5bfac0d529c5178b57a",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-d192180f9305-normal-2611030652/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103280640,
+      "sha256": "1ed09860e6e72d1b7f8eb404de65cc6ca8648ca51f8188072e75279809a3c53f",
+      "commit": "d192180f9305ef2ca194a47c196c1a10b9a167e3",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-e311d11b5b90-normal-2611041720/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103321600,
+      "sha256": "c80148718a0ecdb70c5d657582638645cfaf2462980d42251623b992f323126c",
+      "commit": "e311d11b5b90e27870a9d17da38243f908db16db",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-e311d11b5b90-normal-2611041855/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103321600,
+      "sha256": "c80148718a0ecdb70c5d657582638645cfaf2462980d42251623b992f323126c",
+      "commit": "e311d11b5b90e27870a9d17da38243f908db16db",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-eb2a7a7eb35a-normal-2611022154/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103239680,
+      "sha256": "ee498ee2ff80e3caae75c377480068373132e79733c05e23b5cd083ad04372bd",
+      "commit": "eb2a7a7eb35a929568c26323e593c5c0421f33e5",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-eb2a7a7eb35a-normal-2611022159/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103239680,
+      "sha256": "ee498ee2ff80e3caae75c377480068373132e79733c05e23b5cd083ad04372bd",
+      "commit": "eb2a7a7eb35a929568c26323e593c5c0421f33e5",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-eb2a7a7eb35a-normal-2611022205/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103239680,
+      "sha256": "ee498ee2ff80e3caae75c377480068373132e79733c05e23b5cd083ad04372bd",
+      "commit": "eb2a7a7eb35a929568c26323e593c5c0421f33e5",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-f02a2937198d-normal-2611081942/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103802880,
+      "sha256": "234d57196a6d898e556b5f4c2b31914f99bbbbe6d74ae055d1ae52f9e7b5c675",
+      "commit": "f02a2937198d2be410266c7b3e45e1cc846c4609",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-f02a2937198d-normal-2611082035/source.tar",
+      "kind": "regenerable-git-archive",
+      "bytes": 103802880,
+      "sha256": "234d57196a6d898e556b5f4c2b31914f99bbbbe6d74ae055d1ae52f9e7b5c675",
+      "commit": "f02a2937198d2be410266c7b3e45e1cc846c4609",
+      "reachable_from": "old-origin/main@955ce8283c9ee9397ce2ba03d0736f9188a7b014"
+    }
+  ]
+}

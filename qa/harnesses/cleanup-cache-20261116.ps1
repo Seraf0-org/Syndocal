@@ -7,7 +7,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $datedApply = [bool]$Apply
 $datedFunctionsOnly = [bool]$FunctionsOnly
-. (Join-Path $PSScriptRoot 'invoke-syndocal-build-cache-cleanup.ps1') -FunctionsOnly
+. (Join-Path $PSScriptRoot 'cleanup-cache-native-path.ps1')
+$script:SyndocalCleanupHarnessRelativePath = 'qa/harnesses/cleanup-cache-20261116.ps1'
 
 function Resolve-DatedCleanupTarget {
     param([string]$Root, [string]$Relative)
@@ -153,7 +154,7 @@ foreach ($spec in $manifest.targets) {
 
 if ($Apply) {
     [void](Assert-SyndocalCleanupRepositoryCheckpoint -RepositoryRoot $repo)
-    foreach ($file in @('qa/harnesses/cleanup-cache-20261116.ps1', 'qa/harnesses/cleanup-cache-20261116.targets.json', 'qa/harnesses/test-cleanup-cache-20261116.ps1')) {
+    foreach ($file in @('qa/harnesses/cleanup-cache-20261116.ps1', 'qa/harnesses/cleanup-cache-native-path.ps1', 'qa/harnesses/cleanup-cache-20261116.targets.json', 'qa/harnesses/test-cleanup-cache-20261116.ps1')) {
         $tracked = @(Invoke-SyndocalCleanupGit -RepositoryRoot $repo -Arguments @('ls-files', '--', $file) -FailureCode 'TrackingFailed')
         if ($tracked.Count -ne 1) { throw "Dated cleanup file is not tracked: $file" }
     }

@@ -1,0 +1,14 @@
+{
+  "date": "2026-11-16",
+  "base": "2beefbb1dc89720c191493314b82e503599d1bb9",
+  "deleted_targets": 248,
+  "failed_targets": 0,
+  "logical_bytes_removed": 382654667321,
+  "distinct_file_bytes_removed": 350359575966,
+  "free_before_bytes": 125729153024,
+  "free_after_bytes": 475659431936,
+  "protected_sha256_matches": 411,
+  "safety_test_cases_passed": 19,
+  "final_manifest_sha256": "B288F0C8E06C8F555F4194AAAD806C87AEB7720D150B62AA690E05ECC2E7F33B",
+  "observed_free_space_gain_bytes": 349930278912
+}

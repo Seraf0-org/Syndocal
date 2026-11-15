@@ -59,14 +59,14 @@
   },
   {
     "root": "target/qa",
-    "logical_bytes": 57771947513,
-    "files": 616376,
+    "logical_bytes": 44171458649,
+    "files": 615770,
     "links_not_followed": 483,
     "largest_children": [
       {
         "name": "steroids-60fps-design-20261025",
-        "logical_bytes": 40442891071,
-        "files": 473920
+        "logical_bytes": 26842402207,
+        "files": 473314
       },
       {
         "name": "browser-profiles",

@@ -1,0 +1,176 @@
+[
+  {
+    "root": "SyndocalDev",
+    "logical_bytes": 10475512257,
+    "files": 100029,
+    "links_not_followed": 5207,
+    "largest_children": [
+      {
+        "name": "task91-ndi-20261102",
+        "logical_bytes": 1465384342,
+        "files": 24512
+      },
+      {
+        "name": "node-v22.22.1-win-x64",
+        "logical_bytes": 1100949321,
+        "files": 2353
+      },
+      {
+        "name": "ffmpeg-sdk-rehost",
+        "logical_bytes": 1008388121,
+        "files": 19
+      },
+      {
+        "name": "follow-budget-20261102",
+        "logical_bytes": 912723238,
+        "files": 13885
+      },
+      {
+        "name": "lane4-syphon-codex-20261102",
+        "logical_bytes": 897252888,
+        "files": 13869
+      },
+      {
+        "name": "sol-handoff",
+        "logical_bytes": 823003286,
+        "files": 15012
+      },
+      {
+        "name": "task90-validation-20261102",
+        "logical_bytes": 577781288,
+        "files": 10847
+      },
+      {
+        "name": "task100-syphon-20261105",
+        "logical_bytes": 577012844,
+        "files": 7520
+      },
+      {
+        "name": "rc2",
+        "logical_bytes": 479724457,
+        "files": 41
+      },
+      {
+        "name": "syphon-handoff-20261102",
+        "logical_bytes": 478864691,
+        "files": 6960
+      }
+    ]
+  },
+  {
+    "root": "target/qa",
+    "logical_bytes": 57771947513,
+    "files": 616376,
+    "links_not_followed": 483,
+    "largest_children": [
+      {
+        "name": "steroids-60fps-design-20261025",
+        "logical_bytes": 40442891071,
+        "files": 473920
+      },
+      {
+        "name": "browser-profiles",
+        "logical_bytes": 1552793271,
+        "files": 4351
+      },
+      {
+        "name": "task99-rgba",
+        "logical_bytes": 1434777914,
+        "files": 7665
+      },
+      {
+        "name": "task54-release-notices",
+        "logical_bytes": 1079632459,
+        "files": 3264
+      },
+      {
+        "name": "task96-groupfx",
+        "logical_bytes": 1070473623,
+        "files": 7551
+      },
+      {
+        "name": "runtime-perf-2026-10-21",
+        "logical_bytes": 1021610479,
+        "files": 266
+      },
+      {
+        "name": "task17",
+        "logical_bytes": 814844475,
+        "files": 1934
+      },
+      {
+        "name": "task97-ws",
+        "logical_bytes": 793544390,
+        "files": 3591
+      },
+      {
+        "name": "ffmpeg-lgpl-20261026",
+        "logical_bytes": 656202713,
+        "files": 7608
+      },
+      {
+        "name": "ffmpeg-selfbuild-20261027",
+        "logical_bytes": 558675512,
+        "files": 7006
+      }
+    ]
+  },
+  {
+    "root": "target/release",
+    "logical_bytes": 10493215643,
+    "files": 16476,
+    "links_not_followed": 0,
+    "largest_children": [
+      {
+        "name": "deps",
+        "logical_bytes": 8593884501,
+        "files": 3878
+      },
+      {
+        "name": "build",
+        "logical_bytes": 1151259859,
+        "files": 6258
+      },
+      {
+        "name": "bundle",
+        "logical_bytes": 409256100,
+        "files": 4
+      },
+      {
+        "name": "avcodec-62.dll",
+        "logical_bytes": 90940416,
+        "files": 1
+      },
+      {
+        "name": "syndocal.exe",
+        "logical_bytes": 76698624,
+        "files": 1
+      },
+      {
+        "name": "avfilter-11.dll",
+        "logical_bytes": 31212544,
+        "files": 1
+      },
+      {
+        "name": "Processing.NDI.Lib.x64.dll",
+        "logical_bytes": 29863120,
+        "files": 1
+      },
+      {
+        "name": "syndocal.pdb",
+        "logical_bytes": 26284032,
+        "files": 1
+      },
+      {
+        "name": "examples",
+        "logical_bytes": 24123190,
+        "files": 14
+      },
+      {
+        "name": "avformat-62.dll",
+        "logical_bytes": 19531264,
+        "files": 1
+      }
+    ]
+  }
+]

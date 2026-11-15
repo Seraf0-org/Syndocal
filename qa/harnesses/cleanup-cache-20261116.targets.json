@@ -912,6 +912,426 @@
       "relative": "target/qa/task54-release-notices/normal-runtime-before",
       "kind": "obsolete-staged-runtime",
       "bytes": 264685056
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r/head-source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r10/build-p1-2610290214/exe",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 240856576
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r10/build-p2-2610290242/exe",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 240945152
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r10/build-p3-2610290255/exe",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 240918016
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r10/build-p4-2610290328/exe",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 240925184
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r10/matrix/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r10/probe-src/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r10/probe2-src/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r10/probe3-src/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r10/probe4-src/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r11/build-startup-2610291301/exe",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 240932864
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r11/matrix/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r11/probe-source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r12/matrix/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r13/matrix/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r15/matrix/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r2/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r3/base-source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r3/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r4/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r6-d1/source-base/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r6-d1/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r6-d2/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/build-c9cc9-2610281210/exe",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 240932352
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/build-exp1-2610280731/exe",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 240024576
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/build-exp2-2610280818/exe",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 239995904
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/build-exp3-2610280834/exe",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 240408064
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/build-exp4-2610280901/exe",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 240288768
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/build-exp5-2610280915/exe",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 240288768
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/build-exp6-2610280938/exe",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 240021504
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/build-exp7-2610281045/exe",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 240021504
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/build-exp8-2610281101/exe",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 240021504
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/build-fin-2610280928/exe",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 240031232
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/build-fin2-2610281036/exe",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 240031232
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/build-fin3-2610281110/exe",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 240031232
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/commit/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/exp/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/exp2/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/exp3/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/exp4/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/exp5/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/exp6/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/exp7/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/exp8/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/final/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/final2/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/final3/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/source-1a3e/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/source-476e/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r8-exit/exe-2610280820/exe",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 239968256
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r8-exit/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r9-close/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/fixture-canon/pre102/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/fixture-canon/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/groupfx/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 193684688
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/groupfx/test-bin",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 379900624
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5gates/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/i2-src/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 264685056
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/i3-src/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 264685056
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/i4-current-src/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 264685056
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/i4-src/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 264685056
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/i5-src/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 264685056
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/i6-src/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 166524416
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/i7-final-src/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163280896
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/i7-src/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 166524416
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/i8-src/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/i8/task60/source/target/release",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 163821568
     }
   ]
 }

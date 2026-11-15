@@ -1,0 +1,791 @@
+{
+  "schema": 1,
+  "base": "2beefbb1dc89720c191493314b82e503599d1bb9",
+  "targets": [
+    {
+      "root": "dev",
+      "relative": "export-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "dev",
+      "relative": "follow-budget-20261102/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "dev",
+      "relative": "follow-budget-20261102/probe-target-after",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "dev",
+      "relative": "follow-budget-20261102/probe-target-before",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "dev",
+      "relative": "lane4-syphon-codex-20261102/target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "dev",
+      "relative": "task100-syphon-20261105/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "dev",
+      "relative": "task90-validation-20261102/cargo-baseline",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "dev",
+      "relative": "task90-validation-20261102/cargo-matrix",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "dev",
+      "relative": "task91-ndi-20261102/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/debug",
+      "kind": "obsolete-build-output"
+    },
+    {
+      "root": "repo",
+      "relative": "target/mac-package-11335265",
+      "kind": "obsolete-build-output"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/main-cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/native-spike-diagnostic-20261109/normal-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/release-1.2.0-plan-20261025/lane5-groupfx/matrix/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r2/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r3/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r4/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r6-d1/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r6-d2/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r7/exp/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r8-exit/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c4r9-close/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-0371c92b7c20-normal-2611060447/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-0371c92b7c20-normal-2611060447/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-0371c92b7c20-normal-2611060447/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-1f20dd12bdbe-normal-2611080047/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-1f20dd12bdbe-normal-2611080047/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-1f20dd12bdbe-normal-2611080047/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-1f20dd12bdbe-normal-2611080105/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-1f20dd12bdbe-normal-2611080105/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-1f20dd12bdbe-normal-2611080105/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-2eea47b5bdf1-normal-2611042022/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-2eea47b5bdf1-normal-2611042022/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-2eea47b5bdf1-normal-2611042022/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-2eea47b5bdf1-normal-2611050055/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-2eea47b5bdf1-normal-2611050055/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-2eea47b5bdf1-normal-2611050055/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-2eea47b5bdf1-normal-2611050543/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-2eea47b5bdf1-normal-2611050543/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-2eea47b5bdf1-normal-2611050543/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-2eea47b5bdf1-normal-2611050631/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-2eea47b5bdf1-normal-2611050631/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-2eea47b5bdf1-normal-2611050631/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-3d936f3a4d63-normal-2611110213/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-3d936f3a4d63-normal-2611110213/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-3d936f3a4d63-normal-2611110213/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-3ee4421357dd-normal-2611102211/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-3ee4421357dd-normal-2611102211/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-3ee4421357dd-normal-2611102211/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-4ea71ddb5b7b-normal-2611060504/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-4ea71ddb5b7b-normal-2611060504/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-4ea71ddb5b7b-normal-2611060504/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-5616c7634dd3-normal-2611141534/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-5616c7634dd3-normal-2611141534/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-5616c7634dd3-normal-2611142140/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-5616c7634dd3-normal-2611142140/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-5616c7634dd3-normal-2611142140/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-5d200ce59049-normal-2611041631/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-5d200ce59049-normal-2611041631/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-5d200ce59049-normal-2611041631/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-6b14bad02848-normal-2611102013/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-6b14bad02848-normal-2611102013/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-7424e147c708-normal-2611031708/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-7424e147c708-normal-2611031708/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-7424e147c708-normal-2611031708/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-7b7e563aa79b-normal-2610302028/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-7e610388f0c8-normal-2611030319/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-7e610388f0c8-normal-2611030319/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-7e610388f0c8-normal-2611030319/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-89875a92532c-normal-2611150442/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-89875a92532c-normal-2611150442/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-89875a92532c-normal-2611150442/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-8c94ee774c5c-normal-2611102235/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-8c94ee774c5c-normal-2611102235/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-8c94ee774c5c-normal-2611102235/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-90d3543f42c0-normal-2611102140/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-90d3543f42c0-normal-2611102140/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-90d3543f42c0-normal-2611102140/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-969f008d6a78-normal-2611110248/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-969f008d6a78-normal-2611110248/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-969f008d6a78-normal-2611110248/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-9d57a91d828c-normal-2611091733/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-9d57a91d828c-normal-2611091733/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-9d57a91d828c-normal-2611091733/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-9d57a91d828c-normal-2611091812/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-9d57a91d828c-normal-2611091812/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-9d57a91d828c-normal-2611091812/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-a7bacfec01d2-normal-2611110230/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-a7bacfec01d2-normal-2611110230/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-a7bacfec01d2-normal-2611110230/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-b7deae29754c-normal-2611101805/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-b7deae29754c-normal-2611101805/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-b7deae29754c-normal-2611101805/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-ba7be6d3b48b-timing-2611090534/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-ba7be6d3b48b-timing-2611090534/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-ba7be6d3b48b-timing-2611090534/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-bde103b029d0-normal-2611141524/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-bde103b029d0-normal-2611141524/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-bde103b029d0-normal-2611141524/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-c362ec47bad5-normal-2611110154/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-c362ec47bad5-normal-2611110154/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-c362ec47bad5-normal-2611110154/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-c58d7b459d7e-timing-2611091632/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-c58d7b459d7e-timing-2611091632/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-c58d7b459d7e-timing-2611091632/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-c623601706bd-normal-2611110905/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-c623601706bd-normal-2611110905/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-c623601706bd-normal-2611110905/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-cb763fbd09cf-timing-2611091035/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-cb763fbd09cf-timing-2611091035/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-cb763fbd09cf-timing-2611091035/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-cfdbdf650b19-normal-2611102020/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-cfdbdf650b19-normal-2611102020/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-cfdbdf650b19-normal-2611102020/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-d192180f9305-normal-2611030652/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-d192180f9305-normal-2611030652/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-d192180f9305-normal-2611030652/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-e311d11b5b90-normal-2611041720/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-e311d11b5b90-normal-2611041720/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-e311d11b5b90-normal-2611041720/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-e311d11b5b90-normal-2611041855/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-e311d11b5b90-normal-2611041855/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-e311d11b5b90-normal-2611041855/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-eb2a7a7eb35a-normal-2611022154/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-eb2a7a7eb35a-normal-2611022154/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-eb2a7a7eb35a-normal-2611022159/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-eb2a7a7eb35a-normal-2611022159/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-eb2a7a7eb35a-normal-2611022205/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-eb2a7a7eb35a-normal-2611022205/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-eb2a7a7eb35a-normal-2611022205/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-f02a2937198d-normal-2611081942/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-f02a2937198d-normal-2611081942/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-f02a2937198d-normal-2611081942/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-f02a2937198d-normal-2611082035/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-f02a2937198d-normal-2611082035/exe",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/build-f02a2937198d-normal-2611082035/source/target",
+      "kind": "c5-staged-runtime"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/fixture-canon/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/fixture-canon/pre102/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/c5/groupfx/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/g2/cargo-target01",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/g3-integration/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/g3/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/g4/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/g4/production-probe/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/i7/cargo-target-final",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/i8/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/i8/task60/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/steroids-60fps-design-20261025/p53/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/task95-groupfx/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/task96-groupfx/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/task97-ws/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/task99-rgba/cargo-target",
+      "kind": "cargo-cache"
+    },
+    {
+      "root": "repo",
+      "relative": "target/tmp",
+      "kind": "obsolete-build-output"
+    },
+    {
+      "root": "repo",
+      "relative": "target/x86_64-pc-windows-msvc",
+      "kind": "obsolete-build-output"
+    }
+  ]
+}

@@ -786,6 +786,132 @@
       "root": "repo",
       "relative": "target/x86_64-pc-windows-msvc",
       "kind": "obsolete-build-output"
+    },
+    {
+      "root": "dev",
+      "relative": "synapserack-download",
+      "kind": "obsolete-downloaded-installer",
+      "bytes": 1544597166
+    },
+    {
+      "root": "dev",
+      "relative": "ndi-sdk-download",
+      "kind": "obsolete-downloaded-installer",
+      "bytes": 41608832
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/fx-perf-2026-10-22/native/03c6c891-16fe-436b-8208-fc295fda0ba8/bin-workspace",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 339359744
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/fx-perf-2026-10-22/native/31018a1c-21b3-4503-bed4-1130cc00db24/bin-recoveryfix",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 339400192
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/fx-perf-2026-10-22/native/6281a662-d969-45c2-9adc-3de1018d05c2/buffered-archive/bin",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 339380736
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/fx-perf-2026-10-22/native/88baa1b5-514c-47d4-8626-21b0729a59e5/trace-archive/bin",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 339372032
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/fx-perf-2026-10-22/native/aa0ed288-4228-4c0e-9879-805cb30f8a5e/baseline-runtime",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 339359744
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/fx-perf-2026-10-22/native/aa0ed288-4228-4c0e-9879-805cb30f8a5e/candidate-runtime",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 339359744
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/fx-perf-2026-10-22/native/aa0ed288-4228-4c0e-9879-805cb30f8a5e/candidate-runtime-02",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 339360768
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/fx-perf-2026-10-22/native/aa0ed288-4228-4c0e-9879-805cb30f8a5e/original-runtime",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 339359744
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/fx-perf-2026-10-22/native/ownership-pair-20261024-01/ui-standard-runtime",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 339359744
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/fx-perf-2026-10-22/native/ownership-pair-20261024-root02/ui-standard-runtime",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 339359744
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/fx-perf-2026-10-22/native/ownership-pair-20261024-root03/ui-standard-runtime",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 339359744
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/fx-perf-2026-10-22/native/ownership-repeat-20261022/ui-standard-runtime",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 339359744
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/native-frame-attribution-20261025/instrumented-runtime",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 339589632
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/native-frame-attribution-20261025/isolated-runtime-before",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 339451392
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/native-frame-attribution-20261025/env02/instrumented-runtime",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 339552768
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/ui-single-row-20261022/runtime-qa-02",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 339359744
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/ui-single-row-20261022/runtime-qa-03",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 339359744
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/ui-single-row-20261022/runtime-standard-01",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 339359744
+    },
+    {
+      "root": "repo",
+      "relative": "target/qa/task54-release-notices/normal-runtime-before",
+      "kind": "obsolete-staged-runtime",
+      "bytes": 264685056
     }
   ]
 }

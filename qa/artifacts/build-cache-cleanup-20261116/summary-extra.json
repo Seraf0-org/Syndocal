@@ -1,0 +1,16 @@
+{
+  "base": "052b1c30c47832379bae809f8f01dcc1edae8c6a",
+  "operations": 45,
+  "deleted_targets": 44,
+  "pruned_targets": 1,
+  "logical_bytes_removed": 15266393026,
+  "distinct_file_bytes_removed": 14732841896,
+  "free_before_bytes": 475655675904,
+  "free_after_bytes": 490422026240,
+  "safety_test_cases_passed": 36,
+  "original_protected_sha256_matches": 411,
+  "additional_runtime_sha256_matches": 22,
+  "source_snapshots_preserved": 39,
+  "manifest_sha256": "0B59D0EBA25946C1666009DC37ED8B931C74913E6838D8C48992885A276137D1",
+  "observed_free_space_gain_bytes": 14766350336
+}

@@ -59,19 +59,14 @@
   },
   {
     "root": "target/qa",
-    "logical_bytes": 44171458649,
-    "files": 615770,
+    "logical_bytes": 38573824418,
+    "files": 611380,
     "links_not_followed": 483,
     "largest_children": [
       {
         "name": "steroids-60fps-design-20261025",
-        "logical_bytes": 26842402207,
-        "files": 473314
-      },
-      {
-        "name": "browser-profiles",
-        "logical_bytes": 1552793271,
-        "files": 4351
+        "logical_bytes": 22797561247,
+        "files": 473275
       },
       {
         "name": "task99-rgba",
@@ -112,29 +107,29 @@
         "name": "ffmpeg-selfbuild-20261027",
         "logical_bytes": 558675512,
         "files": 7006
+      },
+      {
+        "name": "ui-density-audit-20261026",
+        "logical_bytes": 536587840,
+        "files": 7531
       }
     ]
   },
   {
     "root": "target/release",
-    "logical_bytes": 10493215643,
-    "files": 16476,
+    "logical_bytes": 824456848,
+    "files": 42,
     "links_not_followed": 0,
     "largest_children": [
-      {
-        "name": "deps",
-        "logical_bytes": 8593884501,
-        "files": 3878
-      },
-      {
-        "name": "build",
-        "logical_bytes": 1151259859,
-        "files": 6258
-      },
       {
         "name": "bundle",
         "logical_bytes": 409256100,
         "files": 4
+      },
+      {
+        "name": "deps",
+        "logical_bytes": 102982656,
+        "files": 2
       },
       {
         "name": "avcodec-62.dll",
@@ -162,13 +157,18 @@
         "files": 1
       },
       {
-        "name": "examples",
-        "logical_bytes": 24123190,
-        "files": 14
-      },
-      {
         "name": "avformat-62.dll",
         "logical_bytes": 19531264,
+        "files": 1
+      },
+      {
+        "name": "swscale-9.dll",
+        "logical_bytes": 12900864,
+        "files": 1
+      },
+      {
+        "name": "msi-extension-policy-tests.pdb",
+        "logical_bytes": 6320128,
         "files": 1
       }
     ]

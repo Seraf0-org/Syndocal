@@ -1,0 +1,165 @@
+import { Show } from "solid-js";
+import { WorkspacePaneHeader } from "./WorkspacePaneHeader";
+
+export interface ControlBothPanelProps {
+  activeCueId: number | null;
+  /** `null` when no cue is active; the panel supplies the localised words. */
+  activeCueLabel: string | null;
+  nextCueLabel: string | null;
+  cueCount: number;
+  timelinePlaying: boolean;
+  timecode: string;
+  lightingMaster: number;
+  videoMaster: number;
+  blackout: boolean;
+  videoBlackout: boolean;
+  enabledDmxOutputCount: number;
+  dmxOutputCount: number;
+  enabledVideoOutputCount: number;
+  videoOutputCount: number;
+  previewLabel: string | null;
+  /** Already a readable, translatable status phrase (never a status code). */
+  previewStatus: string;
+  programLabel: string | null;
+  programStatus: string;
+  clipCount: number;
+  selectedClipLabel: string | null;
+  recordingLabel: string;
+  onOpenLighting: () => void;
+  onOpenVideo: () => void;
+  onBack: () => void;
+  onGo: () => void;
+  onRelease: () => void;
+  onSetLightingMaster: (level: number) => void | Promise<void>;
+  onSetVideoMaster: (level: number) => void | Promise<void>;
+  onSetBlackout: (enabled: boolean) => void | Promise<void>;
+  onSetVideoBlackout: (enabled: boolean) => void | Promise<void>;
+  onSetAllBlackout: (enabled: boolean) => void | Promise<void>;
+}
+
+const percent = (value: number) => `${Math.round(value * 100)}%`;
+
+export function ControlBothPanel(props: ControlBothPanelProps) {
+  return (
+    <section
+      id="control-domain-panel-both"
+      role="tabpanel"
+      aria-labelledby="control-domain-both"
+      class="panel controlBothPanel controlPanel"
+      data-workspace-pane="upper"
+    >
+      <WorkspacePaneHeader
+        title="Both"
+        titleId="control-both-title"
+        context="Lighting + Video"
+        tools={<>
+          <button type="button" data-control-both-open="lighting" onClick={props.onOpenLighting}>Open Lighting</button>
+          <button type="button" data-control-both-open="video" onClick={props.onOpenVideo}>Open Video</button>
+        </>}
+      />
+
+      <div class="controlBothGrid">
+        <section class="controlBothDomainCard controlBothLightingCard" aria-label="Lighting live controls">
+          <header class="controlBothCardHeader">
+            <div>
+              <span class="uiMicroLabel">LIGHTING</span>
+              <strong>Live cue</strong>
+            </div>
+            <span class="controlBothTransportState" data-both-transport={props.timelinePlaying ? "playing" : "stopped"}>
+              {props.timelinePlaying ? "PLAYING" : "STOPPED"}
+            </span>
+          </header>
+          <dl class="controlBothCueReadout">
+            <div>
+              <dt>Current</dt>
+              <dd data-both-current-cue>
+                <Show when={props.activeCueLabel} fallback="None">{(label) => <span data-no-localize>{label()}</span>}</Show>
+              </dd>
+            </div>
+            <div>
+              <dt>Next</dt>
+              <dd data-both-next-cue>
+                <Show when={props.nextCueLabel} fallback="No cue">{(label) => <span data-no-localize>{label()}</span>}</Show>
+              </dd>
+            </div>
+          </dl>
+          <div class="controlBothActionRow" aria-label="Cue actions">
+            <button type="button" disabled={props.cueCount === 0} onClick={props.onBack}>Back</button>
+            <button type="button" class="primary" disabled={props.cueCount === 0} onClick={props.onGo}>GO</button>
+            <button type="button" disabled={props.activeCueId === null} onClick={props.onRelease}>Release</button>
+          </div>
+          <label class="controlBothMasterControl">
+            <span>Lighting Master</span>
+            <output>{percent(props.lightingMaster)}</output>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={props.lightingMaster}
+              aria-label="Lighting Master"
+              onChange={(event) => void props.onSetLightingMaster(Number(event.currentTarget.value))}
+            />
+          </label>
+        </section>
+
+        <section class="controlBothDomainCard controlBothVideoCard" aria-label="Video live controls">
+          <header class="controlBothCardHeader">
+            <div>
+              <span class="uiMicroLabel">VIDEO</span>
+              <strong>Live outputs</strong>
+            </div>
+          </header>
+          <div class="controlBothMonitorReadout">
+            <div data-both-monitor="preview">
+              <span>PREVIEW</span>
+              <strong>
+                <Show when={props.previewLabel} fallback="No clip staged">{(label) => <span data-no-localize>{label()}</span>}</Show>
+              </strong>
+              <small>{props.previewStatus}</small>
+            </div>
+            <div data-both-monitor="program">
+              <span>PROGRAM</span>
+              <strong>
+                <Show when={props.programLabel} fallback="No output selected">{(label) => <span data-no-localize>{label()}</span>}</Show>
+              </strong>
+              <small>{props.programStatus}</small>
+            </div>
+          </div>
+          <label class="controlBothMasterControl">
+            <span>Video Master</span>
+            <output>{percent(props.videoMaster)}</output>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={props.videoMaster}
+              aria-label="Video Master"
+              onChange={(event) => void props.onSetVideoMaster(Number(event.currentTarget.value))}
+            />
+          </label>
+          <div class="controlBothVideoTruth" data-both-video-truth>
+            <div><span>Clip Grid</span><strong>{props.clipCount} clip(s)</strong></div>
+            <div>
+              <span>Selected</span>
+              <strong>
+                <Show when={props.selectedClipLabel} fallback="None">{(label) => <span data-no-localize>{label()}</span>}</Show>
+              </strong>
+            </div>
+            <details class="controlBothRecordingDetail">
+              <summary>Recording</summary>
+              <strong>{props.recordingLabel}</strong>
+            </details>
+          </div>
+        </section>
+      </div>
+
+      <footer class="controlBothFooter" aria-label="Combined output truth">
+        <span>DMX {props.enabledDmxOutputCount}/{props.dmxOutputCount}</span>
+        <span>Video {props.enabledVideoOutputCount}/{props.videoOutputCount}</span>
+        <span>Timecode <b class="tabularNums" data-no-localize>{props.timecode}</b></span>
+      </footer>
+    </section>
+  );
+}

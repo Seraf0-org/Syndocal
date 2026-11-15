@@ -1,0 +1,255 @@
+name: macOS Installer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-installer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: macOS 12+ arm64 installer
+    runs-on: macos-15
+    timeout-minutes: 75
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install macOS video SDK
+        run: |
+          brew install ffmpeg llvm pkg-config xz
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+
+      - name: Cache macOS LGPL FFmpeg runtime
+        id: ffmpeg_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/ffmpeg-lgpl-8.1.2
+          key: ffmpeg-lgpl-8.1.2-macos-${{ runner.arch }}-v1
+
+      - name: Build macOS LGPL FFmpeg runtime
+        run: |
+          prefix="$HOME/ffmpeg-lgpl-8.1.2"
+          if [[ ! -f "$prefix/lib/libavcodec.dylib" ]]; then
+            archive="$RUNNER_TEMP/ffmpeg-8.1.2.tar.xz"
+            source_dir="$RUNNER_TEMP/ffmpeg-8.1.2"
+            curl --fail --location --retry 3 \
+              https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz \
+              --output "$archive"
+            tar -xf "$archive" -C "$RUNNER_TEMP"
+            cd "$source_dir"
+            MACOSX_DEPLOYMENT_TARGET=12.0 ./configure \
+              --prefix="$prefix" \
+              --disable-programs \
+              --disable-doc \
+              --disable-debug \
+              --disable-gpl \
+              --disable-autodetect \
+              --enable-version3 \
+              --disable-static \
+              --enable-shared \
+              --enable-pic \
+              --extra-cflags=-mmacosx-version-min=12.0 \
+              --extra-ldflags=-mmacosx-version-min=12.0
+            make -j3
+            make install
+          fi
+          echo "FFMPEG_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "MACOSX_DEPLOYMENT_TARGET=12.0" >> "$GITHUB_ENV"
+
+      - name: Save verified macOS LGPL FFmpeg runtime
+        if: steps.ffmpeg_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/ffmpeg-lgpl-8.1.2
+          key: ffmpeg-lgpl-8.1.2-macos-${{ runner.arch }}-v1
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.9.0
+          run_install: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.22.1
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt
+
+      - name: Install frontend dependencies
+        run: pnpm --dir app install --frozen-lockfile
+
+      - name: Test macOS artifact validator
+        run: |
+          mkdir -p target/qa/macos-artifact
+          set -o pipefail
+          node --test app/scripts/test-macos-artifact.mjs app/scripts/test-macos-artifact-report.mjs app/scripts/test-macos-artifact-acceptance.mjs app/scripts/test-macos-artifact-identity.mjs app/scripts/test-macos-artifact-workflow.mjs | tee target/qa/macos-artifact/tests.tap
+          node --test app/scripts/test-installer-lifecycle-policy.mjs tools/distribution/test-macos-cleanup.mjs | tee target/qa/macos-artifact/installer-lifecycle-tests.tap
+
+      - name: Prepare pinned Syphon framework
+        run: |
+          mkdir -p target/qa/macos-artifact
+          set -o pipefail
+          bash app/scripts/prepare-syphon.sh 2>&1 | tee target/qa/macos-artifact/syphon-framework-build.txt
+          cp target/syphon/source-receipt.txt target/qa/macos-artifact/syphon-source-receipt.txt
+
+      - name: Compile macOS Syphon and test input loopback and output policy
+        env:
+          RUSTFLAGS: -D warnings
+        run: |
+          set -o pipefail
+          cargo check --workspace --all-targets --locked 2>&1 | tee target/qa/macos-artifact/syphon-workspace-check.txt
+          cargo test -p syndocal --bin syndocal syphon_ --locked -- --test-threads=1 2>&1 | tee target/qa/macos-artifact/syphon-policy-tests.txt
+          cargo test -p syndocal --bin syndocal syphon_native::tests::syphon_native_client_loopback_preserves_dimensions_rgba_orientation_and_closes --locked -- --exact --test-threads=1 2>&1 | tee target/qa/macos-artifact/syphon-client-loopback-tests.txt
+          cargo test -p video --features syphon --lib syphon_input_and_output_follow_backend_availability --locked 2>&1 | tee target/qa/macos-artifact/syphon-input-availability-tests.txt
+          node app/scripts/check-syphon-output-ui.mjs | tee target/qa/macos-artifact/syphon-ui-tests.txt
+          node --test app/scripts/test-syphon-friend-kit.mjs | tee target/qa/macos-artifact/syphon-friend-kit-tests.tap
+          bash -n tools/distribution/collect-syphon-acceptance.command
+          bash -n tools/distribution/syphon-friend/allow-syndocal.command
+
+      - name: Test complete native application suite
+        env:
+          RUSTFLAGS: -D warnings
+        run: |
+          set -o pipefail
+          cargo test -p syndocal --bin syndocal --locked -- --test-threads=1 2>&1 | tee target/qa/macos-artifact/native-full-tests.txt
+
+      - name: Test macOS USB-DMX identity and output lifecycle
+        run: |
+          set -o pipefail
+          cargo test -p io serial_dmx --lib 2>&1 | tee target/qa/macos-artifact/usb-dmx-io-tests.txt
+          cargo test -p io macos_ftdi --lib 2>&1 | tee target/qa/macos-artifact/usb-dmx-ftdi-tests.txt
+          cargo test -p engine show_serial_dmx --lib 2>&1 | tee target/qa/macos-artifact/usb-dmx-engine-tests.txt
+          cargo test -p engine macos_show_serial_identity --lib 2>&1 | tee target/qa/macos-artifact/usb-dmx-engine-identity-tests.txt
+          cargo test -p syndocal --bin syndocal serial_dmx_machine 2>&1 | tee target/qa/macos-artifact/usb-dmx-binding-tests.txt
+          cargo test -p syndocal --bin syndocal serial_show_dmx_route_tests 2>&1 | tee target/qa/macos-artifact/usb-dmx-route-tests.txt
+
+          cargo test -p syndocal --bin syndocal extensions::tests --locked 2>&1 | tee target/qa/macos-artifact/extensions-tests.txt
+          cargo test -p syndocal --bin syndocal midi_fader_input::tests --locked 2>&1 | tee target/qa/macos-artifact/midi-fader-input-tests.txt
+          cargo test -p syndocal --bin syndocal output_managed_route_completion_tests --locked 2>&1 | tee target/qa/macos-artifact/managed-route-completion-tests.txt
+          cargo test -p engine midi_scene_toggle --lib --locked 2>&1 | tee target/qa/macos-artifact/midi-scene-toggle-tests.txt
+          cargo test -p engine live_fader_values_never_rewrite --lib --locked 2>&1 | tee target/qa/macos-artifact/live-scene-tests.txt
+          node app/scripts/check-midi-fader-input.mjs
+          node app/scripts/check-scene-edit-write-barrier.mjs
+          cargo test -p syndocal --bin syndocal output_control_request_identity --locked 2>&1 | tee target/qa/macos-artifact/output-request-identity-tests.txt
+          cargo test -p syndocal --bin syndocal output_lease_receipt_retention --locked 2>&1 | tee target/qa/macos-artifact/output-receipt-retention-tests.txt
+
+          cargo test -p engine fixture_repatch --lib --locked 2>&1 | tee target/qa/macos-artifact/fixture-repatch-engine-tests.txt
+          cargo test -p syndocal --bin syndocal continuous_fixture_fader --locked 2>&1 | tee target/qa/macos-artifact/fixture-fader-history-tests.txt
+          cargo test -p syndocal --bin syndocal fixture_repatch --locked 2>&1 | tee target/qa/macos-artifact/fixture-repatch-native-tests.txt
+          cargo test -p syndocal --bin syndocal every_outer_ticketed_handler_is_synchronous --locked 2>&1 | tee target/qa/macos-artifact/fixture-publication-admission-tests.txt
+
+      - name: Test MIDI Learn and new project output reset
+        run: |
+          set -o pipefail
+          cargo test -p io learn_wait_tests --locked 2>&1 | tee target/qa/macos-artifact/midi-learn-wait-tests.txt
+          cargo test -p io extracts_learned_control_from_midi_message --locked 2>&1 | tee target/qa/macos-artifact/midi-learn-parser-tests.txt
+          cargo test -p syndocal --bin syndocal new_empty_project_clears_retirement_blackout_without_enabling_outputs --locked 2>&1 | tee target/qa/macos-artifact/new-project-output-reset-tests.txt
+          cargo test -p syndocal --bin syndocal output_control_allocator_advances_past_admitted_rejected_requests --locked 2>&1 | tee target/qa/macos-artifact/output-admitted-request-tests.txt
+          cargo test -p syndocal --bin syndocal midi_feedback_route_uses_the_narrow_engine_reader --locked 2>&1 | tee target/qa/macos-artifact/midi-learn-admission-tests.txt
+          cargo test -p syndocal --bin syndocal native_danger_confirmation_gate_is_exact_and_terminal_replay_is_dialog_free --locked 2>&1 | tee target/qa/macos-artifact/output-blackout-consent-tests.txt
+          pnpm --dir app run check:midi-learn
+          pnpm --dir app run check:project-mapping-cas
+
+      - name: Test network DMX routes and USB coexistence
+        run: |
+          set -o pipefail
+          cargo test -p protocol network_dmx --lib --locked 2>&1 | tee target/qa/macos-artifact/network-dmx-protocol-tests.txt
+          cargo test -p engine network_dmx_route_tests --lib --locked 2>&1 | tee target/qa/macos-artifact/network-dmx-engine-tests.txt
+          cargo test -p engine configured_network_and_usb --lib --locked 2>&1 | tee target/qa/macos-artifact/network-dmx-usb-tests.txt
+          cargo test -p syndocal --bin syndocal control_plane::tests --locked 2>&1 | tee target/qa/macos-artifact/network-dmx-admission-tests.txt
+          cargo test -p syndocal --bin syndocal synchronous_project_runtime_routes_hold_the_identity_fence_through_dispatch --locked 2>&1 | tee target/qa/macos-artifact/network-dmx-dispatch-tests.txt
+          node app/scripts/check-tauri-admission-inventory.mjs
+
+      - name: Build macOS application bundle
+        env:
+          RUSTFLAGS: -D warnings
+        run: pnpm --dir app tauri build --ci --bundles app
+
+      - name: Bundle macOS FFmpeg runtime and create DMG
+        run: |
+          bash app/scripts/bundle-macos-runtime.sh \
+            target/release/bundle/macos/Syndocal.app \
+            target/release/bundle/dmg
+
+      - name: Verify bundled Syphon framework and notices
+        run: |
+          app_path=target/release/bundle/macos/Syndocal.app
+          test -f "$app_path/Contents/Frameworks/Syphon.framework/Syphon"
+          test -f "$app_path/Contents/Frameworks/Syphon.framework/Resources/default.metallib"
+          test -f "$app_path/Contents/Resources/licenses/Syphon-BSD.txt"
+          otool -L "$app_path/Contents/MacOS/syndocal" | grep -F '@rpath/Syphon.framework/'
+          codesign --verify --deep --strict "$app_path"
+
+      - name: Validate application extracted from final DMG
+        id: validate
+        run: |
+          node app/scripts/check-macos-artifact.mjs \
+            --dmg-dir target/release/bundle/dmg \
+            --report target/qa/macos-artifact/report.json
+
+      - name: Verify final DMG evidence before upload
+        id: acceptance
+        if: ${{ success() && !cancelled() && steps.validate.outcome == 'success' }}
+        env:
+          MACOS_VALIDATION_OUTCOME: ${{ steps.validate.outcome }}
+        run: |
+          node app/scripts/macos-artifact-acceptance.mjs \
+            --dmg-dir target/release/bundle/dmg \
+            --report target/qa/macos-artifact/report.json
+
+      - name: Build selectable macOS installer
+        run: bash app/scripts/build-macos-installer.sh target/release/bundle/macos/Syndocal.app target/release/bundle/pkg
+
+      - name: Test actual macOS installer choices, updates and removal
+        id: pkg_lifecycle
+        run: node app/scripts/check-macos-installer.mjs target/release/bundle/pkg/Syndocal_1.2.0-rc.1_arm64.pkg target/qa/macos-artifact/installer-lifecycle.json target/release/bundle/macos/Syndocal.app
+
+      - name: Package remote friend Syphon acceptance kit
+        run: node app/scripts/pack-syphon-friend-kit.mjs
+
+      - name: Upload macOS validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: syndocal-macos-evidence-${{ github.sha }}-${{ github.run_attempt }}
+          path: target/qa/macos-artifact/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload remote friend Syphon acceptance kit
+        if: ${{ success() && !cancelled() && steps.validate.outcome == 'success' && steps.acceptance.outcome == 'success' && steps.pkg_lifecycle.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: syndocal-macos-friend-syphon-kit-${{ github.sha }}
+          path: |
+            target/qa/macos-artifact/syndocal-macos-friend-syphon-kit-*.zip
+            target/qa/macos-artifact/syndocal-macos-friend-syphon-kit-*.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload macOS installer
+        if: ${{ success() && !cancelled() && steps.validate.outcome == 'success' && steps.acceptance.outcome == 'success' && steps.pkg_lifecycle.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: syndocal-macos-${{ runner.arch }}-${{ github.sha }}
+          path: |
+            target/release/bundle/pkg/*.pkg
+            target/release/bundle/pkg/*.pkg.sha256
+            tools/distribution/Remove-Syndocal.command
+          if-no-files-found: error
+          retention-days: 7

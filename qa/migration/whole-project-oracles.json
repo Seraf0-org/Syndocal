@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "phase1_source": "samples/phase1-mini-show.sdc",
+  "phase1_source_sha256_lf": "f53c2593b9ec687fec97b994e1256476d9f0f4ffe600131be461d83fa4f7d86d",
+  "phase1_source_scalar_leaves": 630,
+  "phase1_expected_scalar_leaves": 858,
+  "empty_expected_scalar_leaves": 118,
+  "expected_origin": "Authored from legacy fixture and explicit v1 defaults/normalization; no candidate writer output",
+  "decimal_policy": "Legacy decimal fields are protocol f32; IEEE-754 single image widened to JSON f64; integer IDs untouched"
+}

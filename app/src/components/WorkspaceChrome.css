@@ -1,0 +1,153 @@
+/* Navigation and show controls share one row at every supported width.
+   BPM and Tap stay in that row; Tools owns tempo sync and clock details.
+   Narrow windows make room by eliding, then dropping, the project name. */
+.workspaceChrome:has(> .topbarOrganized) { overflow: visible; }
+.topbar.topbarOrganized {
+  grid-template-areas: "navigation project controls window";
+  grid-template-columns: max-content minmax(0, 1fr) max-content 120px;
+  grid-template-rows: minmax(40px, auto);
+  gap: 8px;
+  overflow: visible;
+}
+
+.topbarOrganized > .topbarLeft { grid-area: navigation; }
+.topbarOrganized > .topbarProject { grid-area: project; }
+.topbarOrganized > .status { grid-area: controls; }
+.topbarOrganized > .windowControls { grid-area: window; }
+.topbarOrganized > .topbarLeft,
+.topbarOrganized > .topbarProject,
+.topbarOrganized > .status { overflow: visible; }
+.topbarOrganized > .topbarProject { justify-content: flex-start; }
+.topbarOrganized > .status { width: auto; flex-wrap: nowrap; gap: 8px; }
+.topbarTempoHost { display: contents; }
+/* Learn choices carry their names next to the icons (sizes unchanged or larger). */
+.topbarToolsPopover .topbarLearnCluster { flex-wrap: wrap; height: auto; gap: 4px; }
+.topbarOrganized .status .topbarLearnCluster > .topbarLearnButton {
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: auto;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+.topbarLearnButton > svg { flex: 0 0 auto; }
+.topbarOrganized .topbarTempoCluster {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+.topbarOrganized .topbarTransportCluster > [data-global-operator-action="dmx-blackout"] { margin-left: 8px; }
+/* Standby: the blackout keys stay in place and focusable but read as unavailable. */
+.app .topbarTransportCluster > .topbarSafetyButton[data-blackout-blocked]:not(.engaged) { border-color: var(--theme-disabled-line); background-color: var(--theme-disabled-bg); background-image: none; color: var(--theme-disabled-text); }
+
+/* Read-only clock context beside BPM and Tap: source over beat lights + sync. */
+.topbarTempoSync {
+  display: grid;
+  flex: 0 0 auto;
+  grid-template-rows: auto auto;
+  align-content: center;
+  gap: 2px;
+  width: max-content;
+  min-width: 106px;
+  min-height: 40px;
+  padding: 0 4px;
+  color: var(--theme-muted);
+  font-size: var(--fs-text);
+  line-height: 1.4;
+}
+.topbarSyncSource { white-space: nowrap; }
+.topbarSyncRow { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.topbarBeats { display: inline-flex; flex: 0 0 auto; gap: 2px; }
+.topbarBeats i { width: 8px; height: 8px; box-sizing: border-box; border: 1px solid var(--theme-line-strong); border-radius: 0; background: var(--theme-inset); }
+.topbarBeats i.lit { border-color: var(--theme-ok); background: var(--theme-ok); box-shadow: 0 0 0 2px var(--theme-line); }
+.topbarSyncStatus { flex: 0 0 auto; white-space: nowrap; font-size: var(--fs-text); font-weight: 700; letter-spacing: 0; }
+.topbarTempoSync[data-topbar-sync-state="LOCK"] .topbarSyncStatus { color: var(--theme-ok); }
+.topbarTempoSync[data-topbar-sync-state="STALE"] .topbarSyncStatus { color: var(--theme-warn); }
+.topbarOrganized .topbarShowClockStatus {
+  max-width: none;
+  overflow: visible;
+}
+.topbarOrganized .topbarShowClockStatus > strong { overflow: visible; }
+
+.topbarTools { position: relative; flex: 0 0 auto; }
+.topbarTools > summary {
+  display: grid;
+  min-width: 52px;
+  height: 40px;
+  place-items: center;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-control);
+  padding: 0 8px;
+  color: inherit;
+  font-size: var(--fs-control);
+  cursor: pointer;
+  list-style: none;
+}
+.topbarTools > summary::-webkit-details-marker { display: none; }
+.topbarTools[open] > summary { background: var(--ui-surface-panel); }
+.topbarTools.active > summary { border-color: var(--theme-selected); color: var(--theme-text); }
+
+.topbarToolsPopover {
+  position: absolute;
+  z-index: 1200;
+  top: calc(100% + 5px);
+  right: 0;
+  display: grid;
+  gap: 12px;
+  min-width: 250px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-control);
+  background: var(--ui-surface-panel);
+  padding: 12px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 40%);
+  max-height: calc(100vh / var(--ui-scale, 1) - 60px);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.topbarToolsPopover > section { display: grid; gap: 6px; }
+.topbarToolsPopover > section > strong { color: var(--theme-muted); font-size: var(--fs-text); font-weight: 400; }
+.topbarWorkspaceMenu .workspaceOperationsButton { width: 100%; text-align: left; }
+/* While locked, the lock state and Unlock sit in the header beside the disabled menu. */
+.topbarLockedOperations { display: flex; align-items: center; min-width: 0; }
+.topbarLockedOperations .workspaceOperationsMenu { margin-left: 0; }
+.topbarLockedOperations .workspaceOperationsButton { width: auto; white-space: nowrap; }
+.topbarOrganized .topbarProject > span { overflow: hidden; text-overflow: ellipsis; }
+
+.topbarOrganized > .topbarProject > span { display: block; }
+.topbarOrganized > .topbarProject { container: topbar-project / inline-size; }
+@container topbar-project (max-width: 150px) {
+  .topbarOrganized > .topbarProject > span { display: none; }
+}
+@container topbar-project (max-width: 56px) {
+  .topbarOrganized > .topbarProject > strong { display: none; }
+}
+.workspaceChrome > .controlLearnPrompt {
+  position: static;
+  justify-self: end;
+}
+
+/* Condensed label typography retains the existing label and hit-target sizes. */
+.topbarOrganized :is(.workspaceTab, .workspaceOperationsButton, .topbarTools > summary) {
+  font-family: var(--theme-font-label);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.topbarToolsPopover > section > strong {
+  font-family: var(--theme-font-ui);
+  font-weight: 400;
+}
+
+/* The Learn prompt ignores the pointer so it never covers a target; its one
+   control (MIDI: click assigns Audio / beat division) takes it back. */
+.controlLearnPrompt .controlLearnAssignToggle {
+  flex: 0 0 auto;
+  pointer-events: auto;
+}
+.controlLearnPrompt .controlLearnAssignToggle[aria-pressed="true"] {
+  border-color: #f2b8f8;
+  background: #57365c;
+  color: #fff;
+}

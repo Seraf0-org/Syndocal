@@ -1,0 +1,78 @@
+.timelineOutputPreview {
+  min-width: 0;
+  height: 100%;
+}
+
+.timelineOutputPreviewGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  grid-auto-rows: minmax(min(100cqh, 14rem), 1fr);
+  height: 100%;
+  gap: 0.75rem;
+}
+
+.timelineOutputPreviewCard {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.timelineOutputPreviewFrameArea {
+  min-width: 0;
+  min-height: 0;
+  container-type: size;
+  display: grid;
+  place-items: start center;
+}
+
+.timelineOutputPreviewCard header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.45rem;
+  overflow-wrap: anywhere;
+}
+
+.timelineOutputPreviewViewport {
+  display: grid;
+  place-items: center;
+  justify-self: center;
+  width: min(100%, calc(100cqh * var(--output-aspect)));
+  max-height: 100%;
+  min-width: 0;
+  overflow: hidden;
+  background: #000;
+  border: 1px solid var(--theme-line);
+  box-sizing: border-box;
+}
+
+.timelineOutputPreviewViewport canvas {
+  grid-area: 1 / 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.timelineOutputPreviewViewport > span {
+  grid-area: 1 / 1;
+  padding: 0.75rem;
+}
+
+.timelineOutputPreviewError {
+  color: var(--theme-error);
+  overflow-wrap: anywhere;
+}
+
+#timeline-source-context-panel-video-preview {
+  min-height: 0;
+  overflow: hidden auto;
+  container-type: size;
+}
+
+.layoutSharedWorkspace.layoutControl.controlModeLive .controlContextPane
+  > .timelineExternalSourceShelf:has(> #timeline-source-context-panel-video-preview) {
+  height: 100%;
+  align-self: stretch;
+}

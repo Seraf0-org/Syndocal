@@ -1,0 +1,322 @@
+/* A narrow Inspector gives the selected stage the full width. Both views stay
+ * mounted, and one body owns scrolling at every width. Controls keep 44px targets. */
+.videoPerformQuickFx {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 4px;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  padding: 4px;
+  box-sizing: border-box;
+  background: var(--theme-panel);
+  font-size: 14px;
+}
+
+.videoPerformQuickFxHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.videoPerformQuickFxLayer {
+  display: flex;
+  align-items: center;
+  flex: 1 1 0;
+  gap: 8px;
+  min-width: 0;
+}
+
+.videoPerformQuickFxLayerName {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 0 10px;
+  border: 1px solid var(--theme-line-strong);
+  background: var(--theme-inset);
+  color: var(--theme-text);
+  font-weight: 400;
+  line-height: 30px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.videoPerformQuickFxCount {
+  flex: 0 0 auto;
+  color: var(--theme-muted);
+  white-space: nowrap;
+}
+
+.videoPerformQuickFxHeader > button {
+  flex: 0 0 auto;
+  padding-inline: 10px;
+  white-space: nowrap;
+}
+
+.videoPerformQuickFxBody {
+  display: grid;
+  grid-template-columns: minmax(196px, 1.1fr) minmax(0, 1fr);
+  grid-auto-rows: max-content;
+  gap: 6px;
+  min-width: 0;
+  min-height: 0;
+  align-content: start;
+  align-items: start;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+.videoPerformQuickFxChain {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  min-height: 0;
+  overflow: visible;
+}
+.videoPerformQuickFx[data-fx-auditioning="true"] { box-shadow: inset 0 0 0 2px var(--theme-preview); }
+.videoPerformQuickFxActions { display: flex; flex-wrap: wrap; gap: 4px; }
+.videoPerformQuickFxActions button { flex: 1 1 auto; }
+
+.videoPerformQuickFxStage {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: stretch;
+  min-width: 0;
+  height: 44px;
+  border: 1px solid var(--theme-line);
+  border-left: 4px solid var(--theme-accent);
+  background: var(--theme-raised);
+}
+
+/* Drag-and-drop reorder: the row is the drag source; Up and Down stay for the keyboard. */
+.videoPerformQuickFxStage[data-fx-draggable="true"] { cursor: grab; }
+.videoPerformQuickFxStage[data-fx-dragging="true"] { opacity: 0.55; }
+.videoPerformQuickFxStage[data-fx-drop="before"] { box-shadow: inset 0 3px 0 0 var(--theme-focus); }
+.videoPerformQuickFxStage[data-fx-drop="after"] { box-shadow: inset 0 -3px 0 0 var(--theme-focus); }
+
+.videoPerformQuickFxStage[data-fx-enabled="false"] {
+  border-left-color: var(--theme-line-strong);
+  background: var(--theme-inset);
+}
+
+.videoPerformQuickFxStage[data-fx-selected="true"] {
+  outline: 2px solid var(--theme-selected);
+  outline-offset: -2px;
+}
+
+.videoPerformQuickFxSelect {
+  display: flex;
+  flex: 1 1 0;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: var(--theme-text);
+  text-align: left;
+}
+
+.videoPerformQuickFxSelect > strong {
+  text-transform: none;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.videoPerformQuickFxNumber {
+  color: var(--theme-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.videoPerformQuickFxSwitch {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px;
+  border: 0;
+  border-left: 1px solid var(--theme-line);
+  background: transparent;
+  color: var(--theme-muted);
+  white-space: nowrap;
+}
+
+.videoPerformQuickFxKnob {
+  position: relative;
+  width: 30px;
+  height: 18px;
+  border: 1px solid var(--theme-line-strong);
+  background: var(--theme-inset);
+}
+
+.videoPerformQuickFxKnob::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  background: var(--theme-dim);
+}
+
+.videoPerformQuickFxSwitch.active { color: var(--theme-text); }
+
+.videoPerformQuickFxSwitch.active .videoPerformQuickFxKnob {
+  background: var(--theme-latched);
+  border-color: var(--theme-latched);
+}
+
+.videoPerformQuickFxSwitch.active .videoPerformQuickFxKnob::after {
+  left: 14px;
+  background: var(--theme-on-latched);
+}
+
+.videoPerformQuickFxParameters {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-auto-rows: min-content;
+  align-content: start;
+  gap: 4px 10px;
+  min-width: 0;
+  min-height: 0;
+  overflow: visible;
+  padding: 2px 6px;
+  border: 1px solid var(--theme-line);
+  background: var(--theme-inset);
+}
+
+.videoPerformQuickFxParameter {
+  display: grid;
+  grid-template-rows: 20px 44px;
+  align-items: center;
+  gap: 0;
+  min-width: 0;
+  margin: 0;
+  color: var(--theme-text);
+}
+
+.videoPerformQuickFxParameterHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  line-height: 20px;
+}
+
+.videoPerformQuickFxParameterHead > span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--theme-muted);
+  font-family: var(--theme-font-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.videoPerformQuickFxValue {
+  flex: 0 0 auto;
+  color: var(--theme-text);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.videoPerformQuickFx button,
+.videoPerformQuickFx select,
+.videoPerformQuickFx input {
+  min-height: 44px;
+  min-width: 44px;
+  margin: 0;
+  font: inherit;
+  box-sizing: border-box;
+}
+
+.videoPerformQuickFxParameter > input[type="range"],
+.videoPerformQuickFxParameter > select,
+.videoPerformQuickFxParameter > button,
+.videoPerformQuickFxParameter > input[type="color"] {
+  width: 100%;
+}
+
+.videoPerformQuickFxPoint {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+}
+
+.videoPerformQuickFxPoint input {
+  flex: 1 1 0;
+  width: 0;
+  min-width: 44px;
+  padding-inline: 2px;
+}
+
+.videoPerformQuickFx :focus-visible {
+  outline: 2px solid var(--theme-focus);
+  outline-offset: -2px;
+}
+
+.videoPerformQuickFx .emptyState,
+.videoPerformQuickFx .emptyHint {
+  align-self: center;
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 4px;
+  color: var(--theme-muted);
+}
+
+/* An empty layer offers its first effect from the Browser tab in place. */
+.videoPerformQuickFx .videoPerformQuickFxEmpty {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px 12px;
+}
+.videoPerformQuickFx .videoPerformQuickFxEmpty > p { margin: 0; }
+
+/* The global pressed/active button treatment is a latched block; the stage rows
+ * carry their state in the switch knob, the number and the row outline instead. */
+.app .videoPerformQuickFx .videoPerformQuickFxSelect,
+.app .videoPerformQuickFx .videoPerformQuickFxSelect[aria-pressed="true"] {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--theme-text);
+}
+.app .videoPerformQuickFx .videoPerformQuickFxSwitch,
+.app .videoPerformQuickFx .videoPerformQuickFxSwitch[aria-pressed="true"] {
+  border: 0;
+  border-left: 1px solid var(--theme-line);
+  background: transparent;
+  box-shadow: none;
+  color: var(--theme-muted);
+}
+.app .videoPerformQuickFx .videoPerformQuickFxSwitch.active { color: var(--theme-text); }
+.app .videoPerformQuickFx .videoPerformQuickFxSwitch:hover:not(:disabled),
+.app .videoPerformQuickFx .videoPerformQuickFxSelect:hover:not(:disabled) { background: var(--theme-key-hover); }
+
+/* A layer with no FX has nothing to parameterise: the message takes the whole tab. */
+.videoPerformQuickFxBody[data-fx-empty="true"] { grid-template-columns: minmax(0, 1fr); }
+.videoPerformQuickFxBody[data-fx-empty="true"] > .videoPerformQuickFxParameters { display: none; }
+
+.videoPerformQuickFx [hidden] { display: none !important; }
+.videoPerformQuickFxViews { display: flex; flex: 0 0 auto; gap: 4px; }
+.videoPerformQuickFxViews > button { padding-inline: 10px; white-space: nowrap; border: 1px solid var(--theme-line-strong); background: var(--theme-key); color: var(--theme-text); }
+.app .videoPerformQuickFxViews > button[aria-selected="true"], .videoPerformQuickFxViews > button[aria-selected="true"] { background: var(--theme-selected); border-color: var(--theme-selected); color: var(--theme-on-selected); }
+.videoPerformQuickFx .videoPerformQuickFxScope { flex: 0 0 auto; padding-inline: 6px; overflow-wrap: anywhere; font-weight: 700; color: var(--theme-on-program); border: 1px solid var(--theme-program); background-color: var(--theme-program); background-image: var(--theme-pattern-program, none); }
+.videoPerformQuickFxScope[data-perform-fx-scope="preview"] { color: var(--theme-on-preview); border-color: var(--theme-preview); background-color: var(--theme-preview); background-image: var(--theme-pattern-preview, none); }
+.videoPerformQuickFx[data-fx-compact="true"] .videoPerformQuickFxBody { grid-template-columns: minmax(0, 1fr); }
+.videoPerformQuickFxChainContext { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px; padding: 4px; overflow-wrap: anywhere; }
+.videoPerformQuickFxStages { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.videoPerformQuickFxStagePicker { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.videoPerformQuickFxStagePicker > select { flex: 1 1 0; width: 0; min-width: 44px; max-width: 100%; }
+.videoPerformQuickFxSafety { grid-column: 1 / -1; display: grid; gap: 6px; min-width: 0; }

@@ -1,0 +1,1045 @@
+import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
+import { VerticalFaderInput } from "./VerticalFaderInput";
+
+import {
+  createTouchControl,
+  effectiveTouchSurface,
+  nextTouchControlId,
+  nextTouchPageId,
+  touchControlPalette,
+  touchSurfaceGridColumns,
+  touchSurfaceGridRows,
+} from "../touchSurface";
+import type {
+  CueLiveDirection,
+  CueSummary,
+  EngineSnapshot,
+  TouchControlBinding,
+  TouchControlSummary,
+  TouchPageSummary,
+  TouchSurfaceSummary,
+} from "../types";
+import { authoredCueLiveModifier } from "../cueLiveModifier";
+import {
+  controlMappingTargetData,
+  controlMappingTargetsForTouchBinding,
+} from "../controlMappingLearn";
+import { CueLiveModifierStrip } from "./CueLiveModifierStrip";
+import { TouchCuePanel } from "./TouchCuePanel";
+import {
+  readTouchScenePanelPreference,
+  touchScenePanelColumns,
+  touchScenePanelOpen,
+  writeTouchScenePanelPreference,
+  type TouchScenePanelPreference,
+} from "../touchScenePanel";
+import type { FullBankAuthoritySnapshot } from "../bankAuthority";
+
+type TouchSurfaceMode = "edit" | "live";
+
+interface EditableTouchSurfaceProps {
+  /** The one App-owned Bank/Cue/Executor authority; never recompute a subset here. */
+  bankAuthority: FullBankAuthoritySnapshot;
+  snapshot: EngineSnapshot;
+  surface?: TouchSurfaceSummary;
+  /** Fixture groups with their member counts; the Default Desk shows the non-empty ones. */
+  groups?: ReadonlyArray<{ groupId: string; label: string; count: number }>;
+  selectedFixtureId?: number | null;
+  selectedGroupId?: string | null;
+  colorPalette?: readonly string[];
+  onSurfaceChange: (surface: TouchSurfaceSummary) => void | Promise<void>;
+  onTrigger: (binding: TouchControlBinding) => void | Promise<void>;
+  onValue: (binding: TouchControlBinding, value: number) => void | Promise<void>;
+  onColor: (binding: TouchControlBinding, color: string) => void | Promise<void>;
+  onXy: (binding: TouchControlBinding, x: number, y: number) => void | Promise<void>;
+  onReleaseCue?: (cueId: number) => void | Promise<void>;
+  onSetCueLiveModifier?: (
+    cueId: number,
+    speed: number,
+    size: number,
+    phase: number,
+    direction: CueLiveDirection,
+    segment: number,
+  ) => void | Promise<void>;
+  onClearCueLiveModifier?: (cueId: number) => void | Promise<void>;
+}
+
+interface TouchDragState {
+  pointerId: number;
+  control: TouchControlSummary;
+  startClientX: number;
+  startClientY: number;
+  resize: boolean;
+}
+
+const bindingOptions: ReadonlyArray<{ value: string; label: string }> = [
+  { value: "", label: "Unassigned" },
+  { value: "cue_previous", label: "Previous cue" },
+  { value: "cue_fade_pause", label: "Cue fade pause" },
+  { value: "cue", label: "Cue" },
+  { value: "blackout", label: "DMX Blackout" },
+  { value: "video_blackout", label: "Video Blackout" },
+  { value: "all_blackout", label: "All Blackout" },
+  { value: "fixture_attribute", label: "Fixture attribute" },
+  { value: "group_attribute", label: "Group attribute" },
+  { value: "feature_preset", label: "Imported feature preset" },
+  { value: "fixture_color", label: "Fixture color" },
+  { value: "group_color", label: "Group color" },
+  { value: "fixture_pan_tilt", label: "Fixture Pan/Tilt" },
+  { value: "group_pan_tilt", label: "Group Pan/Tilt" },
+  { value: "group_select", label: "Group select" },
+  { value: "group_submaster", label: "Group submaster" },
+  { value: "tap_tempo", label: "Tap tempo" },
+  { value: "selected_fixture_attribute", label: "Selected fixture attribute" },
+  { value: "selected_fixture_color", label: "Selected fixture color" },
+  { value: "selected_fixture_pan_tilt", label: "Selected fixture Pan/Tilt" },
+];
+
+const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
+
+const bindingKey = (binding: TouchControlBinding | null | undefined) => binding?.kind ?? "";
+
+const controlGridStyle = (control: TouchControlSummary) => ({
+  "grid-column": `${control.x + 1} / span ${control.w}`,
+  "grid-row": `${control.y + 1} / span ${control.h}`,
+});
+
+const groupIdsFromSnapshot = (snapshot: EngineSnapshot) =>
+  [...new Set(snapshot.fixtures.flatMap((fixture) => fixture.group_ids))].sort((left, right) =>
+    left.localeCompare(right),
+  );
+
+const attributesForFixture = (snapshot: EngineSnapshot, fixtureId: number) =>
+  snapshot.fixtures.find((fixture) => fixture.id === fixtureId)?.controls.map((control) => control.attribute) ?? [];
+
+const normalizedFixtureAttribute = (
+  snapshot: EngineSnapshot,
+  fixtureId: number,
+  attribute: string,
+) => {
+  const value = snapshot.fixtures
+    .find((fixture) => fixture.id === fixtureId)
+    ?.attribute_values.find((entry) => entry.attribute === attribute)?.value;
+  return value === undefined ? 0 : clamp01(value / 65_535);
+};
+
+export function EditableTouchSurface(props: EditableTouchSurfaceProps) {
+  const [mode, setMode] = createSignal<TouchSurfaceMode>("live");
+  const [selectedPageId, setSelectedPageId] = createSignal(1);
+  const [selectedControlId, setSelectedControlId] = createSignal<number | null>(null);
+  const [previewControl, setPreviewControl] = createSignal<TouchControlSummary | null>(null);
+  const [localValues, setLocalValues] = createSignal<Record<number, number>>({});
+  const [localXy, setLocalXy] = createSignal<Record<number, { x: number; y: number }>>({});
+  const [liveActivations, setLiveActivations] = createSignal<Record<number, boolean>>({});
+  const [cueBindingPending, setCueBindingPending] = createSignal(false);
+  const activeFlashCueByControl = new Map<number, number>();
+  let gridElement: HTMLDivElement | undefined;
+  let surfaceElement: HTMLElement | undefined;
+  let dragState: TouchDragState | null = null;
+  const [scenePanelPreference, setScenePanelPreference] =
+    createSignal<TouchScenePanelPreference>(readTouchScenePanelPreference());
+  const [scenePanelBox, setScenePanelBox] = createSignal<Record<string, string>>({});
+
+  const releaseFlashControl = (controlId: number) => {
+    const cueId = activeFlashCueByControl.get(controlId);
+    if (cueId === undefined) return;
+    activeFlashCueByControl.delete(controlId);
+    // This is the safety-lowering half of an activation already issued while
+    // the Cue was authoritative. It must survive a later authority fault.
+    void props.onReleaseCue?.(cueId);
+  };
+  const releaseAllFlashControls = () => {
+    for (const controlId of [...activeFlashCueByControl.keys()]) {
+      releaseFlashControl(controlId);
+    }
+  };
+
+  createEffect(() => {
+    if (mode() !== "live" || props.bankAuthority.issue !== null) {
+      releaseAllFlashControls();
+    }
+  });
+  onCleanup(releaseAllFlashControls);
+
+  const bankAuthorityAvailable = () => props.bankAuthority.issue === null;
+  const isCueTransportBinding = (binding: TouchControlBinding | null | undefined) =>
+    binding?.kind === "cue"
+    || binding?.kind === "cue_next"
+    || binding?.kind === "cue_previous"
+    || binding?.kind === "cue_fade_pause";
+  const cueBindingIsAuthoritative = (cueId: number) =>
+    bankAuthorityAvailable() && props.bankAuthority.cueById.has(cueId);
+  const touchBindingUnavailable = (binding: TouchControlBinding | null | undefined) => {
+    if (!binding) return false;
+    if (binding.kind === "cue") return !cueBindingIsAuthoritative(binding.cue_id);
+    return isCueTransportBinding(binding) && !bankAuthorityAvailable();
+  };
+  const surface = createMemo(() => effectiveTouchSurface(
+    props.surface,
+    (props.groups ?? [])
+      .filter((group) => group.count > 0)
+      .map((group) => ({ id: group.groupId, label: group.label })),
+  ));
+  const activePage = createMemo<TouchPageSummary | undefined>(() =>
+    surface().pages.find((page) => page.id === selectedPageId()) ?? surface().pages[0],
+  );
+  const selectedControl = createMemo(() =>
+    activePage()?.controls.find((control) => control.id === selectedControlId()),
+  );
+  const scenePanelOpen = () => mode() === "live" && touchScenePanelOpen(scenePanelPreference(), activePage());
+  const toggleScenePanel = () => {
+    const next = scenePanelOpen() ? "closed" : "open";
+    setScenePanelPreference(next);
+    writeTouchScenePanelPreference(next);
+  };
+  // The Scene panel covers exactly the last grid columns inside the grid's
+  // scrollport, so the grid keeps its tracks, scrollbar and hit targets.
+  const measureScenePanel = () => {
+    if (!gridElement || !surfaceElement) return;
+    const grid = gridElement.getBoundingClientRect();
+    const host = surfaceElement.getBoundingClientRect();
+    const style = getComputedStyle(gridElement);
+    const tracks = style.gridTemplateColumns.split(" ").map(parseFloat).filter(Number.isFinite);
+    const gap = parseFloat(style.columnGap) || 0;
+    const borderLeft = parseFloat(style.borderLeftWidth) || 0;
+    const borderTop = parseFloat(style.borderTopWidth) || 0;
+    const paddingLeft = parseFloat(style.paddingLeft) || 0;
+    const firstColumn = tracks.length - touchScenePanelColumns;
+    if (firstColumn <= 0) return;
+    // Rects include UI zoom; offsets and computed tracks are unzoomed CSS px.
+    const scale = host.width / Math.max(1, surfaceElement.offsetWidth);
+    const gridLeft = (grid.left - host.left) / scale + borderLeft;
+    const left = gridLeft + paddingLeft
+      + tracks.slice(0, firstColumn).reduce((sum, track) => sum + track, 0) + firstColumn * gap;
+    const right = gridLeft + gridElement.clientWidth;
+    setScenePanelBox({
+      "--touch-scene-top": `${(grid.top - host.top) / scale + borderTop}px`,
+      "--touch-scene-left": `${left}px`,
+      "--touch-scene-width": `${Math.max(0, right - left)}px`,
+      "--touch-scene-height": `${gridElement.clientHeight}px`,
+    });
+  };
+  createEffect(() => {
+    if (!scenePanelOpen() || !gridElement || !surfaceElement) return;
+    const observer = new ResizeObserver(measureScenePanel);
+    observer.observe(gridElement);
+    observer.observe(surfaceElement);
+    measureScenePanel();
+    onCleanup(() => observer.disconnect());
+  });
+  const groupIds = createMemo(() => groupIdsFromSnapshot(props.snapshot));
+
+  const persistSurface = (next: TouchSurfaceSummary) => {
+    void props.onSurfaceChange(next);
+  };
+
+  const updateActivePage = (update: (page: TouchPageSummary) => TouchPageSummary) => {
+    const page = activePage();
+    if (!page) return;
+    persistSurface({
+      pages: surface().pages.map((candidate) => (candidate.id === page.id ? update(candidate) : candidate)),
+    });
+  };
+
+  const updateControl = (nextControl: TouchControlSummary) => {
+    updateActivePage((page) => ({
+      ...page,
+      controls: page.controls.map((control) => (control.id === nextControl.id ? nextControl : control)),
+    }));
+  };
+
+  const addControl = (kind: TouchControlSummary["kind"]) => {
+    const page = activePage();
+    if (!page) return;
+    const id = nextTouchControlId(surface());
+    const index = page.controls.length;
+    const control = createTouchControl(
+      id,
+      kind,
+      Math.min(touchSurfaceGridColumns - 2, (index % 6) * 2),
+      Math.min(touchSurfaceGridRows - 2, Math.floor(index / 6) * 2),
+    );
+    setSelectedControlId(id);
+    updateActivePage((candidate) => ({ ...candidate, controls: [...candidate.controls, control] }));
+  };
+
+  const addPage = () => {
+    const id = nextTouchPageId(surface());
+    setSelectedPageId(id);
+    setSelectedControlId(null);
+    persistSurface({ pages: [...surface().pages, { id, label: `Page ${id}`, controls: [] }] });
+  };
+
+  const removePage = async () => {
+    const page = activePage();
+    if (!page || surface().pages.length <= 1) return;
+    const pages = surface().pages.filter((candidate) => candidate.id !== page.id);
+    setSelectedPageId(pages[0]?.id ?? 1);
+    setSelectedControlId(null);
+    persistSurface({ pages });
+  };
+
+  const removeSelectedControl = async () => {
+    const control = selectedControl();
+    if (!control) return;
+    updateActivePage((page) => ({
+      ...page,
+      controls: page.controls.filter((candidate) => candidate.id !== control.id),
+    }));
+    setSelectedControlId(null);
+  };
+
+  const beginDrag = (event: PointerEvent, control: TouchControlSummary, resize: boolean) => {
+    if (mode() !== "edit") return;
+    event.preventDefault();
+    event.stopPropagation();
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    setSelectedControlId(control.id);
+    setPreviewControl(control);
+    dragState = {
+      pointerId: event.pointerId,
+      control,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      resize,
+    };
+  };
+
+  const moveDrag = (event: PointerEvent) => {
+    if (!dragState || dragState.pointerId !== event.pointerId || !gridElement) return;
+    const bounds = gridElement.getBoundingClientRect();
+    const deltaX = Math.round(((event.clientX - dragState.startClientX) / bounds.width) * touchSurfaceGridColumns);
+    const deltaY = Math.round(((event.clientY - dragState.startClientY) / bounds.height) * touchSurfaceGridRows);
+    const original = dragState.control;
+    if (dragState.resize) {
+      setPreviewControl({
+        ...original,
+        w: Math.max(1, Math.min(touchSurfaceGridColumns - original.x, original.w + deltaX)),
+        h: Math.max(1, Math.min(touchSurfaceGridRows - original.y, original.h + deltaY)),
+      });
+    } else {
+      setPreviewControl({
+        ...original,
+        x: Math.max(0, Math.min(touchSurfaceGridColumns - original.w, original.x + deltaX)),
+        y: Math.max(0, Math.min(touchSurfaceGridRows - original.h, original.y + deltaY)),
+      });
+    }
+  };
+
+  const endDrag = (event: PointerEvent) => {
+    if (!dragState || dragState.pointerId !== event.pointerId) return;
+    const next = previewControl();
+    dragState = null;
+    setPreviewControl(null);
+    if (next) updateControl(next);
+  };
+
+  const displayedControl = (control: TouchControlSummary) =>
+    previewControl()?.id === control.id ? previewControl()! : control;
+
+  const selectedFixtureId = () =>
+    props.selectedFixtureId ?? props.snapshot.fixtures[0]?.id ?? 0;
+
+  const valueForBinding = (binding: TouchControlBinding | null | undefined) => {
+    if (!binding) return 0;
+    switch (binding.kind) {
+      case "fixture_attribute":
+        return normalizedFixtureAttribute(props.snapshot, binding.fixture_id, binding.attribute);
+      case "group_attribute": {
+        const fixture = props.snapshot.fixtures.find((candidate) => candidate.group_ids.includes(binding.group_id));
+        return fixture ? normalizedFixtureAttribute(props.snapshot, fixture.id, binding.attribute) : 0;
+      }
+      case "feature_preset": {
+        const target = binding.targets[0];
+        if (!target || binding.max_value <= binding.min_value) return 0;
+        const normalized = normalizedFixtureAttribute(
+          props.snapshot,
+          target.fixture_id,
+          target.attribute,
+        );
+        const ranged = clamp01(
+          (normalized * 65_535 - binding.min_value)
+            / (binding.max_value - binding.min_value),
+        );
+        return binding.inverted ? 1 - ranged : ranged;
+      }
+      case "selected_fixture_attribute":
+        return normalizedFixtureAttribute(props.snapshot, selectedFixtureId(), binding.attribute);
+      case "lighting_master":
+        return props.snapshot.lighting_master;
+      case "video_master":
+        return props.snapshot.video.master_opacity;
+      case "group_submaster":
+        return props.snapshot.submasters.find((entry) => entry.group_id === binding.group_id)?.level ?? 1;
+      case "blackout":
+        return props.snapshot.blackout ? 1 : 0;
+      case "video_blackout":
+        return props.snapshot.video.blackout ? 1 : 0;
+      case "all_blackout":
+        return props.snapshot.blackout && props.snapshot.video.blackout ? 1 : 0;
+      default:
+        return 0;
+    }
+  };
+
+  const controlValue = (control: TouchControlSummary) =>
+    localValues()[control.id] ?? valueForBinding(control.binding);
+
+  const setControlValue = (control: TouchControlSummary, value: number) => {
+    if (mode() !== "live" || !control.binding || touchBindingUnavailable(control.binding)) return;
+    const next = clamp01(value);
+    setLocalValues((current) => ({ ...current, [control.id]: next }));
+    setLiveActivations((current) => ({ ...current, [control.id]: true }));
+    void props.onValue(control.binding, next);
+  };
+
+  const triggerControl = (control: TouchControlSummary) => {
+    if (mode() !== "live" || !control.binding || touchBindingUnavailable(control.binding)) return;
+    setLiveActivations((current) => ({ ...current, [control.id]: true }));
+    void props.onTrigger(control.binding);
+  };
+
+  const setControlColor = (control: TouchControlSummary, color: string) => {
+    if (mode() !== "live" || !control.binding || touchBindingUnavailable(control.binding)) return;
+    setLiveActivations((current) => ({ ...current, [control.id]: true }));
+    void props.onColor(control.binding, color);
+  };
+
+  const setControlXy = (event: PointerEvent, control: TouchControlSummary) => {
+    if (mode() !== "live" || !control.binding || touchBindingUnavailable(control.binding)) return;
+    const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const x = clamp01((event.clientX - bounds.left) / bounds.width);
+    const y = clamp01(1 - (event.clientY - bounds.top) / bounds.height);
+    setLocalXy((current) => ({ ...current, [control.id]: { x, y } }));
+    setLiveActivations((current) => ({ ...current, [control.id]: true }));
+    void props.onXy(control.binding, x, y);
+  };
+
+  const bindingFromOption = (option: string): TouchControlBinding | null => {
+    const fixtureId = selectedFixtureId();
+    const groupId = groupIds()[0] ?? "front";
+    switch (option) {
+      case "fixture_attribute":
+        return { kind: option, fixture_id: fixtureId, attribute: "Dimmer" };
+      case "group_attribute":
+        return { kind: option, group_id: groupId, attribute: "Dimmer" };
+      case "feature_preset": {
+        const current = selectedControl()?.binding;
+        return current?.kind === "feature_preset" ? current : null;
+      }
+      case "fixture_color":
+        return { kind: option, fixture_id: fixtureId };
+      case "group_color":
+        return { kind: option, group_id: groupId };
+      case "fixture_pan_tilt":
+        return { kind: option, fixture_id: fixtureId, pan_attribute: "Pan", tilt_attribute: "Tilt" };
+      case "group_pan_tilt":
+        return { kind: option, group_id: groupId, pan_attribute: "Pan", tilt_attribute: "Tilt" };
+      case "cue":
+        // A Cue binding must be selected explicitly from the exact authority
+        // below. Never fabricate snapshot.cues[0] (or ID 1) as its target.
+        return null;
+      case "group_submaster":
+        return { kind: option, group_id: groupId };
+      case "group_select":
+        return { kind: option, group_id: groupId };
+      case "selected_fixture_attribute":
+        return { kind: option, attribute: "Dimmer" };
+      case "selected_fixture_pan_tilt":
+        return { kind: option, pan_attribute: "Pan", tilt_attribute: "Tilt" };
+      case "cue_next":
+      case "cue_previous":
+      case "cue_fade_pause":
+      case "tap_tempo":
+      case "lighting_master":
+      case "video_master":
+      case "blackout":
+      case "video_blackout":
+      case "all_blackout":
+      case "selected_fixture_color":
+        return { kind: option };
+      default:
+        return null;
+    }
+  };
+
+  const replaceBinding = (binding: TouchControlBinding | null) => {
+    if (touchBindingUnavailable(binding)) return;
+    const control = selectedControl();
+    if (control) updateControl({ ...control, binding });
+  };
+
+  const boundCue = (control: TouchControlSummary): CueSummary | null => {
+    if (control.binding?.kind !== "cue") return null;
+    const cueId = control.binding.cue_id;
+    return cueBindingIsAuthoritative(cueId)
+      ? props.bankAuthority.cueById.get(cueId) ?? null
+      : null;
+  };
+
+  const boundFlashCue = (control: TouchControlSummary): CueSummary | null => {
+    const cue = boundCue(control);
+    return cue && authoredCueLiveModifier(cue).flash ? cue : null;
+  };
+
+  const buttonLabel = (control: TouchControlSummary) => {
+    switch (control.binding?.kind) {
+      case "cue_fade_pause":
+        return props.snapshot.active_fade?.paused ? "Resume" : control.label;
+      case "blackout":
+        return props.snapshot.blackout ? "Clear DMX BO" : control.label;
+      case "video_blackout":
+        return props.snapshot.video.blackout ? "Clear Video BO" : control.label;
+      case "all_blackout":
+        return props.snapshot.blackout && props.snapshot.video.blackout ? "All Clear" : control.label;
+      default:
+        return control.label;
+    }
+  };
+
+  const blackoutBinding = (control: TouchControlSummary) =>
+    control.binding?.kind === "blackout"
+    || control.binding?.kind === "video_blackout"
+    || control.binding?.kind === "all_blackout";
+
+  const buttonPressed = (control: TouchControlSummary): boolean | undefined => {
+    switch (control.binding?.kind) {
+      case "cue_fade_pause":
+        return props.snapshot.active_fade?.paused ?? false;
+      case "group_select":
+        return props.selectedGroupId === control.binding.group_id;
+      case "blackout":
+      case "video_blackout":
+      case "all_blackout":
+        return controlValue(control) >= 1;
+      default:
+        return undefined;
+    }
+  };
+
+  const renderLiveControl = (control: TouchControlSummary) => {
+    const disabled = mode() !== "live" || !control.binding || touchBindingUnavailable(control.binding);
+    switch (control.kind) {
+      case "Label":
+        return <strong class="touchPlacedLabel">{control.label}</strong>;
+      case "Image":
+        return <div class="touchPlacedImage" role="img" aria-label={control.label}><span aria-hidden="true">▧</span><strong>{control.label}</strong></div>;
+      case "Button": {
+        const flashCue = () => (mode() === "live" ? boundFlashCue(control) : null);
+        const beginFlash = (cue: CueSummary) => {
+          if (activeFlashCueByControl.has(control.id)) return;
+          activeFlashCueByControl.set(control.id, cue.id);
+          triggerControl(control);
+        };
+        const flashRelease = () => releaseFlashControl(control.id);
+        return (
+          <button
+            class="touchPlacedButton"
+            classList={{
+              flash: Boolean(flashCue()),
+              safety: blackoutBinding(control),
+              engaged: blackoutBinding(control) && controlValue(control) >= 1,
+            }}
+            disabled={disabled}
+            aria-pressed={buttonPressed(control)}
+            data-touch-live-activated={liveActivations()[control.id] ? "true" : "false"}
+            data-touch-cue-pad={boundCue(control)?.id}
+            data-touch-flash-cue={flashCue()?.id}
+            onPointerDown={(event) => {
+              const cue = flashCue();
+              if (!cue) return;
+              // Momentary flash pad: press activates the scene, release always
+              // releases it; the click handler must not re-trigger.
+              event.preventDefault();
+              event.currentTarget.setPointerCapture(event.pointerId);
+              beginFlash(cue);
+            }}
+            onPointerUp={flashRelease}
+            onPointerCancel={flashRelease}
+            onKeyDown={(event) => {
+              const cue = flashCue();
+              if (!cue || event.repeat) return;
+              if (event.key === " " || event.key === "Enter") {
+                event.preventDefault();
+                beginFlash(cue);
+              }
+            }}
+            onKeyUp={(event) => {
+              if (event.key === " " || event.key === "Enter") {
+                event.preventDefault();
+                flashRelease();
+              }
+            }}
+            onClick={(event) => {
+              if (flashCue()) {
+                event.preventDefault();
+                return;
+              }
+              triggerControl(control);
+            }}
+          >
+            {buttonLabel(control)}
+          </button>
+        );
+      }
+      case "Fader":
+        return (
+          <label class="touchPlacedFader">
+            <span>{control.label}</span>
+            <VerticalFaderInput
+              chromeClass="touchPlacedVerticalFaderChrome"
+              inputClass="touchPlacedVerticalFaderInput"
+              aria-label={control.label}
+              min="0"
+              max="1"
+               step="0.01"
+               value={controlValue(control)}
+               disabled={disabled}
+               data-touch-live-activated={liveActivations()[control.id] ? "true" : "false"}
+               onInput={(event) => setControlValue(control, Number(event.currentTarget.value))}
+            />
+            <strong>{Math.round(controlValue(control) * 100)}%</strong>
+          </label>
+        );
+      case "Dial":
+        return (
+          <label class="touchPlacedDial">
+            <span>{control.label}</span>
+            <input
+              aria-label={control.label}
+              type="range"
+              min="0"
+              max="1"
+               step="0.01"
+               value={controlValue(control)}
+               disabled={disabled}
+               data-touch-live-activated={liveActivations()[control.id] ? "true" : "false"}
+               onInput={(event) => setControlValue(control, Number(event.currentTarget.value))}
+            />
+            <strong>{Math.round(controlValue(control) * 100)}%</strong>
+          </label>
+        );
+      case "IncrementalWheel":
+        return (
+           <div
+             class="touchPlacedIncremental"
+             data-touch-live-activated={liveActivations()[control.id] ? "true" : "false"}
+             onWheel={(event) => {
+              event.preventDefault();
+              setControlValue(control, controlValue(control) + (event.deltaY < 0 ? 0.01 : -0.01));
+            }}
+          >
+            <span>{control.label}</span>
+            <div>
+              <button aria-label={`Decrease ${control.label}`} disabled={disabled} onClick={() => setControlValue(control, controlValue(control) - 0.01)}>−</button>
+              <strong>{Math.round(controlValue(control) * 100)}%</strong>
+              <button aria-label={`Increase ${control.label}`} disabled={disabled} onClick={() => setControlValue(control, controlValue(control) + 0.01)}>+</button>
+            </div>
+          </div>
+        );
+      case "ColorWheel":
+        return (
+          <div class="touchPlacedColor">
+            <span>{control.label}</span>
+            <input
+              aria-label={control.label}
+              type="color"
+              value="#ff7a00"
+              disabled={disabled}
+              data-touch-live-activated={liveActivations()[control.id] ? "true" : "false"}
+              onInput={(event) => setControlColor(control, event.currentTarget.value)}
+            />
+            <Show when={props.colorPalette?.length}>
+              <div class="touchPlacedColorPalette" aria-label={`${control.label} palette`}>
+                <For each={props.colorPalette}>
+                  {(color) => (
+                    <button
+                      type="button"
+                      class="colorSwatch"
+                      style={{ "background-color": color }}
+                      aria-label={`Set ${control.label} to ${color}`}
+                      disabled={disabled}
+                      onClick={() => setControlColor(control, color)}
+                    />
+                  )}
+                </For>
+              </div>
+            </Show>
+          </div>
+        );
+      case "XyGrid": {
+        const point = () => localXy()[control.id] ?? { x: 0.5, y: 0.5 };
+        return (
+          <button
+            class="touchPlacedXy"
+            aria-label={control.label}
+            disabled={disabled}
+            data-touch-live-activated={liveActivations()[control.id] ? "true" : "false"}
+            onPointerDown={(event) => setControlXy(event, control)}
+            onPointerMove={(event) => {
+              if (event.buttons === 1) setControlXy(event, control);
+            }}
+          >
+            <span>{control.label}</span>
+            <i style={{ left: `${point().x * 100}%`, top: `${(1 - point().y) * 100}%` }} />
+          </button>
+        );
+      }
+    }
+  };
+
+  return (
+    <section
+      class="panel touchPanel touchSurfacePanel"
+      id="control-domain-panel-lighting"
+      role="tabpanel"
+      aria-labelledby="control-domain-lighting"
+      aria-label="Editable Touch surface"
+      data-touch-surface
+      data-workspace-pane="upper"
+      data-touch-mode={mode()}
+      data-touch-default-preset={props.surface?.pages.length ? "false" : "true"}
+      ref={surfaceElement}
+      style={scenePanelOpen() ? scenePanelBox() : undefined}
+    >
+      <div class="touchSurfaceToolbar" classList={{ hasSceneToggle: mode() === "live" }}>
+        <div class="touchSurfaceModeToggle" aria-label="Touch surface mode">
+          <button
+            class={mode() === "edit" ? "active" : ""}
+            aria-pressed={mode() === "edit"}
+            onClick={() => setMode("edit")}
+          >
+            EDIT
+          </button>
+          <button
+            class={mode() === "live" ? "active" : ""}
+            aria-pressed={mode() === "live"}
+            onClick={() => {
+              setMode("live");
+              setSelectedControlId(null);
+            }}
+          >
+            LIVE
+          </button>
+        </div>
+        <div class="touchPageTabs" aria-label="Touch pages">
+          <For each={surface().pages}>
+            {(page) => (
+              <button
+                 class={activePage()?.id === page.id ? "active" : ""}
+                 aria-pressed={activePage()?.id === page.id}
+                 data-no-localize
+                onClick={() => {
+                  setSelectedPageId(page.id);
+                  setSelectedControlId(null);
+                }}
+              >
+                {page.label}
+              </button>
+            )}
+          </For>
+          <button class="touchPageAdd" aria-label="Add Touch page" onClick={addPage}>+</button>
+          <button
+            class="touchPageRemove danger"
+            aria-label="Delete Touch page"
+            disabled={surface().pages.length <= 1}
+            onClick={removePage}
+          >
+            −
+          </button>
+        </div>
+        <span class="touchSurfaceStatus">{mode() === "edit" ? "Place, resize and assign" : "Direct control"}</span>
+        <Show when={mode() === "live"}>
+          <button
+            type="button"
+            class="touchSceneToggle"
+            aria-pressed={scenePanelOpen()}
+            data-touch-scene-toggle
+            title={scenePanelOpen() ? "Hide scene panel" : "Show scene panel"}
+            onClick={toggleScenePanel}
+          >
+            Scenes
+          </button>
+        </Show>
+      </div>
+
+      <Show when={mode() === "edit"}>
+        <div class="touchControlPalette" aria-label="ADD CONTROLS">
+          <strong>ADD CONTROLS</strong>
+          <For each={touchControlPalette}>
+            {(entry) => <button onClick={() => addControl(entry.kind)}>{entry.label}</button>}
+          </For>
+        </div>
+      </Show>
+
+      <div
+        ref={gridElement}
+        class="touchSurfaceGrid"
+        data-touch-page={activePage()?.label ?? ""}
+        onPointerMove={moveDrag}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+      >
+        <For each={activePage()?.controls ?? []}>
+          {(control) => {
+            const displayed = () => displayedControl(control);
+            return (
+              <div
+                class={`touchPlacedControl kind-${control.kind} ${control.h <= 1 ? "compact" : ""} ${selectedControlId() === control.id ? "selected" : ""}`}
+                style={controlGridStyle(displayed())}
+                 data-touch-control={control.id}
+                 data-touch-kind={control.kind}
+                 data-touch-binding={control.binding?.kind ?? "unassigned"}
+                 data-touch-binding-unavailable={touchBindingUnavailable(control.binding) ? "true" : undefined}
+                 data-no-localize
+                 {...controlMappingTargetData(controlMappingTargetsForTouchBinding(
+                   control.binding,
+                   control.label,
+                   props.selectedFixtureId,
+                 ))}
+              >
+                {renderLiveControl(control)}
+                <Show when={touchBindingUnavailable(control.binding)}>
+                  <small class="touchBindingUnavailable" role="alert" data-touch-binding-invalid>
+                    Timeline source unavailable
+                  </small>
+                </Show>
+                <Show when={mode() === "edit"}>
+                  <button
+                    class="touchEditMoveHandle"
+                    aria-label={`Move ${control.label}`}
+                    onPointerDown={(event) => beginDrag(event, displayed(), false)}
+                  >
+                    ↕
+                  </button>
+                  <button
+                    class="touchEditResizeHandle"
+                    aria-label={`Resize ${control.label}`}
+                    onPointerDown={(event) => beginDrag(event, displayed(), true)}
+                  >
+                    ↘
+                  </button>
+                </Show>
+              </div>
+            );
+          }}
+        </For>
+        <Show when={(activePage()?.controls.length ?? 0) === 0}>
+          <div class="touchSurfaceEmpty">
+            <strong>No controls on this page</strong>
+            <span>Switch to EDIT and add a control.</span>
+          </div>
+        </Show>
+      </div>
+
+      <Show when={mode() === "edit" && selectedControl()}>
+        {(controlAccessor) => {
+          const control = () => controlAccessor();
+          const binding = () => control().binding;
+          const fixtureBinding = () => {
+            const current = binding();
+            return current?.kind === "fixture_attribute"
+              || current?.kind === "fixture_color"
+              || current?.kind === "fixture_pan_tilt"
+              ? current
+              : null;
+          };
+          const groupBinding = () => {
+            const current = binding();
+            return current?.kind === "group_attribute"
+              || current?.kind === "group_color"
+              || current?.kind === "group_pan_tilt"
+              || current?.kind === "group_select"
+              || current?.kind === "group_submaster"
+              ? current
+              : null;
+          };
+          return (
+            <aside class="touchBindingEditor" aria-label="Touch control assignment">
+              <div>
+                <strong>CONTROL</strong>
+                <button class="danger" onClick={removeSelectedControl}>Remove</button>
+              </div>
+              <label>
+                Label
+                <input
+                  value={control().label}
+                  onChange={(event) => updateControl({ ...control(), label: event.currentTarget.value.trim() || control().kind })}
+                />
+              </label>
+              <label>
+                Binding
+                <select
+                  value={touchBindingUnavailable(binding()) ? "" : bindingKey(binding())}
+                  onChange={(event) => {
+                    const option = event.currentTarget.value;
+                    if (option === "cue") {
+                      if (bankAuthorityAvailable()) setCueBindingPending(true);
+                      return;
+                    }
+                    setCueBindingPending(false);
+                    replaceBinding(bindingFromOption(option));
+                  }}
+                >
+                  <For each={bindingOptions.filter((option) =>
+                    bankAuthorityAvailable() || ![
+                      "cue",
+                      "cue_next",
+                      "cue_previous",
+                      "cue_fade_pause",
+                    ].includes(option.value))}>
+                    {(option) => <option value={option.value}>{option.label}</option>}
+                  </For>
+                </select>
+              </label>
+              <Show when={bankAuthorityAvailable() && (cueBindingPending() || binding()?.kind === "cue")}>
+                <label>
+                  Cue
+                  <select
+                    value={binding()?.kind === "cue"
+                      ? (binding() as Extract<TouchControlBinding, { kind: "cue" }>).cue_id
+                      : ""}
+                    onChange={(event) => {
+                      const cueId = Number(event.currentTarget.value);
+                      if (!cueBindingIsAuthoritative(cueId)) return;
+                      replaceBinding({ kind: "cue", cue_id: cueId });
+                      setCueBindingPending(false);
+                    }}
+                  >
+                    <option value="" disabled data-no-localize>—</option>
+                    <For each={props.bankAuthority.cues}>
+                      {(cue) => <option value={cue.id} data-no-localize>{cue.label}</option>}
+                    </For>
+                  </select>
+                </label>
+              </Show>
+              <Show when={touchBindingUnavailable(binding())}>
+                <p class="empty" role="alert" data-touch-binding-invalid>
+                  Timeline source unavailable
+                </p>
+              </Show>
+              <Show when={binding()?.kind === "feature_preset"}>
+                <div class="touchBindingPair">
+                  <span>
+                    Imported Daslight Feature Preset · {(binding() as Extract<TouchControlBinding, { kind: "feature_preset" }>).targets.length} target(s)
+                  </span>
+                  <span>
+                    Exact fixture/attribute selection and fader range are preserved.
+                  </span>
+                </div>
+              </Show>
+              <Show when={fixtureBinding()}>
+                {(currentAccessor) => (
+                  <label>
+                    Fixture
+                    <select
+                      value={currentAccessor().fixture_id}
+                      onChange={(event) => replaceBinding({ ...currentAccessor(), fixture_id: Number(event.currentTarget.value) })}
+                    >
+                      <For each={props.snapshot.fixtures}>
+                        {(fixture) => <option value={fixture.id} data-no-localize>{fixture.label}</option>}
+                      </For>
+                    </select>
+                  </label>
+                )}
+              </Show>
+              <Show when={groupBinding()}>
+                {(currentAccessor) => (
+                  <label>
+                    Group
+                    <select
+                      value={currentAccessor().group_id}
+                      onChange={(event) => replaceBinding({ ...currentAccessor(), group_id: event.currentTarget.value })}
+                    >
+                      <For each={groupIds()}>{(groupId) => <option value={groupId}>{groupId}</option>}</For>
+                    </select>
+                  </label>
+                )}
+              </Show>
+              <Show when={binding()?.kind === "fixture_attribute"}>
+                <label>
+                  Attribute
+                  <select
+                    value={(binding() as Extract<TouchControlBinding, { kind: "fixture_attribute" }>).attribute}
+                    onChange={(event) => replaceBinding({
+                      ...(binding() as Extract<TouchControlBinding, { kind: "fixture_attribute" }>),
+                      attribute: event.currentTarget.value,
+                    })}
+                  >
+                    <For each={attributesForFixture(
+                      props.snapshot,
+                      (binding() as Extract<TouchControlBinding, { kind: "fixture_attribute" }>).fixture_id,
+                    )}>
+                      {(attribute) => <option value={attribute}>{attribute}</option>}
+                    </For>
+                  </select>
+                </label>
+              </Show>
+              <Show when={binding()?.kind === "group_attribute" || binding()?.kind === "selected_fixture_attribute"}>
+                <label>
+                  Attribute
+                  <input
+                    value={(binding() as Extract<TouchControlBinding, { attribute: string }>).attribute}
+                    onChange={(event) => replaceBinding({
+                      ...(binding() as Extract<TouchControlBinding, { attribute: string }>),
+                      attribute: event.currentTarget.value,
+                    })}
+                  />
+                </label>
+              </Show>
+              <Show when={binding()?.kind.includes("pan_tilt")}>
+                <div class="touchBindingPair">
+                  <label>
+                    Pan attribute
+                    <input
+                      value={(binding() as Extract<TouchControlBinding, { pan_attribute: string }>).pan_attribute}
+                      onChange={(event) => replaceBinding({
+                        ...(binding() as Extract<TouchControlBinding, { pan_attribute: string }>),
+                        pan_attribute: event.currentTarget.value,
+                      })}
+                    />
+                  </label>
+                  <label>
+                    Tilt attribute
+                    <input
+                      value={(binding() as Extract<TouchControlBinding, { tilt_attribute: string }>).tilt_attribute}
+                      onChange={(event) => replaceBinding({
+                        ...(binding() as Extract<TouchControlBinding, { tilt_attribute: string }>),
+                        tilt_attribute: event.currentTarget.value,
+                      })}
+                    />
+                  </label>
+                </div>
+              </Show>
+            </aside>
+          );
+        }}
+      </Show>
+      <Show
+        when={
+          mode() === "live" && bankAuthorityAvailable() && props.onSetCueLiveModifier && props.onClearCueLiveModifier
+            ? props.bankAuthority.cueById.get(props.snapshot.active_cue_id ?? -1) ?? null
+            : null
+        }
+      >
+        {(cue) => (
+          <CueLiveModifierStrip
+            touch
+            cue={cue()}
+            liveStates={props.snapshot.cue_live_modifiers}
+            onSetCueLiveModifier={props.onSetCueLiveModifier!}
+            onClearCueLiveModifier={props.onClearCueLiveModifier!}
+          />
+        )}
+      </Show>
+      <Show when={scenePanelOpen()}>
+        <TouchCuePanel
+          bankAuthority={props.bankAuthority}
+          snapshot={props.snapshot}
+          onTriggerCue={(cueId) => props.onTrigger({ kind: "cue", cue_id: cueId })}
+          onReleaseCue={(cueId) => props.onReleaseCue?.(cueId)}
+        />
+      </Show>
+    </section>
+  );
+}

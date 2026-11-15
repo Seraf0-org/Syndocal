@@ -1,0 +1,1994 @@
+import { createProjectUndoGroup, type ProjectUndoGroup } from "./projectUndoGrouping";
+import { shouldReportVideoRuntimeReadError } from "./videoRuntimeReadErrorPolicy";
+import type { Accessor, Setter } from "solid-js";
+import type { FrontendTauriInvoke } from "./tauriInvokeCommands";
+import { requestNativeThumbnail, type ThumbnailStartChannel } from "./nativeThumbnailRequest";
+import { videoFrameToDataUrl } from "./videoFrameCanvas";
+import { normalizeVideoClipRuntimeSnapshot, normalizeVideoLayerTransitionRuntimeSnapshot } from "./videoRuntimeCollectionWire";
+import { defaultColorAdjust, defaultFxAdjust, defaultTransform } from "./videoLayerDefaults";
+import { patchVideoGroup } from "./videoLayerGroups";
+import {
+  mediaAssetImportReportMessage,
+  mediaAssetRelinkOutcomeMessage,
+  type MediaAssetOperationPreflight,
+  type MediaAssetOperationLease,
+  preflightAndBeginMediaAssetOperation,
+  prepareFinalizeAndCommitMediaAssetRelink,
+  prepareFinalizeAndCommitMediaAssets,
+} from "./mediaAssetAuthority";
+import type { ProjectAuthorityToken } from "./projectAuthority";
+import type {
+  MediaRelinkApplyRequest,
+  MediaRelinkApplyResult,
+  MediaRelinkFolderScan,
+} from "./mediaRelinkPlan";
+import {
+  executeVideoClipLaunchOutputControl,
+  executeVideoClipTakeOutputControl,
+} from "./outputControlController";
+import { videoClipSlotCommandKindMatches, videoClipSlotRuntimeGenerationCanApply } from "./videoClipSlotBankModel";
+import type {
+  EngineSnapshot,
+  ExternalVideoIoPlans,
+  ExternalVideoTransportDriverEvent,
+  ExternalVideoTransportStatus,
+  ExternalVideoTransportSyncReport,
+  MediaAssetId,
+  MediaAssetPreviewSessionTicket,
+  MediaAssetImportReport,
+  MediaAssetOperationPhase,
+  MediaAssetRelinkOutcome,
+  VideoBlendMode,
+  VideoAudioMonitorStatus,
+  VideoFrame,
+  VideoEffectCatalog,
+  VideoEffectCatalogUpdate,
+  VideoGroupControlPatch,
+  VideoEffectCatalogAuthoritativeResult,
+  VideoEffectCatalogTerminalEnvelope,
+  VideoEffectPresetId,
+  VideoEffectScope,
+  VideoIsfEffectSummary,
+  VideoLayerState,
+  VideoLayerTransitionAuthoritativeRuntimeCommandKind,
+  VideoLayerTransitionAuthoritativeRuntimeResult,
+  VideoLayerTransitionRuntimeReport,
+  VideoLayerTransitionRuntimeSnapshot,
+  VideoOutputRenderPlan,
+  VideoOutputWindowStatus,
+  VideoPreviewDiagnostics,
+  VideoRuntimeStatus,
+  VideoRecordingStatus,
+  VideoClipRuntimeSnapshot,
+  VideoClipRuntimeReport,
+  VideoClipSlotAuthoritativeAuthoredResult,
+  VideoClipSlotAuthoritativeCommitKind,
+  VideoClipSlotAuthoritativeRuntimeResult,
+  VideoClipSlotAuthoritativeTerminalEnvelope,
+  VideoClipSlotId,
+  VideoClipSlotSummary,
+  VideoClipTakeDuration,
+  VideoClipTakeKind,
+  VideoSourceKind,
+  VideoGenerator,
+} from "./types";
+
+type Invoke = FrontendTauriInvoke;
+
+type LegacyVideoEffectInvokeCommand =
+  | "set_video_layer_isf_effect"
+  | "add_video_layer_isf_effect"
+  | "add_builtin_video_isf_effect"
+  | "move_video_layer_isf_effect"
+  | "remove_video_layer_isf_effect"
+  | "set_video_layer_isf_effect_enabled"
+  | "reset_video_layer_isf_effect"
+  | "set_video_layer_isf_control";
+
+type VideoClipSlotAuthoredInvokeCommand =
+  | "create_video_clip_slot_authoritative"
+  | "assign_video_clip_slot_asset_authoritative"
+  | "update_video_clip_slot_authoritative"
+  | "remove_video_clip_slot_authoritative"
+  | "duplicate_video_clip_slot_authoritative"
+  | "set_default_video_clip_slot_authoritative"
+  | "reorder_video_clip_slots_authoritative";
+
+type VideoClipSlotRuntimeInvokeCommand =
+  | "queue_video_clip_slot_authoritative"
+  | "cancel_queued_video_clip_slot_authoritative"
+  | "launch_video_clip_slot_authoritative"
+  | "seek_video_clip_slot_authoritative";
+
+interface VideoRuntimeControllerOptions {
+  onIsfImportRejected?: (message: string) => void;
+  setVideoBlackout: (enabled: boolean) => Promise<void>;
+  setVideoMasterOpacity: (opacity: number) => Promise<void>;
+  invoke: Invoke;
+  createThumbnailChannel: () => ThumbnailStartChannel;
+  snapshot: Accessor<EngineSnapshot>;
+  refreshSnapshot: () => Promise<EngineSnapshot | null>;
+  setMessage: (message: string) => unknown;
+  videoSourceKind: Accessor<VideoSourceKind>;
+  /** Captured before any picker/prepare so A cannot commit or report into B. */
+  getCurrentProjectAuthority: Accessor<ProjectAuthorityToken>;
+  /**
+   * Operator-gated mapping flush before registration. Returns the exact
+   * post-flush E/R/H for same-project terminal side effects.
+   */
+  prepareMediaAssetOperationStart: (expectedAuthority: ProjectAuthorityToken) => Promise<MediaAssetOperationPreflight>;
+  /** Live E/R/H check immediately before any terminal UI side effect. */
+  isProjectAuthorityCurrent: (authority: ProjectAuthorityToken) => boolean;
+  /** Result marker set only after App applies the authoritative mutation/history bundle. */
+  authoritativeApplicationIsCurrent: (value: unknown) => boolean;
+  /** Uses the full E/R/H captured before Browse, then clears that one-shot fence. */
+  consumeVideoSourceExpectedAuthority: () => ProjectAuthorityToken;
+  /** Registers one picker/hash/commit operation for replacement/unmount abort. */
+  beginMediaAssetOperation: (
+    label: string,
+    phase: MediaAssetOperationPhase,
+  ) => MediaAssetOperationLease;
+  setMediaAssetImportReport: (report: MediaAssetImportReport | null) => void;
+  projectTransactionOwnerId: string;
+  videoLabel: Accessor<string>;
+  setVideoLabel: Setter<string>;
+  videoPath: Accessor<string>;
+  setVideoPreviewUrl: Setter<string>;
+  setVideoPreviewInfo: Setter<string>;
+  setVideoPreviewDiagnostics: Setter<VideoPreviewDiagnostics | null>;
+  isIsfEventPulseBusy: Accessor<boolean>;
+  setIsfEventPulseBusy: Setter<boolean>;
+  setVideoOutputRenderPlans: Setter<VideoOutputRenderPlan[] | null>;
+  setVideoOutputWindowStatuses: Setter<VideoOutputWindowStatus[] | null>;
+  setVideoRuntimeStatus: Setter<VideoRuntimeStatus | null>;
+  setVideoAudioMonitorStatus: Setter<VideoAudioMonitorStatus>;
+  setAudioOutputDevices: Setter<string[]>;
+  setVideoRecordingStatus: Setter<VideoRecordingStatus>;
+  setVideoClipRuntime: Setter<VideoClipRuntimeSnapshot>;
+  setVideoTransitionRuntime: Setter<VideoLayerTransitionRuntimeSnapshot>;
+  setExternalVideoIoPlans: Setter<ExternalVideoIoPlans | null>;
+  setExternalVideoTransportStatus: Setter<ExternalVideoTransportStatus | null>;
+  setExternalVideoTransportReport: Setter<ExternalVideoTransportSyncReport | null>;
+  setExternalVideoTransportEvents: Setter<ExternalVideoTransportDriverEvent[]>;
+  setVideoOutputPreviewUrl: Setter<string>;
+  setVideoOutputPreviewInfo: Setter<string>;
+  setVideoOutputPreviewId: Setter<number | null>;
+  setVideoOutputPreviewMode: Setter<"output" | "test">;
+}
+
+type MediaAssetRelinkUiResult = {
+  outcome: MediaAssetRelinkOutcome;
+  terminalAuthority: ProjectAuthorityToken;
+};
+
+const sameProjectAuthority = (left: ProjectAuthorityToken, right: ProjectAuthorityToken): boolean =>
+  left.project_epoch === right.project_epoch
+  && left.project_revision === right.project_revision
+  && left.checkpoint_hash === right.checkpoint_hash;
+
+export function createVideoRuntimeController(options: VideoRuntimeControllerOptions) {
+  // B4: these operation IDs deliberately live in the renderer that owns the
+  // stable project-transaction owner.  The backend retains the definitive
+  // terminal receipt and rejects a duplicate ID with a different shape.
+  let videoClipSlotRequestId = Math.max(1, Date.now());
+  let videoEffectCatalogRequestId = Math.max(1, Date.now());
+  let appliedRuntimeEpoch: number | null = null;
+  let appliedRuntimeGeneration = -1;
+  let appliedTransitionRuntimeEpoch: number | null = null;
+  let appliedTransitionRuntimeGeneration = -1;
+  let clipRuntimeRefreshInFlight = false;
+  let transitionRuntimeRefreshInFlight = false;
+  let clipRuntimeRefreshEpoch = 0;
+  let transitionRuntimeRefreshEpoch = 0;
+  const nextVideoClipSlotRequestId = () => ++videoClipSlotRequestId;
+  const nextVideoEffectCatalogRequestId = () => ++videoEffectCatalogRequestId;
+  const setMessageIfAuthorityCurrent = (authority: ProjectAuthorityToken, message: string) => {
+    if (options.isProjectAuthorityCurrent(authority)) options.setMessage(message);
+  };
+  const canMutateVideoIsf = () => {
+    if (!options.isIsfEventPulseBusy()) return true;
+    options.setMessage("Wait for the active FX Event pulse to finish.");
+    return false;
+  };
+  type CatalogRequest = VideoEffectCatalogUpdate | (() => VideoEffectCatalogUpdate | null);
+  const commitVideoEffectCatalog = async (catalog: CatalogRequest) => {
+    if (!canMutateVideoIsf()) return null;
+    const beforePreflight = options.getCurrentProjectAuthority();
+    const { authority } = await options.prepareMediaAssetOperationStart(beforePreflight);
+    // A mapped group patch must read the catalog after pending authored writes
+    // have settled; a full catalog captured before preflight could overwrite them.
+    const request = typeof catalog === "function" ? catalog() : catalog;
+    if (!request) return null;
+    const requestId = nextVideoEffectCatalogRequestId();
+    const args = {
+      request,
+      requestId,
+      expectedRevision: authority.project_revision,
+      expectedCheckpointHash: authority.checkpoint_hash,
+      __expectedProjectEpoch: authority.project_epoch,
+    };
+    let result: VideoEffectCatalogAuthoritativeResult;
+    let applicationCurrent = false;
+    try {
+      result = await options.invoke<VideoEffectCatalogAuthoritativeResult>(
+        "apply_video_effect_catalog_authoritative",
+        args,
+      );
+      applicationCurrent = options.authoritativeApplicationIsCurrent(result);
+    } catch (error) {
+      const terminal = await options.invoke<VideoEffectCatalogTerminalEnvelope | null>(
+        "get_video_effect_catalog_operation_terminal_result",
+        {
+          requestId,
+          expectedEpoch: authority.project_epoch,
+          expectedRevision: authority.project_revision,
+          expectedCheckpointHash: authority.checkpoint_hash,
+          ownerId: options.projectTransactionOwnerId,
+        },
+      ).catch(() => null);
+      if (!terminal) throw error;
+      if (typeof terminal.shape_fingerprint !== "string" || terminal.shape_fingerprint.length === 0) {
+        throw new Error("Video effect catalog receipt omitted its request-shape fingerprint.");
+      }
+      if (terminal.terminal.kind === "failure") throw new Error(terminal.terminal.result.message);
+      if (terminal.terminal.kind !== "applied") {
+        throw new Error("Video effect catalog receipt returned a runtime transition outcome.");
+      }
+      applicationCurrent = options.authoritativeApplicationIsCurrent(terminal);
+      result = terminal.terminal.result;
+    }
+    if (!applicationCurrent) return null;
+    await options.refreshSnapshot();
+    if (!options.isProjectAuthorityCurrent(result.mutation.authority)) return null;
+    await refreshVideoPreviewDiagnostics(true);
+    return result;
+  };
+  const applyVideoEffectCatalog = async (catalog: CatalogRequest) => {
+    try {
+      return await commitVideoEffectCatalog(catalog);
+    } catch (error) {
+      options.setMessage(`Scoped video FX update failed: ${String(error)}`);
+      return null;
+    }
+  };
+  const currentVideoEffectCatalog = (): VideoEffectCatalog => {
+    const video = options.snapshot().authored_video ?? options.snapshot().video;
+    return {
+      effect_chains: structuredClone(video.effect_chains ?? []),
+      effect_presets: structuredClone(video.effect_presets ?? []),
+      layer_groups: structuredClone(video.layer_groups ?? []),
+      transition_buses: structuredClone(video.transition_buses ?? []),
+    };
+  };
+  const patchVideoLayerGroup = (
+    groupId: number,
+    patch: VideoGroupControlPatch,
+    isCurrent: () => boolean,
+  ) => applyVideoEffectCatalog(() => {
+    // The project/input or FX pulse may have changed while preflight awaited its owners.
+    if (!isCurrent() || !canMutateVideoIsf()) return null;
+    const catalog = currentVideoEffectCatalog();
+    if (!catalog.layer_groups.some((group) => group.id === groupId)) return null;
+    return patchVideoGroup(catalog, groupId, patch);
+  });
+  const sameVideoEffectScope = (left: VideoEffectScope, right: VideoEffectScope) =>
+    JSON.stringify(left) === JSON.stringify(right);
+  const importVideoEffectScopeIsf = async (scope: VideoEffectScope) => {
+    if (!canMutateVideoIsf()) return null;
+    const authority = options.getCurrentProjectAuthority();
+    const effect = await options.invoke<VideoIsfEffectSummary | null>("select_video_isf_file");
+    if (!effect) return null;
+    if (!sameProjectAuthority(authority, options.getCurrentProjectAuthority())) {
+      options.setMessage("Project changed while the ISF file dialog was open; nothing was applied.");
+      return null;
+    }
+    const catalog = currentVideoEffectCatalog();
+    let chain = catalog.effect_chains.find((entry) => sameVideoEffectScope(entry.scope, scope));
+    if (!chain) {
+      chain = { id: 0, scope, bypassed: false, stages: [] };
+      catalog.effect_chains.push(chain);
+    }
+    chain.stages.push({
+      id: 0,
+      enabled: effect.enabled,
+      label: effect.label,
+      effect: { id: 0, kind: { kind: "isf", effect } },
+    });
+    return applyVideoEffectCatalog(catalog);
+  };
+  const applyVideoEffectPreset = async (scope: VideoEffectScope, presetId: VideoEffectPresetId) => {
+    const catalog = currentVideoEffectCatalog();
+    const preset = catalog.effect_presets.find((entry) => entry.id === presetId);
+    if (!preset) {
+      options.setMessage(`Video effect preset ${presetId} is no longer available.`);
+      return null;
+    }
+    const existing = catalog.effect_chains.find((entry) => sameVideoEffectScope(entry.scope, scope));
+    const next = {
+      id: existing?.id ?? 0,
+      scope,
+      bypassed: preset.payload.bypassed,
+      stages: preset.payload.stages.map((stage) => ({
+        id: 0,
+        enabled: stage.enabled,
+        label: stage.label,
+        effect: { id: 0, kind: structuredClone(stage.effect) },
+      })),
+    };
+    catalog.effect_chains = existing
+      ? catalog.effect_chains.map((entry) => entry === existing ? next : entry)
+      : [...catalog.effect_chains, next];
+    return applyVideoEffectCatalog(catalog);
+  };
+  const removeVideoEffectChain = async (scope: VideoEffectScope) => {
+    const catalog = currentVideoEffectCatalog();
+    catalog.effect_chains = catalog.effect_chains.filter((entry) => !sameVideoEffectScope(entry.scope, scope));
+    return applyVideoEffectCatalog(catalog);
+  };
+  const invokeLegacyVideoEffectAuthoritative = async <T,>(
+    command: LegacyVideoEffectInvokeCommand,
+    commandArgs: Record<string, unknown>,
+    expectedAuthority?: ProjectAuthorityToken,
+  ): Promise<{ value: T | null; recovered: boolean } | null> => {
+    const beforePreflight = options.getCurrentProjectAuthority();
+    if (expectedAuthority && !sameProjectAuthority(expectedAuthority, beforePreflight)) return null;
+    const { authority } = await options.prepareMediaAssetOperationStart(beforePreflight);
+    if (expectedAuthority && !sameProjectAuthority(expectedAuthority, authority)) return null;
+    const requestId = nextVideoEffectCatalogRequestId();
+    try {
+      const value = await options.invoke<T>(command, {
+        ...commandArgs,
+        requestId,
+        expectedRevision: authority.project_revision,
+        expectedCheckpointHash: authority.checkpoint_hash,
+        __expectedProjectEpoch: authority.project_epoch,
+      });
+      return options.authoritativeApplicationIsCurrent(value)
+        ? { value, recovered: false }
+        : null;
+    } catch (error) {
+      const terminal = await options.invoke<VideoEffectCatalogTerminalEnvelope | null>(
+        "get_video_effect_catalog_operation_terminal_result",
+        {
+          requestId,
+          expectedEpoch: authority.project_epoch,
+          expectedRevision: authority.project_revision,
+          expectedCheckpointHash: authority.checkpoint_hash,
+          ownerId: options.projectTransactionOwnerId,
+        },
+      ).catch(() => null);
+      if (!terminal) throw error;
+      if (typeof terminal.shape_fingerprint !== "string" || terminal.shape_fingerprint.length === 0) {
+        throw new Error("Video effect catalog receipt omitted its request-shape fingerprint.");
+      }
+      if (terminal.terminal.kind === "failure") throw new Error(terminal.terminal.result.message);
+      return options.authoritativeApplicationIsCurrent(terminal)
+        ? { value: null, recovered: true }
+        : null;
+    }
+  };
+  const recoverVideoClipSlotTerminal = async (
+    preparedImportToken: number,
+    requestId: number,
+    operationGeneration: number,
+    authority: ProjectAuthorityToken,
+  ) => options.invoke<VideoClipSlotAuthoritativeTerminalEnvelope | null>(
+    "get_video_clip_slot_operation_terminal_result",
+    {
+      preparedImportToken,
+      requestId,
+      operationGeneration,
+      expectedEpoch: authority.project_epoch,
+      expectedRevision: authority.project_revision,
+      expectedCheckpointHash: authority.checkpoint_hash,
+      ownerId: options.projectTransactionOwnerId,
+    },
+  );
+  const expectedKindByCommand: Readonly<Record<string, VideoClipSlotAuthoritativeCommitKind>> = {
+    create_video_clip_slot_authoritative: "create",
+    assign_video_clip_slot_asset_authoritative: "assign",
+    update_video_clip_slot_authoritative: "update",
+    remove_video_clip_slot_authoritative: "remove",
+    reorder_video_clip_slots_authoritative: "reorder",
+    duplicate_video_clip_slot_authoritative: "duplicate",
+    set_default_video_clip_slot_authoritative: "set_default",
+    import_and_assign_video_clip_slots_authoritative: "import_and_assign",
+    queue_video_clip_slot_authoritative: "queue",
+    cancel_queued_video_clip_slot_authoritative: "cancel_queue",
+    launch_video_clip_slot_authoritative: "launch",
+    seek_video_clip_slot_authoritative: "seek",
+  };
+  const expectedKind = (command: string) => {
+    const kind = expectedKindByCommand[command];
+    if (!kind) throw new Error(`Unknown Clip Slot command: ${command}`);
+    return kind;
+  };
+  const requireCommandKind = (
+    actual: VideoClipSlotAuthoritativeCommitKind,
+    expected: VideoClipSlotAuthoritativeCommitKind,
+  ) => {
+    if (!videoClipSlotCommandKindMatches(actual, expected)) {
+      throw new Error(`Clip Slot receipt kind mismatch: expected ${expected}, received ${actual}.`);
+    }
+  };
+  const requireTerminalEnvelope = (
+    envelope: VideoClipSlotAuthoritativeTerminalEnvelope,
+    expected: VideoClipSlotAuthoritativeCommitKind,
+  ) => {
+    requireCommandKind(envelope.command_kind, expected);
+    if (typeof envelope.shape_fingerprint !== "string" || envelope.shape_fingerprint.length === 0) {
+      throw new Error("Clip Slot terminal receipt omitted its request-shape fingerprint.");
+    }
+  };
+  const applyVideoClipSlotRuntime = (result: VideoClipRuntimeReport | VideoClipSlotAuthoritativeRuntimeResult) => {
+    const generationCanApply = videoClipSlotRuntimeGenerationCanApply(
+      appliedRuntimeEpoch, appliedRuntimeGeneration, result.project_epoch, result.runtime_generation,
+    );
+    if (!options.isProjectAuthorityCurrent({
+      project_epoch: result.project_epoch,
+      project_revision: result.project_revision,
+      checkpoint_hash: result.checkpoint_hash,
+    })) return false;
+    if (!generationCanApply) return false;
+    const runtime = normalizeVideoClipRuntimeSnapshot(result.runtime);
+    appliedRuntimeEpoch = result.project_epoch;
+    appliedRuntimeGeneration = result.runtime_generation;
+    options.setVideoClipRuntime(runtime);
+    return true;
+  };
+  const resetVideoClipSlotRuntimeFence = () => {
+    clipRuntimeRefreshEpoch += 1;
+    appliedRuntimeEpoch = null;
+    appliedRuntimeGeneration = -1;
+    options.setVideoClipRuntime({ layers: [] });
+  };
+  const refreshVideoClipSlotRuntime = async (showError = false) => {
+    // A replacement invalidates the reply, not the outstanding native read.
+    // Skip overlapping polls until it settles; never share an old project's promise.
+    if (clipRuntimeRefreshInFlight) return null;
+    const authority = options.getCurrentProjectAuthority();
+    const refreshEpoch = clipRuntimeRefreshEpoch;
+    clipRuntimeRefreshInFlight = true;
+    try {
+      const result = await options.invoke<VideoClipRuntimeReport>("get_video_clip_slot_runtime", {
+        expectedEpoch: authority.project_epoch,
+        expectedRevision: authority.project_revision,
+        expectedCheckpointHash: authority.checkpoint_hash,
+        ownerId: options.projectTransactionOwnerId,
+      });
+      if (refreshEpoch !== clipRuntimeRefreshEpoch || !options.isProjectAuthorityCurrent(authority)) return null;
+      return applyVideoClipSlotRuntime(result) ? result : null;
+    } catch (error) {
+      if (showError && refreshEpoch === clipRuntimeRefreshEpoch && shouldReportVideoRuntimeReadError(error)) setMessageIfAuthorityCurrent(authority, String(error));
+      return null;
+    } finally {
+      clipRuntimeRefreshInFlight = false;
+    }
+  };
+  const applyVideoTransitionRuntime = (
+    result: VideoLayerTransitionRuntimeReport | VideoLayerTransitionAuthoritativeRuntimeResult,
+  ) => {
+    const generationCanApply = videoClipSlotRuntimeGenerationCanApply(
+      appliedTransitionRuntimeEpoch,
+      appliedTransitionRuntimeGeneration,
+      result.project_epoch,
+      result.runtime_generation,
+    );
+    if (!options.isProjectAuthorityCurrent({
+      project_epoch: result.project_epoch,
+      project_revision: result.project_revision,
+      checkpoint_hash: result.checkpoint_hash,
+    }) || !generationCanApply) return false;
+    const runtime = normalizeVideoLayerTransitionRuntimeSnapshot(result.runtime);
+    appliedTransitionRuntimeEpoch = result.project_epoch;
+    appliedTransitionRuntimeGeneration = result.runtime_generation;
+    options.setVideoTransitionRuntime(runtime);
+    return true;
+  };
+  const resetVideoTransitionRuntimeFence = () => {
+    transitionRuntimeRefreshEpoch += 1;
+    appliedTransitionRuntimeEpoch = null;
+    appliedTransitionRuntimeGeneration = -1;
+    options.setVideoTransitionRuntime({ buses: [] });
+  };
+  const refreshVideoTransitionRuntime = async (showError = false) => {
+    if (transitionRuntimeRefreshInFlight) return null;
+    const authority = options.getCurrentProjectAuthority();
+    const refreshEpoch = transitionRuntimeRefreshEpoch;
+    transitionRuntimeRefreshInFlight = true;
+    try {
+      const result = await options.invoke<VideoLayerTransitionRuntimeReport>(
+        "get_video_layer_transition_runtime",
+        {
+          expectedEpoch: authority.project_epoch,
+          expectedRevision: authority.project_revision,
+          expectedCheckpointHash: authority.checkpoint_hash,
+          ownerId: options.projectTransactionOwnerId,
+        },
+      );
+      if (refreshEpoch !== transitionRuntimeRefreshEpoch || !options.isProjectAuthorityCurrent(authority)) return null;
+      return applyVideoTransitionRuntime(result) ? result : null;
+    } catch (error) {
+      if (showError && refreshEpoch === transitionRuntimeRefreshEpoch && shouldReportVideoRuntimeReadError(error)) setMessageIfAuthorityCurrent(authority, String(error));
+      return null;
+    } finally {
+      transitionRuntimeRefreshInFlight = false;
+    }
+  };
+  const runVideoTransitionRuntime = async <T extends Record<string, unknown>>(
+    command: "launch_video_layer_transition_bus_authoritative" | "release_video_layer_transition_bus_authoritative",
+    commandKind: VideoLayerTransitionAuthoritativeRuntimeCommandKind,
+    request: T,
+  ) => {
+    const authority = options.getCurrentProjectAuthority();
+    const requestId = nextVideoEffectCatalogRequestId();
+    const args = {
+      request,
+      requestId,
+      expectedEpoch: authority.project_epoch,
+      expectedRevision: authority.project_revision,
+      expectedCheckpointHash: authority.checkpoint_hash,
+      ownerId: options.projectTransactionOwnerId,
+    };
+    let result: VideoLayerTransitionAuthoritativeRuntimeResult;
+    try {
+      result = await options.invoke<VideoLayerTransitionAuthoritativeRuntimeResult>(command, args);
+    } catch (error) {
+      const terminal = await options.invoke<VideoEffectCatalogTerminalEnvelope | null>(
+        "get_video_effect_catalog_operation_terminal_result",
+        {
+          requestId,
+          expectedEpoch: authority.project_epoch,
+          expectedRevision: authority.project_revision,
+          expectedCheckpointHash: authority.checkpoint_hash,
+          ownerId: options.projectTransactionOwnerId,
+        },
+      ).catch(() => null);
+      if (!terminal) throw error;
+      if (typeof terminal.shape_fingerprint !== "string" || terminal.shape_fingerprint.length === 0) {
+        throw new Error("Video transition receipt omitted its request-shape fingerprint.");
+      }
+      if (terminal.terminal.kind !== "runtime" || terminal.terminal.result.command_kind !== commandKind || !terminal.runtime) {
+        throw new Error("Video transition terminal receipt did not match the requested runtime command.");
+      }
+      result = terminal.runtime;
+    }
+    if (result.command_kind !== commandKind) {
+      throw new Error(`Video transition command kind mismatch: expected ${commandKind}, received ${result.command_kind}.`);
+    }
+    return applyVideoTransitionRuntime(result) ? result : null;
+  };
+  const launchVideoLayerTransitionBus = async (request: {
+    bus_id: number;
+    from: { kind: "layer"; layer_id: number } | { kind: "group"; group_id: number };
+    to: { kind: "layer"; layer_id: number } | { kind: "group"; group_id: number };
+    kind: VideoClipTakeKind;
+    duration: VideoClipTakeDuration;
+    curve: "linear" | "ease_in" | "ease_out" | "ease_in_out";
+  }) => {
+    try {
+      return await runVideoTransitionRuntime(
+        "launch_video_layer_transition_bus_authoritative",
+        "launch",
+        request,
+      );
+    } catch (error) {
+      options.setMessage(`Layer transition launch failed: ${String(error)}`);
+      return null;
+    }
+  };
+  const releaseVideoLayerTransitionBus = async (busId: number) => {
+    try {
+      return await runVideoTransitionRuntime(
+        "release_video_layer_transition_bus_authoritative",
+        "release",
+        { bus_id: busId },
+      );
+    } catch (error) {
+      options.setMessage(`Layer transition release failed: ${String(error)}`);
+      return null;
+    }
+  };
+  const runVideoClipSlotAuthored = async <T extends Record<string, unknown>>(
+    command: VideoClipSlotAuthoredInvokeCommand,
+    request: T,
+  ): Promise<VideoClipSlotAuthoritativeAuthoredResult | null> => {
+    const authority = options.getCurrentProjectAuthority();
+    const requestId = nextVideoClipSlotRequestId();
+    const kind = expectedKind(command);
+    const args = {
+      request,
+      requestId,
+      expectedEpoch: authority.project_epoch,
+      expectedRevision: authority.project_revision,
+      expectedCheckpointHash: authority.checkpoint_hash,
+      ownerId: options.projectTransactionOwnerId,
+    };
+    try {
+      const result = await options.invoke<VideoClipSlotAuthoritativeAuthoredResult>(command, args);
+      requireCommandKind(result.command_kind, kind);
+      if (!options.authoritativeApplicationIsCurrent(result)) return null;
+      await options.refreshSnapshot();
+      if (!options.isProjectAuthorityCurrent(result.mutation.authority)) return null;
+      return result;
+    } catch (initialError) {
+      const terminal = await recoverVideoClipSlotTerminal(0, requestId, 0, authority).catch(() => null);
+      if (terminal) requireTerminalEnvelope(terminal, kind);
+      if (terminal?.terminal.kind === "authored") {
+        requireCommandKind(terminal.terminal.result.command_kind, kind);
+        if (!options.authoritativeApplicationIsCurrent(terminal)) return null;
+        await options.refreshSnapshot();
+        if (!options.isProjectAuthorityCurrent(terminal.terminal.result.mutation.authority)) return null;
+        return terminal.terminal.result;
+      }
+      if (terminal?.terminal.kind === "failure") throw new Error(terminal.terminal.result.message);
+      throw initialError;
+    }
+  };
+  const runVideoClipSlotRuntime = async <T extends Record<string, unknown>>(
+    command: VideoClipSlotRuntimeInvokeCommand,
+    request: T,
+  ): Promise<VideoClipSlotAuthoritativeRuntimeResult | null> => {
+    const authority = options.getCurrentProjectAuthority();
+    const requestId = nextVideoClipSlotRequestId();
+    const kind = expectedKind(command);
+    const args = {
+      request,
+      requestId,
+      expectedEpoch: authority.project_epoch,
+      expectedRevision: authority.project_revision,
+      expectedCheckpointHash: authority.checkpoint_hash,
+      ownerId: options.projectTransactionOwnerId,
+    };
+    try {
+      const result = await options.invoke<VideoClipSlotAuthoritativeRuntimeResult>(command, args);
+      requireCommandKind(result.command_kind, kind);
+      return applyVideoClipSlotRuntime(result) ? result : null;
+    } catch (initialError) {
+      const terminal = await recoverVideoClipSlotTerminal(0, requestId, 0, authority).catch(() => null);
+      if (terminal) requireTerminalEnvelope(terminal, kind);
+      if (terminal?.terminal.kind === "runtime") {
+        requireCommandKind(terminal.terminal.result.command_kind, kind);
+        if (!terminal.runtime) throw new Error("Clip Slot runtime recovery omitted the fresh runtime report.");
+        requireCommandKind(terminal.runtime.command_kind, kind);
+        return applyVideoClipSlotRuntime(terminal.runtime) ? terminal.runtime : null;
+      }
+      if (terminal?.terminal.kind === "failure") throw new Error(terminal.terminal.result.message);
+      throw initialError;
+    }
+  };
+  const createVideoClipSlot = async (layerId: number, mediaAssetId: number, beforeSlotId: VideoClipSlotId | null) => {
+    // Performed video material keeps running: a new video file slot loops.
+    const assetKind = options.snapshot().video.media_assets.find((asset) => asset.id === mediaAssetId)?.source.kind;
+    try {
+      const result = await runVideoClipSlotAuthored("create_video_clip_slot_authoritative", {
+        layer_id: layerId, media_asset_id: mediaAssetId, in_point_ms: 0, out_point_ms: null,
+        loop_mode: assetKind === "File" ? "Loop" : "Once", speed: 1, cue_points: [], launch_quantization: "Immediate",
+        effect_overrides: [], before_slot_id: beforeSlotId, make_default: false,
+      });
+      if (result) options.setMessage(`Created video clip slot ${result.focus_slot_id ?? ""}.`);
+      return result;
+    } catch (error) { options.setMessage(String(error)); return null; }
+  };
+  const assignVideoClipSlotAsset = async (layerId: number, slotId: VideoClipSlotId, mediaAssetId: number) => {
+    try {
+      const result = await runVideoClipSlotAuthored("assign_video_clip_slot_asset_authoritative", {
+        layer_id: layerId, slot_id: slotId, media_asset_id: mediaAssetId,
+      });
+      if (result) options.setMessage(`Assigned media to video clip slot ${slotId}.`);
+      return result;
+    } catch (error) { options.setMessage(String(error)); return null; }
+  };
+  const updateVideoClipSlot = async (layerId: number, slot: VideoClipSlotSummary) => {
+    const update = () => runVideoClipSlotAuthored("update_video_clip_slot_authoritative", { layer_id: layerId, slot });
+    try {
+      let result;
+      try {
+        result = await update();
+      } catch (error) {
+        if (!/is active, queued, pending, or transitioning/.test(String(error))) throw error;
+        // Selecting a clip in Perform queues it. A slot that is only queued
+        // (not playing, launching or in a take) is unqueued for the edit and
+        // queued again, so its settings can be changed where it was picked.
+        const runtime = (await refreshVideoClipSlotRuntime())?.runtime;
+        if (!runtime) throw error;
+        const layer = runtime.layers.find((candidate) => candidate.layer_id === layerId);
+        const onlyQueued = layer?.queued_slot_id === slot.id && layer.active_slot_id !== slot.id
+          && !layer.pending_launch && !layer.transition;
+        if (!onlyQueued) throw new Error("This clip is playing; stop it to change its settings.");
+        await runVideoClipSlotRuntime("cancel_queued_video_clip_slot_authoritative", { layer_id: layerId });
+        // Each step must carry the authority left by the one before it.
+        await options.refreshSnapshot();
+        try {
+          result = await update();
+        } finally {
+          await options.refreshSnapshot();
+          // Restoring the selection is best effort; the saved edit stands.
+          await runVideoClipSlotRuntime("queue_video_clip_slot_authoritative", { layer_id: layerId, slot_id: slot.id })
+            .catch(() => null);
+        }
+      }
+      if (result) options.setMessage(`Updated video clip slot ${slot.id}.`);
+      return result;
+    } catch (error) { options.setMessage(String(error)); return null; }
+  };
+  const removeVideoClipSlot = async (layerId: number, slotId: VideoClipSlotId) => {
+    try {
+      const result = await runVideoClipSlotAuthored("remove_video_clip_slot_authoritative", {
+        layer_id: layerId, slot_id: slotId,
+      });
+      if (result) options.setMessage(`Removed video clip slot ${slotId}.`);
+      return result;
+    } catch (error) { options.setMessage(String(error)); return null; }
+  };
+  const duplicateVideoClipSlot = async (layerId: number, sourceSlotId: VideoClipSlotId) => {
+    try {
+      const result = await runVideoClipSlotAuthored("duplicate_video_clip_slot_authoritative", {
+        layer_id: layerId, source_slot_id: sourceSlotId, before_slot_id: null,
+      });
+      if (result) options.setMessage(`Duplicated video clip slot ${sourceSlotId}.`);
+      return result;
+    } catch (error) { options.setMessage(String(error)); return null; }
+  };
+  const setDefaultVideoClipSlot = async (layerId: number, slotId: VideoClipSlotId) => {
+    try {
+      const result = await runVideoClipSlotAuthored("set_default_video_clip_slot_authoritative", { layer_id: layerId, slot_id: slotId });
+      if (result) options.setMessage(`Set video clip slot ${slotId} as the default.`);
+      return result;
+    } catch (error) { options.setMessage(String(error)); return null; }
+  };
+  const reorderVideoClipSlots = async (layerId: number, slotIds: VideoClipSlotId[]) => {
+    try {
+      const result = await runVideoClipSlotAuthored("reorder_video_clip_slots_authoritative", { layer_id: layerId, slot_ids: slotIds });
+      if (result) options.setMessage("Reordered video clip slots.");
+      return result;
+    } catch (error) { options.setMessage(String(error)); return null; }
+  };
+  const queueVideoClipSlot = async (layerId: number, slotId: VideoClipSlotId) => {
+    try {
+      const result = await runVideoClipSlotRuntime("queue_video_clip_slot_authoritative", { layer_id: layerId, slot_id: slotId });
+      if (result) options.setMessage(`Queued video clip slot ${slotId}.`);
+      return result;
+    } catch (error) { options.setMessage(String(error)); return null; }
+  };
+  const cancelQueuedVideoClipSlot = async (layerId: number) => {
+    try {
+      const result = await runVideoClipSlotRuntime("cancel_queued_video_clip_slot_authoritative", { layer_id: layerId });
+      if (result) options.setMessage("Canceled queued video clip slot.");
+      return result;
+    } catch (error) { options.setMessage(String(error)); return null; }
+  };
+  const launchVideoClipSlot = async (
+    layerId: number,
+    slotId: VideoClipSlotId | null = null,
+    transitionKind: VideoClipTakeKind = "Cut",
+    transitionDuration: VideoClipTakeDuration = { unit: "Milliseconds", value_milliunits: 0 },
+    previewGeneration?: number,
+  ) => {
+    try {
+      const result = await runVideoClipSlotRuntime("launch_video_clip_slot_authoritative", {
+        layer_id: layerId,
+        slot_id: slotId,
+        // The native commit validates this exact Preview session; a refused
+        // audition must never fall through to the queued/default clip.
+        ...(previewGeneration === undefined ? {} : { preview_generation: previewGeneration }),
+        transition_kind: transitionKind,
+        transition_duration_ms: 0,
+        transition_duration: transitionKind === "Cut"
+          ? { unit: "Milliseconds", value_milliunits: 0 }
+          : {
+            unit: transitionDuration.unit,
+            value_milliunits: Math.max(1, Math.round(transitionDuration.value_milliunits)),
+          },
+      });
+      if (result) {
+        // Say what happened: a quantized take is pending until its beat/bar.
+        const layer = result.runtime.layers.find((candidate) => candidate.layer_id === layerId);
+        const pending = layer?.pending_launch;
+        if (pending) {
+          options.setMessage(pending.quantization === "NextBar"
+            ? `Video clip slot ${pending.slot_id} launches on the next bar.`
+            : `Video clip slot ${pending.slot_id} launches on the next beat.`);
+        } else {
+          options.setMessage(`Launched video clip slot ${layer?.active_slot_id ?? slotId ?? "default"}.`);
+        }
+      }
+      return result;
+    } catch (error) { options.setMessage(String(error)); return null; }
+  };
+  const seekVideoClipSlot = async (layerId: number, positionMs: number) => {
+    try {
+      return await runVideoClipSlotRuntime("seek_video_clip_slot_authoritative", {
+        layer_id: layerId, position_ms: Math.max(0, Math.round(positionMs)),
+      });
+    } catch (error) { options.setMessage(String(error)); return null; }
+  };
+  const importAndAssignVideoClipSlots = async (
+    paths: readonly string[],
+    targetLayerId: number,
+    beforeSlotId: VideoClipSlotId | null,
+  ) => {
+    const normalizedPaths = paths.map((path) => path.trim()).filter(Boolean);
+    if (normalizedPaths.length === 0) return null;
+    const initialAuthority = options.getCurrentProjectAuthority();
+    let authority = initialAuthority;
+    const requestId = nextVideoClipSlotRequestId();
+    let operation: MediaAssetOperationLease | null = null;
+    let preparedToken: number | null = null;
+    let operationGeneration = 0;
+    let reservationStarted = false;
+    try {
+      const preflight = await options.prepareMediaAssetOperationStart(initialAuthority);
+      authority = preflight.authority;
+      if (!options.isProjectAuthorityCurrent(authority)) return null;
+      operation = options.beginMediaAssetOperation("Import and assign clip slots", "preparing");
+      const startReport = await options.invoke<{
+        request_id: number;
+        operation_generation: number;
+        project_epoch: number;
+        project_revision: number;
+        checkpoint_hash: string;
+      }>("start_media_asset_operation", {
+        requestId,
+        expectedEpoch: authority.project_epoch,
+        ownerId: options.projectTransactionOwnerId,
+      });
+      if (startReport.request_id !== requestId || startReport.project_epoch !== authority.project_epoch
+        || startReport.project_revision !== authority.project_revision || startReport.checkpoint_hash !== authority.checkpoint_hash) {
+        throw new Error("Clip import was superseded before preparation; no project changes were made.");
+      }
+      reservationStarted = true;
+      operationGeneration = startReport.operation_generation;
+      operation.setPhase("hashing");
+      const prepared = await options.invoke<MediaAssetImportReport>("prepare_reserved_media_assets", {
+        requestId,
+        operationGeneration,
+        kind: "File",
+        paths: normalizedPaths,
+        expectedEpoch: authority.project_epoch,
+        ownerId: options.projectTransactionOwnerId,
+      });
+      options.setMediaAssetImportReport(prepared);
+      preparedToken = prepared.prepared_import_token ?? null;
+      // Direct target drops are all-or-nothing: do not create a partial bank
+      // after a picker supplied multiple visual files.
+      if (preparedToken === null || prepared.prepared !== normalizedPaths.length || prepared.failed > 0 || prepared.skipped > 0) {
+        throw new Error("Every dropped media file must prepare before Clip Bank assignment; no project changes were made.");
+      }
+      operation.setPhase("finalizing");
+      const finalized = await options.invoke<MediaAssetImportReport>("finalize_prepared_media_assets", {
+        preparedImportToken: preparedToken,
+        requestId,
+        operationGeneration,
+        expectedEpoch: authority.project_epoch,
+        ownerId: options.projectTransactionOwnerId,
+      });
+      options.setMediaAssetImportReport(finalized);
+      operation.setPhase("committing");
+      const args = {
+        request: { target_layer_id: targetLayerId, before_slot_id: beforeSlotId, make_default: false },
+        preparedImportToken: preparedToken,
+        requestId,
+        operationGeneration,
+        expectedEpoch: authority.project_epoch,
+        expectedRevision: authority.project_revision,
+        expectedCheckpointHash: authority.checkpoint_hash,
+        ownerId: options.projectTransactionOwnerId,
+      };
+      let result: VideoClipSlotAuthoritativeAuthoredResult;
+      let applicationCurrent = false;
+      try {
+        result = await options.invoke<VideoClipSlotAuthoritativeAuthoredResult>("import_and_assign_video_clip_slots_authoritative", args);
+        requireCommandKind(result.command_kind, "import_and_assign");
+        applicationCurrent = options.authoritativeApplicationIsCurrent(result);
+      } catch (initialError) {
+        const terminal = await recoverVideoClipSlotTerminal(preparedToken, requestId, operationGeneration, authority).catch(() => null);
+        if (terminal) requireTerminalEnvelope(terminal, "import_and_assign");
+        if (terminal?.terminal.kind === "authored") {
+          requireCommandKind(terminal.terminal.result.command_kind, "import_and_assign");
+          result = terminal.terminal.result;
+          applicationCurrent = options.authoritativeApplicationIsCurrent(terminal);
+        }
+        else if (terminal?.terminal.kind === "failure") throw new Error(terminal.terminal.result.message);
+        else throw initialError;
+      }
+      if (!applicationCurrent) return null;
+      await options.refreshSnapshot();
+      if (!options.isProjectAuthorityCurrent(result.mutation.authority)) return null;
+      options.setMessage(`Imported and assigned ${result.created_slot_ids.length} video clip slot(s).`);
+      return result;
+    } catch (error) {
+      if (reservationStarted) {
+        void options.invoke<boolean>("cancel_media_asset_operation", {
+          requestId,
+          operationGeneration,
+          ownerId: options.projectTransactionOwnerId,
+        }).catch(() => undefined);
+      }
+      // The backend's prepared-token reaper owns abort cleanup; a failed
+      // prepare/finalize/direct operation cannot apply renderer-side state.
+      if (options.isProjectAuthorityCurrent(authority)) options.setMessage(String(error));
+      return null;
+    } finally {
+      operation?.release();
+    }
+  };
+  const addVideoLayer = async () => {
+    let sideEffectAuthority = options.getCurrentProjectAuthority();
+    try {
+      const sourceKind = options.videoSourceKind();
+      if (sourceKind === "File" || sourceKind === "StillImage") {
+        const path = options.videoPath().trim();
+        if (!path) {
+          options.setMessage("Choose a local media file before adding a layer.");
+          return;
+        }
+        const initiatingAuthority = options.consumeVideoSourceExpectedAuthority();
+        sideEffectAuthority = initiatingAuthority;
+        const preparedStart = await preflightAndBeginMediaAssetOperation(
+          initiatingAuthority,
+          options.prepareMediaAssetOperationStart,
+          () => options.beginMediaAssetOperation(`Add ${sourceKind === "StillImage" ? "still" : "video"} layer`, "preparing"),
+        );
+        const operationAuthority = preparedStart.authority;
+        sideEffectAuthority = operationAuthority;
+        const mediaOperation = preparedStart.operation;
+        try {
+          if (!options.isProjectAuthorityCurrent(operationAuthority)) return;
+          const staged = await prepareFinalizeAndCommitMediaAssets({
+            invoke: options.invoke,
+            kind: sourceKind,
+            paths: [path],
+            expectedEpoch: operationAuthority.project_epoch,
+            expectedAuthority: operationAuthority,
+            ownerId: options.projectTransactionOwnerId,
+            signal: mediaOperation.signal,
+            onPhase: mediaOperation.setPhase,
+            onReport: options.setMediaAssetImportReport,
+            commitCommand: sourceKind === "StillImage"
+              ? "commit_prepared_still_image_layer_authoritative"
+              : "commit_prepared_video_file_layer_authoritative",
+            commitArgs: { label: options.videoLabel() },
+          });
+          const layerId = staged.committed;
+          sideEffectAuthority = staged.terminalAuthority;
+          if (!staged.applicationCurrent || !options.isProjectAuthorityCurrent(staged.terminalAuthority)) {
+            return;
+          }
+          options.setMediaAssetImportReport(staged.report);
+          if (layerId === null) {
+            options.setMessage(mediaAssetImportReportMessage(staged.report));
+            return;
+          }
+          options.setVideoLabel(`Layer ${options.snapshot().video.layers.length + 2}`);
+          const failures = staged.report.failed + staged.report.skipped;
+          options.setMessage(
+            `Added video layer ${layerId} from 1 prepared media source.${failures > 0 ? ` ${mediaAssetImportReportMessage(staged.report)}` : ""}`,
+          );
+          await options.refreshSnapshot();
+        } finally {
+          mediaOperation.release();
+        }
+        return;
+      }
+      const layerId = await options.invoke<number>("add_video_input_layer", {
+        label: options.videoLabel(), kind: sourceKind, name: options.videoPath(),
+      });
+      options.setVideoLabel(`Layer ${options.snapshot().video.layers.length + 2}`);
+      options.setMessage(`Added video layer ${layerId}`);
+      await options.refreshSnapshot();
+    } catch (error) {
+      // A picker/add error from A is not an error of a replacement B/C show.
+      // The actual current operation owns the status line after its E/R/H wins.
+      setMessageIfAuthorityCurrent(sideEffectAuthority, String(error));
+    }
+  };
+  const importMediaFiles = async (kindOverride?: "File" | "StillImage") => {
+    const kind = kindOverride ?? options.videoSourceKind();
+    if (kind !== "File" && kind !== "StillImage") {
+      options.setMessage("Batch import supports local video files and still images only.");
+      return;
+    }
+    const initiatingAuthority = options.getCurrentProjectAuthority();
+    let sideEffectAuthority = initiatingAuthority;
+    try {
+      // Fence before the native picker: dialog A, hashing A, and commit A all
+      // use this identity. App's mutation wrapper rejects a later project B.
+      const preparedStart = await preflightAndBeginMediaAssetOperation(
+        initiatingAuthority,
+        options.prepareMediaAssetOperationStart,
+        () => options.beginMediaAssetOperation("Import media", "picker"),
+      );
+      const operationAuthority = preparedStart.authority;
+      sideEffectAuthority = operationAuthority;
+      const mediaOperation = preparedStart.operation;
+      try {
+        const paths = await options.invoke<string[]>("select_video_source_files", { kind });
+        if (!options.isProjectAuthorityCurrent(operationAuthority)) return;
+        if (paths.length === 0) {
+          options.setMessage("Media import canceled.");
+          return;
+        }
+        const staged = await prepareFinalizeAndCommitMediaAssets({
+          invoke: options.invoke,
+          kind,
+          paths,
+          expectedEpoch: operationAuthority.project_epoch,
+          expectedAuthority: operationAuthority,
+          ownerId: options.projectTransactionOwnerId,
+          signal: mediaOperation.signal,
+          onPhase: mediaOperation.setPhase,
+          onReport: options.setMediaAssetImportReport,
+          commitCommand: "commit_prepared_media_assets_authoritative",
+        });
+        const report = staged.committed ?? staged.report;
+        sideEffectAuthority = staged.terminalAuthority;
+        if (!staged.applicationCurrent || !options.isProjectAuthorityCurrent(staged.terminalAuthority)) {
+          return;
+        }
+        options.setMediaAssetImportReport(report);
+        // Normal library import never creates layers: one selected file becomes
+        // one catalog entry (or a dedupe reuse), preserving the operator's mix.
+        options.setMessage(mediaAssetImportReportMessage(report));
+        await options.refreshSnapshot();
+      } finally {
+        mediaOperation.release();
+      }
+    } catch (error) { setMessageIfAuthorityCurrent(sideEffectAuthority, String(error)); }
+  };
+  const importMediaFilesFromPaths = async (paths: readonly string[]) => {
+    const normalizedPaths = paths.map((path) => path.trim()).filter(Boolean);
+    if (normalizedPaths.length === 0) return null;
+    const authority = options.getCurrentProjectAuthority();
+    let sideEffectAuthority = authority;
+    const preparedStart = await preflightAndBeginMediaAssetOperation(
+      authority,
+      options.prepareMediaAssetOperationStart,
+      () => options.beginMediaAssetOperation("Import dropped media", "preparing"),
+    );
+    sideEffectAuthority = preparedStart.authority;
+    try {
+      const staged = await prepareFinalizeAndCommitMediaAssets({
+        invoke: options.invoke,
+        kind: "File",
+        paths: normalizedPaths,
+        expectedEpoch: sideEffectAuthority.project_epoch,
+        expectedAuthority: sideEffectAuthority,
+        ownerId: options.projectTransactionOwnerId,
+        signal: preparedStart.operation.signal,
+        onPhase: preparedStart.operation.setPhase,
+        onReport: options.setMediaAssetImportReport,
+        commitCommand: "commit_prepared_media_assets_authoritative",
+      });
+      if (!staged.applicationCurrent || !options.isProjectAuthorityCurrent(staged.terminalAuthority)) return null;
+      options.setMediaAssetImportReport(staged.committed ?? staged.report);
+      options.setMessage(mediaAssetImportReportMessage(staged.committed ?? staged.report));
+      await options.refreshSnapshot();
+      return staged.report;
+    } catch (error) {
+      setMessageIfAuthorityCurrent(sideEffectAuthority, String(error));
+      return null;
+    } finally {
+      preparedStart.operation.release();
+    }
+  };
+  /** One new layer per library file (the existing asset is reused by content). */
+  const addMediaPathsAsLayers = async (kind: "File" | "StillImage", paths: readonly string[]) => {
+    const normalizedPaths = paths.map((path) => path.trim()).filter(Boolean);
+    if (normalizedPaths.length === 0) return null;
+    const authority = options.getCurrentProjectAuthority();
+    let sideEffectAuthority = authority;
+    const preparedStart = await preflightAndBeginMediaAssetOperation(
+      authority,
+      options.prepareMediaAssetOperationStart,
+      () => options.beginMediaAssetOperation("Add layer from Media Library", "preparing"),
+    );
+    sideEffectAuthority = preparedStart.authority;
+    try {
+      const staged = await prepareFinalizeAndCommitMediaAssets({
+        invoke: options.invoke,
+        kind,
+        paths: normalizedPaths,
+        expectedEpoch: sideEffectAuthority.project_epoch,
+        expectedAuthority: sideEffectAuthority,
+        ownerId: options.projectTransactionOwnerId,
+        signal: preparedStart.operation.signal,
+        onPhase: preparedStart.operation.setPhase,
+        onReport: options.setMediaAssetImportReport,
+        commitCommand: "commit_prepared_local_media_layers_authoritative",
+        commitArgs: { kind },
+      });
+      if (!staged.applicationCurrent || !options.isProjectAuthorityCurrent(staged.terminalAuthority)) return null;
+      const layerIds = staged.committed ?? [];
+      options.setMessage(`Added ${layerIds.length} layer(s) from the Media Library.`);
+      await options.refreshSnapshot();
+      return layerIds;
+    } catch (error) {
+      setMessageIfAuthorityCurrent(sideEffectAuthority, String(error));
+      return null;
+    } finally {
+      preparedStart.operation.release();
+    }
+  };
+  const launchVideoClip = async (layerId: number, fadeMs: number) => {
+    try {
+      await executeVideoClipLaunchOutputControl(options.invoke, layerId, Math.max(0, Math.round(fadeMs)));
+      options.setMessage(`Launched video clip ${layerId}${fadeMs > 0 ? ` with ${Math.round(fadeMs)}ms fade` : ""}.`);
+      await options.refreshSnapshot();
+      return true;
+    } catch (error) { options.setMessage(String(error)); return false; }
+  };
+  const takeVideoClip = async (layerId: number, fadeMs: number) => {
+    try {
+      const duration = Math.max(0, Math.round(fadeMs));
+      await executeVideoClipTakeOutputControl(options.invoke, layerId, duration);
+      options.setMessage(`${duration > 0 ? "Took" : "Cut to"} video clip ${layerId}${duration > 0 ? ` over ${duration}ms` : ""}.`);
+      await options.refreshSnapshot();
+      return true;
+    } catch (error) { options.setMessage(String(error)); return false; }
+  };
+  const stopVideoClip = async (layerId: number, fadeMs: number) => {
+    try {
+      await options.invoke("stop_video_clip", { layerId, fadeMs: Math.max(0, Math.round(fadeMs)) });
+      options.setMessage(`Stopped video clip ${layerId}${fadeMs > 0 ? ` with ${Math.round(fadeMs)}ms fade` : ""}.`);
+      await options.refreshSnapshot();
+      return true;
+    } catch (error) { options.setMessage(String(error)); return false; }
+  };
+  const playVideoLayerAudioMonitor = async (layerId: number, volume: number, deviceName?: string) => {
+    try {
+      options.setVideoAudioMonitorStatus(await options.invoke<VideoAudioMonitorStatus>(
+        "play_video_layer_audio_monitor",
+        { layerId, volume: Math.max(0, Math.min(2, volume)), deviceName: deviceName?.trim() || null },
+      ));
+      options.setMessage(`Monitoring embedded audio for video layer ${layerId}.`);
+    } catch (error) { options.setMessage(String(error)); }
+  };
+  const refreshAudioOutputDevices = async () => {
+    try {
+      const devices = await options.invoke<string[]>("list_audio_output_devices");
+      options.setAudioOutputDevices(devices);
+      options.setMessage(`Found ${devices.length} audio output device(s).`);
+    } catch (error) { options.setMessage(String(error)); }
+  };
+  const startVideoOutputRecording = async (outputId: number, includeAudio = false) => {
+    try {
+      const status = await options.invoke<VideoRecordingStatus | null>("start_video_output_recording", {
+        outputId,
+        frameRate: 30,
+        includeAudio,
+      });
+      if (status) {
+        options.setVideoRecordingStatus(status);
+        options.setMessage(`Recording output ${outputId} to ${status.path ?? "MP4"}${status.audio_included ? ` with ${status.audio_track_count} audio track(s)` : " without audio"}.`);
+      }
+    } catch (error) { options.setMessage(String(error)); }
+  };
+  const stopVideoOutputRecording = async () => {
+    try {
+      const status = await options.invoke<VideoRecordingStatus>("stop_video_output_recording");
+      options.setVideoRecordingStatus(status);
+      options.setMessage(status.last_error
+        ? `Recording failed: ${status.last_error}`
+        : `Recording stopped after ${status.frames_written} frame(s).`);
+    } catch (error) { options.setMessage(String(error)); }
+  };
+  const refreshVideoRecordingStatus = async () => {
+    try {
+      options.setVideoRecordingStatus(await options.invoke<VideoRecordingStatus>("video_output_recording_status"));
+    } catch { /* Background status polling is best-effort. */ }
+  };
+  const stopVideoLayerAudioMonitor = async (layerId: number) => {
+    try {
+      options.setVideoAudioMonitorStatus(await options.invoke<VideoAudioMonitorStatus>(
+        "stop_video_layer_audio_monitor",
+        { layerId },
+      ));
+      options.setMessage(`Stopped audio monitor for video layer ${layerId}.`);
+    } catch (error) { options.setMessage(String(error)); }
+  };
+  const setVideoLayerAudioMonitorVolume = async (layerId: number, volume: number) => {
+    try {
+      options.setVideoAudioMonitorStatus(await options.invoke<VideoAudioMonitorStatus>(
+        "set_video_layer_audio_monitor_volume",
+        { layerId, volume: Math.max(0, Math.min(2, volume)) },
+      ));
+      return true;
+    } catch { return false; }
+  };
+  const refreshVideoAudioMonitorStatus = async (silent = false) => {
+    try {
+      const status = await options.invoke<VideoAudioMonitorStatus>("video_audio_monitor_status");
+      options.setVideoAudioMonitorStatus(status);
+      if (!silent) options.setMessage(`Audio monitor: ${status.active_layer_ids.length} active layer(s).`);
+    } catch (error) { if (!silent) options.setMessage(String(error)); }
+  };
+  const removeVideoLayer = async (layerId: number) => {
+    try {
+      await options.invoke("remove_video_layer", { layerId });
+      options.setMessage(`Removed video layer ${layerId}`);
+      await options.refreshSnapshot();
+    } catch (error) { options.setMessage(String(error)); }
+  };
+  const duplicateVideoLayer = async (layer: { id: number; label: string }) => {
+    try {
+      const layerId = await options.invoke<number>("duplicate_video_layer", {
+        sourceLayerId: layer.id, label: `${layer.label} Copy`,
+      });
+      options.setMessage(`Duplicated video layer ${layerId}`);
+      await options.refreshSnapshot();
+    } catch (error) { options.setMessage(String(error)); }
+  };
+  const moveVideoLayer = async (layerId: number, delta: -1 | 1) => {
+    const layerIds = options.snapshot().video.layers.map((layer) => layer.id);
+    const index = layerIds.indexOf(layerId);
+    const nextIndex = index + delta;
+    if (index < 0 || nextIndex < 0 || nextIndex >= layerIds.length) return;
+    const nextLayerIds = [...layerIds];
+    [nextLayerIds[index], nextLayerIds[nextIndex]] = [nextLayerIds[nextIndex], nextLayerIds[index]];
+    try {
+      await options.invoke("set_video_layer_order", { layerIds: nextLayerIds });
+      options.setMessage(`Moved video layer ${layerId}`);
+      await options.refreshSnapshot();
+    } catch (error) { options.setMessage(String(error)); }
+  };
+  const setVideoLayerLabel = async (layerId: number, label: string) => {
+    try {
+      await options.invoke("set_video_layer_label", { layerId, label });
+      await options.refreshSnapshot();
+    } catch (error) { options.setMessage(String(error)); }
+  };
+  const refreshVideoLayerMetadata = async (layerId: number) => {
+    let sideEffectAuthority = options.getCurrentProjectAuthority();
+    try {
+      const layer = options.snapshot().video.layers.find((candidate) => candidate.id === layerId);
+      const assetId = layer?.media_asset_id;
+      const path = layer?.source.path?.trim();
+      if (assetId === null || assetId === undefined || !path) {
+        options.setMessage("This layer has no relinkable Media Library source.");
+        return;
+      }
+      const initiatingAuthority = options.getCurrentProjectAuthority();
+      sideEffectAuthority = initiatingAuthority;
+      const preparedStart = await preflightAndBeginMediaAssetOperation(
+        initiatingAuthority,
+        options.prepareMediaAssetOperationStart,
+        () => options.beginMediaAssetOperation("Refresh media metadata", "preparing"),
+      );
+      const operationAuthority = preparedStart.authority;
+      sideEffectAuthority = operationAuthority;
+      const mediaOperation = preparedStart.operation;
+      try {
+        if (!options.isProjectAuthorityCurrent(operationAuthority)) return;
+        const staged = await prepareFinalizeAndCommitMediaAssetRelink({
+          invoke: options.invoke,
+          assetId,
+          replacementPath: path,
+          policy: "RequireContentMatch",
+          expectedEpoch: operationAuthority.project_epoch,
+          expectedAuthority: operationAuthority,
+          ownerId: options.projectTransactionOwnerId,
+          signal: mediaOperation.signal,
+          onPhase: mediaOperation.setPhase,
+        });
+        sideEffectAuthority = staged.terminalAuthority;
+        if (!staged.applicationCurrent || !options.isProjectAuthorityCurrent(staged.terminalAuthority)) {
+          return;
+        }
+        if (!staged.outcome) {
+          options.setMessage("Media metadata refresh did not return a result.");
+          return;
+        }
+        await options.refreshSnapshot();
+        // Refresh itself awaits. A later project C can therefore replace the
+        // asset ID while B's refresh is still returning; do not report B.
+        if (!options.isProjectAuthorityCurrent(staged.terminalAuthority)) return;
+        options.setMessage(mediaAssetRelinkOutcomeMessage(staged.outcome));
+      } finally {
+        mediaOperation.release();
+      }
+    } catch (error) { setMessageIfAuthorityCurrent(sideEffectAuthority, String(error)); }
+  };
+  const runMediaAssetRelink = async (
+    assetId: MediaAssetId,
+    replacementPath: string,
+    policy: "RequireContentMatch" | "AdoptReplacement",
+    label: string,
+    decisionAuthority?: ProjectAuthorityToken,
+    onOperationAuthority?: (authority: ProjectAuthorityToken) => void,
+    undoGroup?: ProjectUndoGroup,
+  ) => {
+    if (decisionAuthority && !options.isProjectAuthorityCurrent(decisionAuthority)) {
+      throw new Error("Project changed after replacement approval was requested; choose the replacement again.");
+    }
+    const expectedAuthority = decisionAuthority ?? options.getCurrentProjectAuthority();
+    undoGroup?.assertCurrent(expectedAuthority);
+    if (!options.isProjectAuthorityCurrent(expectedAuthority)) {
+      throw new Error("Project changed before replacement adoption. Choose the replacement again.");
+    }
+    const preparedStart = await preflightAndBeginMediaAssetOperation(
+      expectedAuthority,
+      options.prepareMediaAssetOperationStart,
+      () => options.beginMediaAssetOperation(label, "preparing"),
+    );
+    const operationAuthority = preparedStart.authority;
+    onOperationAuthority?.(operationAuthority);
+    const mediaOperation = preparedStart.operation;
+    try {
+      undoGroup?.assertCurrent(operationAuthority);
+      // A RequireContentMatch decision is a one-shot decision for exact E/R/H.
+      // Even a successful local mapping ACK while preparing adoption is
+      // a different project image, so require a fresh file selection rather than
+      // silently adopting into that newer image.
+      if (decisionAuthority && !sameProjectAuthority(decisionAuthority, operationAuthority)) {
+        throw new Error("Project changed while replacement approval was being confirmed; choose the replacement again.");
+      }
+      if (!options.isProjectAuthorityCurrent(operationAuthority)) {
+        throw new Error("Project changed while replacement approval was being confirmed; nothing was applied.");
+      }
+      return await prepareFinalizeAndCommitMediaAssetRelink({
+        invoke: options.invoke,
+        assetId,
+        replacementPath,
+        policy,
+        expectedEpoch: operationAuthority.project_epoch,
+        expectedAuthority: operationAuthority,
+        ownerId: options.projectTransactionOwnerId,
+        undoGroupId: undoGroup?.id,
+        signal: mediaOperation.signal,
+        onPhase: mediaOperation.setPhase,
+      });
+    } finally {
+      mediaOperation.release();
+    }
+  };
+  const relinkMediaAsset = async (
+    assetId: MediaAssetId,
+    setRelinkMessage: (message: string) => unknown = options.setMessage,
+  ): Promise<MediaAssetRelinkUiResult | null> => {
+    const setRelinkMessageIfAuthorityCurrent = (authority: ProjectAuthorityToken, message: string) => {
+      if (options.isProjectAuthorityCurrent(authority)) setRelinkMessage(message);
+    };
+    const initiatingAuthority = options.getCurrentProjectAuthority();
+    let sideEffectAuthority = initiatingAuthority;
+    try {
+      const asset = options.snapshot().video.media_assets.find((candidate) => candidate.id === assetId);
+      if (!asset || (asset.source.kind !== "File" && asset.source.kind !== "StillImage")) {
+        setRelinkMessageIfAuthorityCurrent(initiatingAuthority, `Media asset ${assetId} is not a relinkable local file.`);
+        return null;
+      }
+
+      const preparedStart = await preflightAndBeginMediaAssetOperation(
+        initiatingAuthority,
+        options.prepareMediaAssetOperationStart,
+        () => options.beginMediaAssetOperation(`Relink ${asset.label}`, "picker"),
+      );
+      const operationAuthority = preparedStart.authority;
+      sideEffectAuthority = operationAuthority;
+      const pickerOperation = preparedStart.operation;
+      let replacementPath: string | null = null;
+      let firstOutcome: MediaAssetRelinkOutcome | null = null;
+      let decisionAuthority: ProjectAuthorityToken | null = null;
+      try {
+        replacementPath = await options.invoke<string | null>("select_video_source_file", {
+          kind: asset.source.kind,
+        });
+        if (!options.isProjectAuthorityCurrent(operationAuthority)) return null;
+        if (!replacementPath) {
+          setRelinkMessage("Media relink canceled. No project changes were made.");
+          return null;
+        }
+        const first = await prepareFinalizeAndCommitMediaAssetRelink({
+          invoke: options.invoke,
+          assetId,
+          replacementPath,
+          policy: "RequireContentMatch",
+          expectedEpoch: operationAuthority.project_epoch,
+          expectedAuthority: operationAuthority,
+          ownerId: options.projectTransactionOwnerId,
+          signal: pickerOperation.signal,
+          onPhase: pickerOperation.setPhase,
+        });
+        if (!first.applicationCurrent || !options.isProjectAuthorityCurrent(first.terminalAuthority)) return null;
+        sideEffectAuthority = first.terminalAuthority;
+        firstOutcome = first.outcome;
+        decisionAuthority = first.terminalAuthority;
+        if (first.committed) {
+          await options.refreshSnapshot();
+          // The refresh can cross an authority replacement.  Its asset IDs may
+          // be reused by C, so do not return a B outcome for App to clear.
+          if (!options.isProjectAuthorityCurrent(first.terminalAuthority)) return null;
+          if (firstOutcome) setRelinkMessage(mediaAssetRelinkOutcomeMessage(firstOutcome));
+          return firstOutcome
+            ? { outcome: firstOutcome, terminalAuthority: first.terminalAuthority }
+            : null;
+        }
+      } finally {
+        pickerOperation.release();
+      }
+
+      // Adoption is never inferred from a generic mismatch. The backend must
+      // first return the dedicated decision for the file the operator selected.
+      // Adopting its identity is undoable; there is no additional Yes/No prompt.
+      if (!replacementPath || !decisionAuthority || firstOutcome?.kind !== "needs_explicit_adoption") {
+        if (!options.isProjectAuthorityCurrent(sideEffectAuthority)) return null;
+        if (firstOutcome) setRelinkMessage(mediaAssetRelinkOutcomeMessage(firstOutcome));
+        return firstOutcome ? { outcome: firstOutcome, terminalAuthority: sideEffectAuthority } : null;
+      }
+      if (!options.isProjectAuthorityCurrent(decisionAuthority)) {
+        setRelinkMessage("Project changed before replacement adoption. Choose the replacement again.");
+        return null;
+      }
+
+      const adopted = await runMediaAssetRelink(
+        assetId,
+        replacementPath,
+        "AdoptReplacement",
+        `Adopt replacement for ${asset.label}`,
+        decisionAuthority,
+        (authority) => { sideEffectAuthority = authority; },
+      );
+      if (!adopted.applicationCurrent || !options.isProjectAuthorityCurrent(adopted.terminalAuthority)) return null;
+      sideEffectAuthority = adopted.terminalAuthority;
+      if (adopted.committed) await options.refreshSnapshot();
+      if (!options.isProjectAuthorityCurrent(adopted.terminalAuthority)) return null;
+      if (adopted.outcome) setRelinkMessage(mediaAssetRelinkOutcomeMessage(adopted.outcome));
+      return adopted.outcome
+        ? { outcome: adopted.outcome, terminalAuthority: adopted.terminalAuthority }
+        : null;
+    } catch (error) {
+      setRelinkMessageIfAuthorityCurrent(sideEffectAuthority, String(error));
+      return null;
+    }
+  };
+  /**
+   * Read-only: asks for a folder and lists its media files. The picker is
+   * registered as a media operation like the single-file Relink picker, so a
+   * project replacement during the dialog discards the result.
+   */
+  const scanMediaRelinkFolder = async (
+    setRelinkMessage: (message: string) => unknown = options.setMessage,
+  ): Promise<MediaRelinkFolderScan | null> => {
+    let sideEffectAuthority = options.getCurrentProjectAuthority();
+    try {
+      const preparedStart = await preflightAndBeginMediaAssetOperation(
+        sideEffectAuthority,
+        options.prepareMediaAssetOperationStart,
+        () => options.beginMediaAssetOperation("Choose relink folder", "picker"),
+      );
+      sideEffectAuthority = preparedStart.authority;
+      const pickerOperation = preparedStart.operation;
+      try {
+        const scan = await options.invoke<MediaRelinkFolderScan | null>("select_media_relink_folder");
+        if (!options.isProjectAuthorityCurrent(sideEffectAuthority)) return null;
+        if (!scan) {
+          setRelinkMessage("Folder relink canceled. No project changes were made.");
+          return null;
+        }
+        return scan;
+      } finally {
+        pickerOperation.release();
+      }
+    } catch (error) {
+      if (options.isProjectAuthorityCurrent(sideEffectAuthority)) setRelinkMessage(String(error));
+      return null;
+    }
+  };
+  /**
+   * Applies reviewed folder-relink proposals one asset at a time through the
+   * same ticketed relink operation as the single-file Relink. Each publication
+   * keeps its exact ticket; the contiguous batch shares one undo entry. A failure
+   * keeps the successful prefix undoable; unrelated publication closes the batch.
+   * The policy is always RequireContentMatch: a file whose hash differs is never
+   * adopted in a batch; it is reported for an individual, explicitly confirmed
+   * relink.
+   */
+  const applyMediaRelinkRequests = async (
+    requests: readonly MediaRelinkApplyRequest[],
+    onProgress?: (completed: number, total: number) => void,
+  ): Promise<{ result: MediaRelinkApplyResult; terminalAuthority: ProjectAuthorityToken } | null> => {
+    const result: MediaRelinkApplyResult = { relinked: [], differentContent: [], failed: [], skipped: [] };
+    // Asset IDs are only stable within one project epoch. A replaced project
+    // voids the whole review; an unrelated edit stops the remaining batch.
+    const startEpoch = options.getCurrentProjectAuthority().project_epoch;
+    const inSameProject = () => options.getCurrentProjectAuthority().project_epoch === startEpoch;
+    let terminalAuthority = options.getCurrentProjectAuthority();
+    const undoGroup = createProjectUndoGroup(terminalAuthority);
+    try {
+      let index = 0;
+      for (; index < requests.length; index += 1) {
+        if (!inSameProject()) return null;
+        if (!undoGroup.isCurrent(options.getCurrentProjectAuthority())) break;
+        const request = requests[index];
+        const asset = options.snapshot().video.media_assets.find((candidate) => candidate.id === request.assetId);
+        if (!asset || (asset.source.kind !== "File" && asset.source.kind !== "StillImage")) {
+          result.failed.push({
+            assetId: request.assetId,
+            label: request.label,
+            message: `Media asset ${request.assetId} is not a relinkable local file.`,
+          });
+          onProgress?.(index + 1, requests.length);
+          continue;
+        }
+        if ((asset.source.path ?? "") !== request.previousPath) {
+          // Asset IDs can be reused by a replacement project; only the asset the
+          // operator actually reviewed may be relinked.
+          result.failed.push({
+            assetId: request.assetId,
+            label: request.label,
+            message: "This asset changed after the folder was reviewed. Choose the folder again.",
+          });
+          onProgress?.(index + 1, requests.length);
+          continue;
+        }
+        try {
+          const staged = await runMediaAssetRelink(
+            request.assetId,
+            request.replacementPath,
+            "RequireContentMatch",
+            `Relink ${asset.label}`,
+            undefined,
+            undefined,
+            undoGroup,
+          );
+          // A committed relink stands even if a later step fails, so record it
+          // before anything else can throw.
+          if (staged.committed) terminalAuthority = staged.terminalAuthority;
+          const groupCurrent = staged.committed
+            ? undoGroup.acceptPublication(staged.terminalAuthority, options.getCurrentProjectAuthority())
+            : undoGroup.isCurrent(options.getCurrentProjectAuthority());
+          const outcome = staged.outcome;
+          if (outcome?.kind === "relinked") result.relinked.push(request.assetId);
+          else if (outcome?.kind === "needs_explicit_adoption" || outcome?.kind === "hash_mismatch") {
+            result.differentContent.push({ assetId: request.assetId, label: request.label });
+          } else {
+            result.failed.push({
+              assetId: request.assetId,
+              label: request.label,
+              message: outcome ? mediaAssetRelinkOutcomeMessage(outcome) : "The relink did not return a result.",
+            });
+          }
+          onProgress?.(index + 1, requests.length);
+          if (staged.committed) {
+            try {
+              await options.refreshSnapshot();
+            } catch {
+              // The relink is committed; the next snapshot refresh converges the view.
+            }
+          }
+          if (!staged.applicationCurrent || !groupCurrent) {
+            // A later project image superseded this terminal result: stop issuing
+            // further relinks against it.
+            index += 1;
+            break;
+          }
+        } catch (error) {
+          if (!inSameProject()) return null;
+          result.failed.push({
+            assetId: request.assetId,
+            label: request.label,
+            message: error instanceof DOMException && error.name === "AbortError"
+              ? "Folder relink canceled."
+              : String(error),
+          });
+          index += 1;
+          break;
+        }
+      }
+      if (!inSameProject()) return null;
+      for (; index < requests.length; index += 1) result.skipped.push(requests[index].assetId);
+      return { result, terminalAuthority };
+    } finally {
+      undoGroup.close();
+    }
+  };
+  const setVideoLayerIsfEffect = async (layerId: number, effect: VideoIsfEffectSummary | null, expectedAuthority?: ProjectAuthorityToken) => {
+    if (!canMutateVideoIsf()) return;
+    try {
+      const result = await invokeLegacyVideoEffectAuthoritative<unknown>("set_video_layer_isf_effect", { layerId, effect }, expectedAuthority);
+      if (!result) return;
+      options.setMessage(effect ? `${effect.enabled ? "Applied" : "Bypassed"} ISF ${effect.label} on layer ${layerId}.` : `Cleared ISF on layer ${layerId}.`);
+      await options.refreshSnapshot();
+      await refreshVideoPreviewDiagnostics(false);
+    } catch (error) {
+      options.setMessage(`ISF update failed: ${String(error)}`);
+    }
+  };
+  const importVideoLayerIsf = async (layerId: number) => {
+    if (!canMutateVideoIsf()) return;
+    const importAuthority = options.getCurrentProjectAuthority();
+    try {
+      const authority = options.getCurrentProjectAuthority();
+      const effect = await options.invoke<VideoIsfEffectSummary | null>("select_video_isf_file");
+      if (!effect) {
+        options.setMessage("ISF import canceled.");
+        return;
+      }
+      if (!sameProjectAuthority(authority, options.getCurrentProjectAuthority())) {
+        options.setMessage("Project changed while the ISF file dialog was open; nothing was applied.");
+        return;
+      }
+      const result = await invokeLegacyVideoEffectAuthoritative<VideoIsfEffectSummary>("add_video_layer_isf_effect", { layerId, effect });
+      if (!result) return;
+      options.setMessage(`Added imported FX ${effect.label} to layer ${layerId}.`);
+      await options.refreshSnapshot();
+      await refreshVideoPreviewDiagnostics(false);
+    } catch (error) {
+      if (sameProjectAuthority(importAuthority, options.getCurrentProjectAuthority())) options.onIsfImportRejected?.(String(error));
+      options.setMessage(`ISF import failed: ${String(error)}`);
+    }
+  };
+  /** Import into the project's existing preset catalog without touching a live
+   * layer. Applying a card is a separate, explicitly scoped operator action. */
+  const importVideoIsfToCatalog = async () => {
+    if (!canMutateVideoIsf()) return;
+    const authority = options.getCurrentProjectAuthority();
+    try {
+      const effect = await options.invoke<VideoIsfEffectSummary | null>("select_video_isf_file");
+      if (!effect || !sameProjectAuthority(authority, options.getCurrentProjectAuthority())) return;
+      const catalog = currentVideoEffectCatalog();
+      if (catalog.effect_presets.some(preset => preset.payload.stages.some(stage => stage.effect.kind === "isf" && stage.effect.effect.source === effect.source))) return;
+      catalog.effect_presets.push({ id: 0, label: effect.label, payload: { bypassed: false,
+        stages: [{ enabled: true, label: effect.label, effect: { kind: "isf", effect } }] } });
+      await applyVideoEffectCatalog(catalog);
+    } catch (error) {
+      if (sameProjectAuthority(authority, options.getCurrentProjectAuthority())) {
+        options.onIsfImportRejected?.(String(error));
+        options.setMessage(`ISF import failed: ${String(error)}`);
+      }
+    }
+  };
+  const addVideoLayerIsfEffect = async (layerId: number, effect: VideoIsfEffectSummary) => {
+    if (!canMutateVideoIsf()) return;
+    try {
+      const result = await invokeLegacyVideoEffectAuthoritative<VideoIsfEffectSummary>("add_video_layer_isf_effect", { layerId, effect });
+      if (!result) return;
+      await options.refreshSnapshot();
+      await refreshVideoPreviewDiagnostics(false);
+    } catch (error) { options.setMessage(`ISF update failed: ${String(error)}`); }
+  };
+  const applyBuiltinVideoIsfEffect = async (layerId: number, presetId: string) => {
+    if (!canMutateVideoIsf()) return;
+    try {
+      const applied = await invokeLegacyVideoEffectAuthoritative<VideoIsfEffectSummary>("add_builtin_video_isf_effect", {
+        layerId,
+        presetId,
+      });
+      if (!applied) return;
+      options.setMessage(`Added built-in FX ${applied.value?.label ?? presetId} to layer ${layerId}.`);
+      await options.refreshSnapshot();
+      await refreshVideoPreviewDiagnostics(false);
+    } catch (error) {
+      options.setMessage(`Built-in FX failed: ${String(error)}`);
+    }
+  };
+  const moveVideoLayerIsfEffect = async (layerId: number, stageIndex: number, delta: -1 | 1) => {
+    if (!canMutateVideoIsf()) return;
+    try {
+      const result = await invokeLegacyVideoEffectAuthoritative<unknown>("move_video_layer_isf_effect", { layerId, stageIndex, delta });
+      if (!result) return;
+      options.setMessage(`Moved FX ${stageIndex + 1} on layer ${layerId}.`);
+      await options.refreshSnapshot();
+      await refreshVideoPreviewDiagnostics(true);
+    } catch (error) { options.setMessage(`FX move failed: ${String(error)}`); }
+  };
+  const removeVideoLayerIsfEffect = async (layerId: number, stageIndex: number) => {
+    if (!canMutateVideoIsf()) return;
+    try {
+      const result = await invokeLegacyVideoEffectAuthoritative<unknown>("remove_video_layer_isf_effect", { layerId, stageIndex });
+      if (!result) return;
+      options.setMessage(`Removed FX ${stageIndex + 1} from layer ${layerId}.`);
+      await options.refreshSnapshot();
+      await refreshVideoPreviewDiagnostics(false);
+    } catch (error) { options.setMessage(`FX removal failed: ${String(error)}`); }
+  };
+  const setVideoLayerIsfEffectEnabled = async (layerId: number, stageIndex: number, enabled: boolean) => {
+    if (!canMutateVideoIsf()) return;
+    try {
+      const result = await invokeLegacyVideoEffectAuthoritative<unknown>("set_video_layer_isf_effect_enabled", { layerId, stageIndex, enabled });
+      if (!result) return;
+      options.setMessage(`${enabled ? "Enabled" : "Bypassed"} FX ${stageIndex + 1} on layer ${layerId}.`);
+      await options.refreshSnapshot();
+      await refreshVideoPreviewDiagnostics(true);
+    } catch (error) { options.setMessage(`FX bypass failed: ${String(error)}`); }
+  };
+  const resetVideoLayerIsfEffect = async (layerId: number, stageIndex: number) => {
+    if (!canMutateVideoIsf()) return;
+    try {
+      const result = await invokeLegacyVideoEffectAuthoritative<unknown>("reset_video_layer_isf_effect", { layerId, stageIndex });
+      if (!result) return;
+      options.setMessage(`Reset FX ${stageIndex + 1} on layer ${layerId}.`);
+      await options.refreshSnapshot();
+      await refreshVideoPreviewDiagnostics(true);
+    } catch (error) { options.setMessage(`FX reset failed: ${String(error)}`); }
+  };
+  const setVideoLayerIsfControl = async (
+    layerId: number,
+    stageIndex: number,
+    controlName: string,
+    value: [number, number, number, number],
+  ) => {
+    if (!canMutateVideoIsf()) return;
+    try {
+      const result = await invokeLegacyVideoEffectAuthoritative<unknown>("set_video_layer_isf_control", { layerId, stageIndex, controlName, value });
+      if (!result) return;
+      await options.refreshSnapshot();
+      await refreshVideoPreviewDiagnostics(true);
+    } catch (error) { options.setMessage(`FX control failed: ${String(error)}`); }
+  };
+  const triggerVideoLayerIsfEvent = async (
+    layerId: number,
+    stageIndex: number,
+    controlName: string,
+  ) => {
+    if (options.isIsfEventPulseBusy()) {
+      options.setMessage("Another FX Event pulse is still active.");
+      return;
+    }
+    options.setIsfEventPulseBusy(true);
+    try {
+      await options.invoke("pulse_video_layer_isf_event", { layerId, stageIndex, controlName });
+      await refreshVideoPreviewDiagnostics(true);
+    } catch (error) {
+      options.setMessage(`FX event failed: ${String(error)}`);
+    } finally {
+      options.setIsfEventPulseBusy(false);
+    }
+  };
+
+  const refreshVideoPreviewDiagnostics = async (silent = false) => {
+    try {
+      options.setVideoPreviewDiagnostics(await options.invoke<VideoPreviewDiagnostics>("get_video_preview_diagnostics"));
+      if (!silent) options.setMessage("Updated video preview diagnostics.");
+    } catch (error) { options.setMessage(String(error)); }
+  };
+  const loadVideoGroupCanvasPreview = async (compositionId: number, width: number, height: number) => {
+    const frame = await options.invoke<VideoFrame>("get_debug_video_preview", { compositionId, width, height });
+    return videoFrameToDataUrl(frame);
+  };
+  const renderDebugVideoPreview = async () => {
+    try {
+      const frame = await options.invoke<VideoFrame>("get_debug_video_preview", { width: 64, height: 36 });
+      options.setVideoPreviewUrl(videoFrameToDataUrl(frame));
+      options.setVideoPreviewInfo(`${frame.width}x${frame.height} ${frame.format} / pts ${frame.pts_ms}ms / ${frame.data.length} bytes`);
+      options.setMessage("Rendered CPU video preview.");
+      await refreshVideoPreviewDiagnostics(true);
+    } catch (error) {
+      options.setVideoPreviewUrl("");
+      options.setMessage(String(error));
+    }
+  };
+  const loadVideoLayerThumbnail = async (layerId: number, signal: AbortSignal) => {
+    const frame = await requestNativeThumbnail({
+      invoke: options.invoke, createChannel: options.createThumbnailChannel,
+    }, "layer", layerId, signal);
+    return videoFrameToDataUrl(frame);
+  };
+  const loadMediaAssetThumbnail = async (assetId: MediaAssetId, signal: AbortSignal) => {
+    const frame = await requestNativeThumbnail({
+      invoke: options.invoke, createChannel: options.createThumbnailChannel,
+    }, "asset", assetId, signal);
+    return videoFrameToDataUrl(frame);
+  };
+  const beginMediaAssetPreview = async (assetId: MediaAssetId) => {
+    const ticket = await options.invoke<MediaAssetPreviewSessionTicket>("begin_media_asset_preview", { assetId });
+    if (!sameProjectAuthority(ticket, options.getCurrentProjectAuthority())) {
+      void options.invoke("end_media_asset_preview", { sessionId: ticket.session_id, assetId: ticket.asset_id });
+      throw new Error("Media preview project changed before the preview session began.");
+    }
+    return ticket;
+  };
+  const loadMediaAssetPreviewFrame = async (ticket: MediaAssetPreviewSessionTicket, positionMs: number) => {
+    if (!sameProjectAuthority(ticket, options.getCurrentProjectAuthority())) {
+      throw new Error("Media preview project changed before the preview frame was requested.");
+    }
+    const frame = await options.invoke<VideoFrame>("get_media_asset_preview_frame", {
+      sessionId: ticket.session_id,
+      assetId: ticket.asset_id,
+      positionMs,
+      width: 160,
+      height: 90,
+    });
+    if (!sameProjectAuthority(ticket, options.getCurrentProjectAuthority())) {
+      throw new Error("Media preview project changed while the preview frame was decoded.");
+    }
+    return videoFrameToDataUrl(frame);
+  };
+  const endMediaAssetPreview = async (ticket: MediaAssetPreviewSessionTicket) => {
+    try {
+      await options.invoke("end_media_asset_preview", { sessionId: ticket.session_id, assetId: ticket.asset_id });
+    } catch {
+      // End is an idempotent best-effort resource release; stale owner/session
+      // rejection is already safe on the native side.
+    }
+  };
+  const refreshVideoOutputRenderPlans = async (silent = false) => {
+    try {
+      const plans = await options.invoke<VideoOutputRenderPlan[]>("get_video_output_render_plans");
+      options.setVideoOutputRenderPlans(plans);
+      if (!silent) {
+        const activeLayers = plans.reduce((total, plan) => total + plan.composition.layers.length, 0);
+        options.setMessage(`Video output render plans: ${plans.length} output(s), ${activeLayers} render layer(s).`);
+      }
+    } catch (error) { options.setMessage(String(error)); }
+  };
+  const refreshVideoOutputWindowStatuses = async (silent = false) => {
+    try {
+      const statuses = await options.invoke<VideoOutputWindowStatus[]>("get_video_output_window_statuses");
+      options.setVideoOutputWindowStatuses(statuses);
+      if (!silent) {
+        const liveOpen = statuses.filter((status) => status.live_open).length;
+        const patternOpen = statuses.filter((status) => status.test_pattern_open).length;
+        options.setMessage(`Video output windows: ${liveOpen} live, ${patternOpen} pattern open.`);
+      }
+    } catch (error) { options.setMessage(String(error)); }
+  };
+  const refreshSnapshotAndVideoOutputRenderPlans = async () => {
+    await Promise.all([options.refreshSnapshot(), refreshVideoOutputRenderPlans(true), refreshVideoOutputWindowStatuses(true)]);
+  };
+  const refreshVideoRuntimeStatus = async (silent = false) => {
+    try {
+      const status = await options.invoke<VideoRuntimeStatus>("get_video_runtime_status");
+      options.setVideoRuntimeStatus(status);
+      if (!silent) options.setMessage(`Video backends: ${status.backends.filter((backend) => backend.state === "Available").length}/${status.backends.length} available.`);
+    } catch (error) { if (!silent) options.setMessage(String(error)); }
+  };
+  let externalVideoTransportStatusRefreshInFlight = false;
+  const clearExternalVideoTransportStatus = () => {
+    options.setExternalVideoTransportStatus(null);
+    options.setExternalVideoTransportReport(null);
+  };
+  const refreshExternalVideoTransportStatus = async (silent = false) => {
+    if (externalVideoTransportStatusRefreshInFlight) return null;
+    externalVideoTransportStatusRefreshInFlight = true;
+    try {
+      const status = await options.invoke<ExternalVideoTransportStatus>("get_external_video_transport_status");
+      options.setExternalVideoTransportStatus(status);
+      // A fresh status snapshot supersedes a prior Check I/O report. This
+      // prevents a stale Kept/Active row from surviving a capture fault.
+      options.setExternalVideoTransportReport(null);
+      if (!silent) {
+        options.setMessage(
+          `External video transport: ${status.active_count} active route(s), ${status.live_sources.length} live source state(s), ${(status.live_source_faults ?? status.capture_faults).length} source fault(s).`,
+        );
+      }
+      return status;
+    } catch (error) {
+      // A failed status read is not permission to keep presenting the last
+      // known Active route; leave the transport surface visibly unchecked.
+      clearExternalVideoTransportStatus();
+      if (!silent) options.setMessage(String(error));
+      return null;
+    } finally {
+      externalVideoTransportStatusRefreshInFlight = false;
+    }
+  };
+  const refreshExternalVideoIoPlans = async () => {
+    try {
+      const [plans, status, transportStatus] = await Promise.all([
+        options.invoke<ExternalVideoIoPlans>("get_external_video_io_plans"),
+        options.invoke<VideoRuntimeStatus>("get_video_runtime_status"),
+        options.invoke<ExternalVideoTransportStatus>("get_external_video_transport_status"),
+      ]);
+      options.setExternalVideoIoPlans(plans);
+      options.setVideoRuntimeStatus(status);
+      options.setExternalVideoTransportStatus(transportStatus);
+      const available = status.backends.filter((backend) => backend.state === "Available").length;
+      options.setMessage(
+        `External video I/O: ${plans.inputs.length} input(s), ${plans.outputs.length} output(s), ${transportStatus.active_count} active route(s), ${available}/${status.backends.length} backend(s) available.`,
+      );
+    } catch (error) {
+      clearExternalVideoTransportStatus();
+      options.setMessage(String(error));
+    }
+  };
+  const syncExternalVideoTransports = async () => {
+    options.setMessage(
+      "External video transport sync is unavailable until a lease-bound OutputControl action is reviewed; no routes changed.",
+    );
+  };
+  const renderDebugVideoOutputPreview = async (outputId: number, testPattern = false) => {
+    try {
+      const frame = await options.invoke<VideoFrame>(
+        testPattern ? "get_debug_video_output_test_pattern" : "get_debug_video_output_preview",
+        { outputId, width: 128, height: 72 },
+      );
+      const previewUrl = videoFrameToDataUrl(frame);
+      const label = testPattern ? "Pattern" : "Output";
+      const info = `${frame.width}x${frame.height} ${frame.format} / ${frame.data.length} bytes`;
+      options.setVideoOutputPreviewUrl(previewUrl);
+      options.setVideoOutputPreviewInfo(info);
+      options.setVideoOutputPreviewId(outputId);
+      options.setVideoOutputPreviewMode(testPattern ? "test" : "output");
+      options.setVideoPreviewUrl(previewUrl);
+      options.setVideoPreviewInfo(`${label} ${outputId}: ${info}`);
+      options.setMessage(`Rendered ${testPattern ? "test pattern" : "output"} ${outputId} preview.`);
+      if (!testPattern) await Promise.all([refreshVideoPreviewDiagnostics(true), refreshVideoOutputRenderPlans(true)]);
+    } catch (error) {
+      options.setVideoOutputPreviewUrl("");
+      options.setVideoOutputPreviewId(outputId);
+      options.setVideoPreviewUrl("");
+      options.setMessage(String(error));
+    }
+  };
+
+  const setVideoLayerState = async (layerId: number, stateValue: VideoLayerState) => {
+    try {
+      await options.invoke("set_video_layer_state", { layerId, stateValue });
+      await options.refreshSnapshot();
+    } catch (error) { options.setMessage(String(error)); }
+  };
+  const setVideoLayerTransform = (layerId: number, stateValue: VideoLayerState, patch: Partial<VideoLayerState["transform"]>) =>
+    setVideoLayerState(layerId, { ...stateValue, transform: { ...defaultTransform, ...stateValue.transform, ...patch } });
+  const setVideoLayerColor = (layerId: number, stateValue: VideoLayerState, patch: Partial<VideoLayerState["color"]>) =>
+    setVideoLayerState(layerId, { ...stateValue, color: { ...defaultColorAdjust, ...stateValue.color, ...patch } });
+  const setVideoLayerFx = (layerId: number, stateValue: VideoLayerState, patch: Partial<VideoLayerState["fx"]>) =>
+    setVideoLayerState(layerId, { ...stateValue, fx: { ...defaultFxAdjust, ...stateValue.fx, ...patch } });
+  const addVideoCuePoint = async (layerId: number, positionMs?: number) => {
+    try {
+      await options.invoke("add_video_cue_point", { layerId, positionMs });
+      options.setMessage(`Added video cue point${positionMs === undefined ? "" : ` at ${positionMs}ms`}`);
+      await options.refreshSnapshot();
+    } catch (error) { options.setMessage(String(error)); }
+  };
+  const removeVideoCuePoint = async (layerId: number, positionMs: number) => {
+    try {
+      await options.invoke("remove_video_cue_point", { layerId, positionMs });
+      options.setMessage(`Removed video cue point ${positionMs}ms`);
+      await options.refreshSnapshot();
+    } catch (error) { options.setMessage(String(error)); }
+  };
+  const jumpVideoCuePoint = async (layerId: number, cuePointIndex: number) => {
+    try {
+      await options.invoke("jump_video_cue_point", { layerId, cuePointIndex });
+      options.setMessage(`Jumped video layer ${layerId} to cue point ${cuePointIndex + 1}`);
+      await options.refreshSnapshot();
+    } catch (error) { options.setMessage(String(error)); }
+  };
+  const addVideoGeneratorLayer = async (generator: VideoGenerator) => {
+    try {
+      await options.invoke("add_video_generator_layer", { generator, label: options.videoLabel() });
+      options.setVideoLabel(`Layer ${options.snapshot().video.layers.length + 2}`);
+      await options.refreshSnapshot();
+    } catch (error) { options.setMessage(String(error)); }
+  };
+  const setVideoLayerGenerator = async (layerId: number, generator: VideoGenerator) => {
+    try {
+      await options.invoke("set_video_layer_generator", { layerId, generator });
+      await options.refreshSnapshot();
+    } catch (error) { options.setMessage(String(error)); }
+  };
+  const setVideoLayerBlendMode = async (layerId: number, blendMode: VideoBlendMode) => {
+    try {
+      await options.invoke("set_video_layer_blend_mode", { layerId, blendMode });
+      await options.refreshSnapshot();
+    } catch (error) { options.setMessage(String(error)); }
+  };
+  const { setVideoMasterOpacity, setVideoBlackout } = options;
+
+  return {
+    addVideoLayer, importMediaFiles, importMediaFilesFromPaths, addMediaPathsAsLayers, launchVideoClip, takeVideoClip, stopVideoClip,
+    createVideoClipSlot, assignVideoClipSlotAsset, updateVideoClipSlot, removeVideoClipSlot,
+    duplicateVideoClipSlot, setDefaultVideoClipSlot, reorderVideoClipSlots,
+    queueVideoClipSlot, cancelQueuedVideoClipSlot, launchVideoClipSlot, seekVideoClipSlot,
+    importAndAssignVideoClipSlots,
+    refreshVideoClipSlotRuntime, resetVideoClipSlotRuntimeFence,
+    refreshVideoTransitionRuntime, resetVideoTransitionRuntimeFence,
+    launchVideoLayerTransitionBus, releaseVideoLayerTransitionBus,
+    playVideoLayerAudioMonitor, stopVideoLayerAudioMonitor, setVideoLayerAudioMonitorVolume,
+    refreshVideoAudioMonitorStatus,
+    refreshAudioOutputDevices,
+    startVideoOutputRecording, stopVideoOutputRecording, refreshVideoRecordingStatus,
+    removeVideoLayer, duplicateVideoLayer, moveVideoLayer, setVideoLayerLabel,
+    refreshVideoLayerMetadata, relinkMediaAsset, scanMediaRelinkFolder, applyMediaRelinkRequests, importVideoLayerIsf, importVideoIsfToCatalog, addVideoLayerIsfEffect, applyBuiltinVideoIsfEffect, setVideoLayerIsfEffect,
+    moveVideoLayerIsfEffect, removeVideoLayerIsfEffect, setVideoLayerIsfEffectEnabled,
+    resetVideoLayerIsfEffect, setVideoLayerIsfControl, triggerVideoLayerIsfEvent,
+    applyVideoEffectCatalog, patchVideoLayerGroup, importVideoEffectScopeIsf, applyVideoEffectPreset, removeVideoEffectChain,
+    loadVideoGroupCanvasPreview, renderDebugVideoPreview, loadVideoLayerThumbnail, loadMediaAssetThumbnail, beginMediaAssetPreview, loadMediaAssetPreviewFrame, endMediaAssetPreview, refreshVideoPreviewDiagnostics,
+    refreshVideoOutputRenderPlans, refreshVideoOutputWindowStatuses, refreshSnapshotAndVideoOutputRenderPlans,
+    refreshVideoRuntimeStatus, refreshExternalVideoTransportStatus, refreshExternalVideoIoPlans, syncExternalVideoTransports,
+    renderDebugVideoOutputPreview, setVideoLayerState, setVideoLayerTransform, setVideoLayerColor,
+    setVideoLayerFx, addVideoCuePoint, removeVideoCuePoint, jumpVideoCuePoint,
+    addVideoGeneratorLayer, setVideoLayerGenerator, setVideoLayerBlendMode, setVideoMasterOpacity, setVideoBlackout,
+  };
+}

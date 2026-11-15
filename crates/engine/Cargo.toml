@@ -1,0 +1,19 @@
+[package]
+name = "engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+test-support = []
+
+[dependencies]
+crossbeam-queue.workspace = true
+io.workspace = true
+protocol.workspace = true
+thiserror.workspace = true
+video.workspace = true
+
+[dev-dependencies]
+io = { workspace = true, features = ["test-support"] }
+serde_json.workspace = true

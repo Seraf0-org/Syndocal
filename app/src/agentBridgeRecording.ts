@@ -1,0 +1,82 @@
+import type { FrontendTauriInvoke } from "./tauriInvokeCommands";
+
+const MAX_PATH_LENGTH = 2048;
+const MAX_ERROR_LENGTH = 1024;
+const MAX_TAKE_ID_LENGTH = 64;
+const RECORDING_STATES = ["Idle", "Preparing", "Recording", "Finalizing", "Complete", "Fault"] as const;
+type RecordingState = typeof RECORDING_STATES[number];
+const RECORDING_END_REASONS = ["operator_stop", "ownership_revoked", "fault"] as const;
+type RecordingEndReason = typeof RECORDING_END_REASONS[number];
+
+const optionalText = (value: unknown, name: string, maxLength: number): string | null => {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string" || value.length > maxLength) {
+    throw new Error(`Recording status field is invalid: ${name}`);
+  }
+  return value;
+};
+
+const finiteNonNegative = (value: unknown, name: string): number => {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`Recording status field is invalid: ${name}`);
+  }
+  return value;
+};
+
+/** Read-only recording observation for MCP; it never starts or stops a sink. */
+export async function executeAgentBridgeRecordingStatus(invoke: FrontendTauriInvoke) {
+  const raw = await invoke<Record<string, unknown>>("video_output_recording_status");
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("Recording status response is invalid.");
+  }
+  if (typeof raw.active !== "boolean" || typeof raw.audio_requested !== "boolean"
+    || typeof raw.audio_included !== "boolean") {
+    throw new Error("Recording status response is invalid.");
+  }
+  const recordingState = raw.state === undefined
+    ? (raw.active ? "Recording" : raw.last_error ? "Fault" : "Idle")
+    : raw.state;
+  if (typeof recordingState !== "string"
+    || !(RECORDING_STATES as readonly string[]).includes(recordingState)) {
+    throw new Error("Recording status field is invalid: state");
+  }
+  const outputId = raw.output_id === null || raw.output_id === undefined
+    ? null : finiteNonNegative(raw.output_id, "output_id");
+  const startedUnixMs = raw.started_unix_ms === null || raw.started_unix_ms === undefined
+    ? null : finiteNonNegative(raw.started_unix_ms, "started_unix_ms");
+  const ownerEpoch = raw.owner_epoch === null || raw.owner_epoch === undefined
+    ? null : finiteNonNegative(raw.owner_epoch, "owner_epoch");
+  if (raw.end_reason !== null && raw.end_reason !== undefined
+    && !(RECORDING_END_REASONS as readonly unknown[]).includes(raw.end_reason)) {
+    throw new Error("Recording status field is invalid: end_reason");
+  }
+  if (raw.admission_allowed !== undefined && typeof raw.admission_allowed !== "boolean") {
+    throw new Error("Recording status field is invalid: admission_allowed");
+  }
+  return {
+    ok: true,
+    recording: {
+      state: recordingState as RecordingState,
+      active: raw.active,
+      output_id: outputId,
+      path: optionalText(raw.path, "path", MAX_PATH_LENGTH),
+      width: finiteNonNegative(raw.width, "width"),
+      height: finiteNonNegative(raw.height, "height"),
+      frame_rate: finiteNonNegative(raw.frame_rate, "frame_rate"),
+      frames_written: finiteNonNegative(raw.frames_written, "frames_written"),
+      dropped_frames: finiteNonNegative(raw.dropped_frames, "dropped_frames"),
+      audio_requested: raw.audio_requested,
+      audio_included: raw.audio_included,
+      audio_track_count: finiteNonNegative(raw.audio_track_count, "audio_track_count"),
+      started_unix_ms: startedUnixMs,
+      last_error: optionalText(raw.last_error, "last_error", MAX_ERROR_LENGTH),
+      take_id: optionalText(raw.take_id, "take_id", MAX_TAKE_ID_LENGTH),
+      owner_epoch: ownerEpoch,
+      end_reason: (raw.end_reason ?? null) as RecordingEndReason | null,
+      // A legacy peer without the field is reported as not admitted.
+      admission_allowed: raw.admission_allowed === true,
+      admission_reason: optionalText(raw.admission_reason, "admission_reason", MAX_ERROR_LENGTH),
+    },
+    control_boundary: "Read-only observation; recording start/stop/finalize remains a separately fenced operation.",
+  };
+}

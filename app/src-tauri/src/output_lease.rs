@@ -1,0 +1,5355 @@
+//! Pure AI3 output-lease authority transitions.
+//!
+//! Pure/process-local AI3 output-lease authority, registry, exact receipts,
+//! bounded admission, rate limits, and audit truth. This layer deliberately
+//! has no Engine, output-worker, Blackout, role, confirmation UI, AppState, or Tauri
+//! dependency. The main/runtime integration submits only through the registry
+//! request boundary and owns physical-output commit ordering separately.
+
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    fmt,
+};
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::output_lease_keepalive_runtime::OutputLeaseKeepaliveManagedExactBothAuthorizationGuard;
+
+use self::output_lease_keepalive::{
+    OutputLeaseKeepaliveDurableEnableCleanupOnlyEvidence,
+    OutputLeaseKeepaliveDurableEnableEvidence, OutputLeaseKeepaliveExactBothLease,
+    OutputLeaseKeepaliveExactRelinquishReceipt, OutputLeaseKeepaliveIdentity,
+    OutputLeaseKeepalivePortError, OutputLeaseKeepaliveRegistryClaim,
+    OutputLeaseKeepaliveRegistryOwner, OutputLeaseKeepaliveRegistryRelinquishClaim,
+    OutputLeaseKeepaliveRegistryRelinquishIngress, OutputLeaseKeepaliveRegistryRenewalClaim,
+    OutputLeaseKeepaliveRegistryRenewalIngress, OutputLeaseKeepaliveRegistrySupersessionClaim,
+    OutputLeaseKeepaliveRegistrySupersessionIngress, OutputLeaseKeepaliveRelinquishCasReceipt,
+    OutputLeaseKeepaliveRelinquishFailureReceipt, OutputLeaseKeepaliveRelinquishPermit,
+    OutputLeaseKeepaliveRenewalCapability, OutputLeaseKeepaliveRenewalCasReceipt,
+    OutputLeaseKeepaliveRenewalFailureReceipt, OutputLeaseKeepaliveRenewalSuccessReceipt,
+    OutputLeaseKeepaliveSupersessionCapability, OutputLeaseKeepaliveSupersessionCasReceipt,
+    OutputLeaseKeepaliveSupersessionFailureReceipt, OutputLeaseKeepaliveSupersessionSuccessReceipt,
+};
+
+pub(crate) const MAX_OUTPUT_LEASE_TTL_MS: u64 = 60_000;
+/// Fixed TTL for the managed exact-`Both` worker renewal port. This is
+/// intentionally independent from the ordinary lease maximum so a future
+/// maximum-policy change cannot silently alter the keepalive contract.
+const OUTPUT_LEASE_MANAGED_EXACT_BOTH_TTL_MS: u64 =
+    output_lease_keepalive::OUTPUT_LEASE_KEEPALIVE_TTL_MS;
+const OUTPUT_LEASE_RECEIPT_TTL_MS: u64 = 60_000;
+const OUTPUT_LEASE_UNCLAIMED_RETENTION_MS: u64 = 60_000;
+const OUTPUT_LEASE_TOKEN_BUCKET_IDLE_PURGE_MS: u64 = 60_000;
+const MAX_OUTPUT_LEASE_OWNER_PRINCIPAL_BYTES: usize = 128;
+const MAX_OUTPUT_LEASE_OWNER_WINDOW_BYTES: usize = 128;
+const MAX_OUTPUT_LEASE_PROJECT_BYTES: usize = 256;
+const MAX_OUTPUT_LEASE_REQUEST_PRINCIPAL_BYTES: usize = 128;
+const MAX_OUTPUT_LEASE_REQUEST_DOMAIN_BYTES: usize = 128;
+const MAX_OUTPUT_LEASE_OPERATION_BYTES: usize = 128;
+const MAX_OUTPUT_LEASE_SELECTED_IDS: usize = 64;
+
+/// These bounds are intentionally small enough to make this process-local
+/// layer incapable of becoming an unbounded memory sink. They are authority
+/// bounds, not a reason to evict a live lease.
+pub(crate) const MAX_OUTPUT_LEASES: usize = 64;
+pub(crate) const MAX_OUTPUT_LEASE_REQUESTS: usize = 128;
+pub(crate) const MAX_OUTPUT_LEASE_LANES: usize = 128;
+pub(crate) const MAX_OUTPUT_LEASE_TOKEN_BUCKETS: usize = 128;
+pub(crate) const MAX_OUTPUT_LEASE_REQUEST_ORIGINS: usize = 128;
+pub(crate) const MAX_OUTPUT_LEASE_AUDIT_RECORDS: usize = 256;
+const OUTPUT_LEASE_TOKEN_BURST_MILLI: u64 = 8_000;
+const OUTPUT_LEASE_TOKEN_RATE_PER_SECOND_MILLI: u64 = 4;
+
+fn bounded_nonempty(value: &str, max_bytes: usize) -> bool {
+    !value.trim().is_empty() && value.len() <= max_bytes
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) enum OutputLeaseResource {
+    Lighting,
+    Video,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OutputLeaseResources(Vec<OutputLeaseResource>);
+
+impl OutputLeaseResources {
+    pub(crate) fn new(resources: &[OutputLeaseResource]) -> Result<Self, OutputLeaseError> {
+        if resources.is_empty() {
+            return Err(OutputLeaseError::InvalidResources);
+        }
+        let mut canonical = resources.to_vec();
+        canonical.sort_unstable();
+        if canonical.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(OutputLeaseError::InvalidResources);
+        }
+        Ok(Self(canonical))
+    }
+
+    pub(crate) fn as_slice(&self) -> &[OutputLeaseResource] {
+        &self.0
+    }
+
+    fn overlaps(&self, other: &Self) -> bool {
+        self.0
+            .iter()
+            .any(|resource| other.0.binary_search(resource).is_ok())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OutputLeaseOwner {
+    principal: String,
+    window_label: String,
+    process_session_incarnation: u64,
+    owner_incarnation: u64,
+}
+
+/// Opaque, backend-issued lease identity. The numeric representation never
+/// crosses this module's API; equality is the only operation callers need.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OutputLeaseId(u64);
+
+impl fmt::Debug for OutputLeaseId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("OutputLeaseId")
+            .field(&self.encode())
+            .finish()
+    }
+}
+
+impl OutputLeaseId {
+    pub(crate) fn encode(self) -> String {
+        format!("lease-{:016x}", self.0)
+    }
+
+    pub(crate) fn decode(value: &str) -> Result<Self, OutputLeaseError> {
+        if value.len() != 22
+            || !value.is_ascii()
+            || !value.as_bytes().starts_with(b"lease-")
+            || !value.as_bytes()[6..]
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+        {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        let numeric =
+            u64::from_str_radix(&value[6..], 16).map_err(|_| OutputLeaseError::InvalidRequest)?;
+        if numeric == 0 {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        Ok(Self(numeric))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OutputLeaseGrant {
+    pub(crate) lease_id: OutputLeaseId,
+    pub(crate) snapshot: OutputLeaseSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutputLeaseEnableTransition {
+    lease_id: OutputLeaseId,
+    snapshot: OutputLeaseSnapshot,
+    before: Option<OutputLeaseSnapshot>,
+    recovered: bool,
+}
+
+struct DisplayAuthorizationContext<'a> {
+    project_identity: &'a str,
+    now_ms: u64,
+    ttl_ms: u64,
+}
+
+impl OutputLeaseOwner {
+    pub(crate) fn new(
+        principal: impl Into<String>,
+        window_label: impl Into<String>,
+        process_session_incarnation: u64,
+        owner_incarnation: u64,
+    ) -> Result<Self, OutputLeaseError> {
+        let principal = principal.into();
+        let window_label = window_label.into();
+        if !bounded_nonempty(&principal, MAX_OUTPUT_LEASE_OWNER_PRINCIPAL_BYTES)
+            || !bounded_nonempty(&window_label, MAX_OUTPUT_LEASE_OWNER_WINDOW_BYTES)
+            || process_session_incarnation == 0
+            || owner_incarnation == 0
+        {
+            return Err(OutputLeaseError::InvalidOwner);
+        }
+        Ok(Self {
+            principal,
+            window_label,
+            process_session_incarnation,
+            owner_incarnation,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum OutputLeasePhase {
+    Unclaimed,
+    HeldActive,
+    HeldOrphaned,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OutputLeaseSnapshot {
+    pub(crate) phase: OutputLeasePhase,
+    pub(crate) owner: Option<OutputLeaseOwner>,
+    pub(crate) resources: Option<OutputLeaseResources>,
+    pub(crate) generation: u64,
+    pub(crate) expires_at_monotonic_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum OutputLeaseError {
+    InvalidOwner,
+    InvalidResources,
+    InvalidProject,
+    InvalidRequest,
+    InvalidTtl,
+    InvalidTransition,
+    StaleOwner,
+    StaleGeneration,
+    Expired,
+    UnknownLease,
+    ResourceConflict,
+    LeaseCapacity,
+    LeaseIdExhausted,
+    RequestCapacity,
+    LaneCapacity,
+    Busy,
+    Conflict,
+    ReceiptNotRetained,
+    RateLimited,
+    AuditCapacity,
+    RequestNotInFlight,
+    ClockRollback,
+    GenerationExhausted,
+    ClockExhausted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutputLeaseState {
+    process_session_incarnation: u64,
+    snapshot: OutputLeaseSnapshot,
+}
+
+impl OutputLeaseState {
+    /// A process restart never reconstructs authority from cached state.
+    fn fresh_process(process_session_incarnation: u64) -> Result<Self, OutputLeaseError> {
+        if process_session_incarnation == 0 {
+            return Err(OutputLeaseError::InvalidOwner);
+        }
+        Ok(Self {
+            process_session_incarnation,
+            snapshot: OutputLeaseSnapshot {
+                phase: OutputLeasePhase::Unclaimed,
+                owner: None,
+                resources: None,
+                generation: 0,
+                expires_at_monotonic_ms: None,
+            },
+        })
+    }
+
+    fn snapshot(&self) -> OutputLeaseSnapshot {
+        self.snapshot.clone()
+    }
+
+    fn acquire(
+        &mut self,
+        owner: OutputLeaseOwner,
+        resources: OutputLeaseResources,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<OutputLeaseSnapshot, OutputLeaseError> {
+        if self.snapshot.phase != OutputLeasePhase::Unclaimed {
+            return Err(OutputLeaseError::InvalidTransition);
+        }
+        self.require_current_process(&owner)?;
+        let generation = next_generation(self.snapshot.generation)?;
+        let deadline = checked_deadline(now_ms, ttl_ms)?;
+        self.snapshot = OutputLeaseSnapshot {
+            phase: OutputLeasePhase::HeldActive,
+            owner: Some(owner),
+            resources: Some(resources),
+            generation,
+            expires_at_monotonic_ms: Some(deadline),
+        };
+        Ok(self.snapshot())
+    }
+
+    fn renew(
+        &mut self,
+        owner: &OutputLeaseOwner,
+        expected_generation: u64,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<OutputLeaseSnapshot, OutputLeaseError> {
+        self.require_generation(expected_generation)?;
+        self.require_owner(owner)?;
+        if self.snapshot.phase != OutputLeasePhase::HeldActive {
+            return Err(OutputLeaseError::InvalidTransition);
+        }
+        if now_ms >= self.snapshot.expires_at_monotonic_ms.unwrap_or(0) {
+            self.orphan_without_owner_check()?;
+            return Err(OutputLeaseError::Expired);
+        }
+        let generation = next_generation(self.snapshot.generation)?;
+        let deadline = checked_deadline(now_ms, ttl_ms)?;
+        self.snapshot.generation = generation;
+        self.snapshot.expires_at_monotonic_ms = Some(deadline);
+        Ok(self.snapshot())
+    }
+
+    /// Observing expiry changes authority only. There is no physical-output API here.
+    #[cfg(test)]
+    fn observe_expiry(&mut self, now_ms: u64) -> Result<bool, OutputLeaseError> {
+        if self.snapshot.phase != OutputLeasePhase::HeldActive
+            || now_ms < self.snapshot.expires_at_monotonic_ms.unwrap_or(u64::MAX)
+        {
+            return Ok(false);
+        }
+        self.orphan_without_owner_check()?;
+        Ok(true)
+    }
+
+    /// Used by owner retirement and project-identity replacement.
+    fn orphan(
+        &mut self,
+        expected_generation: u64,
+    ) -> Result<OutputLeaseSnapshot, OutputLeaseError> {
+        self.require_generation(expected_generation)?;
+        if self.snapshot.phase != OutputLeasePhase::HeldActive {
+            return Err(OutputLeaseError::InvalidTransition);
+        }
+        self.orphan_without_owner_check()?;
+        Ok(self.snapshot())
+    }
+
+    fn recover(
+        &mut self,
+        owner: &OutputLeaseOwner,
+        expected_generation: u64,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<OutputLeaseSnapshot, OutputLeaseError> {
+        self.require_generation(expected_generation)?;
+        self.require_owner(owner)?;
+        if self.snapshot.phase != OutputLeasePhase::HeldOrphaned {
+            return Err(OutputLeaseError::InvalidTransition);
+        }
+        let generation = next_generation(self.snapshot.generation)?;
+        let deadline = checked_deadline(now_ms, ttl_ms)?;
+        self.snapshot.phase = OutputLeasePhase::HeldActive;
+        self.snapshot.generation = generation;
+        self.snapshot.expires_at_monotonic_ms = Some(deadline);
+        Ok(self.snapshot())
+    }
+
+    fn relinquish_output_lease(
+        &mut self,
+        owner: &OutputLeaseOwner,
+        expected_generation: u64,
+    ) -> Result<OutputLeaseSnapshot, OutputLeaseError> {
+        self.require_generation(expected_generation)?;
+        self.require_owner(owner)?;
+        if !matches!(
+            self.snapshot.phase,
+            OutputLeasePhase::HeldActive | OutputLeasePhase::HeldOrphaned
+        ) {
+            return Err(OutputLeaseError::InvalidTransition);
+        }
+        let generation = next_generation(self.snapshot.generation)?;
+        self.snapshot = OutputLeaseSnapshot {
+            phase: OutputLeasePhase::Unclaimed,
+            owner: None,
+            resources: None,
+            generation,
+            expires_at_monotonic_ms: None,
+        };
+        Ok(self.snapshot())
+    }
+
+    /// Atomic authority-only transfer. The pending phase is built on a clone and
+    /// never becomes externally visible if deadline/generation validation fails.
+    fn force_transfer(
+        &mut self,
+        expected_generation: u64,
+        new_owner: OutputLeaseOwner,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<OutputLeaseSnapshot, OutputLeaseError> {
+        self.require_generation(expected_generation)?;
+        self.require_current_process(&new_owner)?;
+        if self.snapshot.phase == OutputLeasePhase::HeldActive
+            && now_ms >= self.snapshot.expires_at_monotonic_ms.unwrap_or(0)
+        {
+            self.orphan_without_owner_check()?;
+            return Err(OutputLeaseError::Expired);
+        }
+        if !matches!(
+            self.snapshot.phase,
+            OutputLeasePhase::HeldActive | OutputLeasePhase::HeldOrphaned
+        ) || self.snapshot.owner.as_ref() == Some(&new_owner)
+        {
+            return Err(OutputLeaseError::InvalidTransition);
+        }
+        let generation = next_generation(self.snapshot.generation)?;
+        let deadline = checked_deadline(now_ms, ttl_ms)?;
+        let mut candidate = self.snapshot.clone();
+        candidate.phase = OutputLeasePhase::HeldActive;
+        candidate.owner = Some(new_owner);
+        candidate.generation = generation;
+        candidate.expires_at_monotonic_ms = Some(deadline);
+        self.snapshot = candidate;
+        Ok(self.snapshot())
+    }
+
+    fn orphan_without_owner_check(&mut self) -> Result<(), OutputLeaseError> {
+        let generation = next_generation(self.snapshot.generation)?;
+        self.snapshot.phase = OutputLeasePhase::HeldOrphaned;
+        self.snapshot.generation = generation;
+        self.snapshot.expires_at_monotonic_ms = None;
+        Ok(())
+    }
+
+    fn require_owner(&self, owner: &OutputLeaseOwner) -> Result<(), OutputLeaseError> {
+        if self.snapshot.owner.as_ref() == Some(owner) {
+            Ok(())
+        } else {
+            Err(OutputLeaseError::StaleOwner)
+        }
+    }
+
+    fn require_current_process(&self, owner: &OutputLeaseOwner) -> Result<(), OutputLeaseError> {
+        if owner.process_session_incarnation == self.process_session_incarnation {
+            Ok(())
+        } else {
+            Err(OutputLeaseError::StaleOwner)
+        }
+    }
+
+    fn require_generation(&self, expected: u64) -> Result<(), OutputLeaseError> {
+        if self.snapshot.generation == expected {
+            Ok(())
+        } else {
+            Err(OutputLeaseError::StaleGeneration)
+        }
+    }
+}
+
+fn next_generation(current: u64) -> Result<u64, OutputLeaseError> {
+    current
+        .checked_add(1)
+        .ok_or(OutputLeaseError::GenerationExhausted)
+}
+
+fn checked_deadline(now_ms: u64, ttl_ms: u64) -> Result<u64, OutputLeaseError> {
+    if ttl_ms == 0 || ttl_ms > MAX_OUTPUT_LEASE_TTL_MS {
+        return Err(OutputLeaseError::InvalidTtl);
+    }
+    now_ms
+        .checked_add(ttl_ms)
+        .ok_or(OutputLeaseError::ClockExhausted)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OutputLeaseRequestKey {
+    pub(crate) principal: String,
+    pub(crate) domain: String,
+    pub(crate) request_id: u64,
+}
+
+impl OutputLeaseRequestKey {
+    pub(crate) fn new(
+        principal: impl Into<String>,
+        domain: impl Into<String>,
+        request_id: u64,
+    ) -> Result<Self, OutputLeaseError> {
+        let key = Self {
+            principal: principal.into(),
+            domain: domain.into(),
+            request_id,
+        };
+        if !bounded_nonempty(&key.principal, MAX_OUTPUT_LEASE_REQUEST_PRINCIPAL_BYTES)
+            || !bounded_nonempty(&key.domain, MAX_OUTPUT_LEASE_REQUEST_DOMAIN_BYTES)
+            || key.request_id == 0
+        {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        Ok(key)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct OutputLeaseRequestOrigin {
+    principal: String,
+    domain: String,
+}
+
+impl From<&OutputLeaseRequestKey> for OutputLeaseRequestOrigin {
+    fn from(key: &OutputLeaseRequestKey) -> Self {
+        Self {
+            principal: key.principal.clone(),
+            domain: key.domain.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OutputLeaseShapeHash([u8; 32]);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OutputLeaseRequestShape {
+    pub(crate) operation: String,
+    pub(crate) lease_id: Option<OutputLeaseId>,
+    pub(crate) owner: Option<OutputLeaseOwner>,
+    pub(crate) resources: Option<OutputLeaseResources>,
+    pub(crate) resource_scope: Option<OutputLeaseResources>,
+    pub(crate) expected_generation: Option<u64>,
+    pub(crate) ttl_ms: Option<u64>,
+    pub(crate) transfer_owner: Option<OutputLeaseOwner>,
+    pub(crate) project_identity: Option<String>,
+    pub(crate) selected_lease_ids: Vec<OutputLeaseId>,
+}
+
+impl OutputLeaseRequestShape {
+    pub(crate) fn new(operation: impl Into<String>) -> Result<Self, OutputLeaseError> {
+        let operation = operation.into();
+        if !bounded_nonempty(&operation, MAX_OUTPUT_LEASE_OPERATION_BYTES) {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        Ok(Self {
+            operation,
+            lease_id: None,
+            owner: None,
+            resources: None,
+            resource_scope: None,
+            expected_generation: None,
+            ttl_ms: None,
+            transfer_owner: None,
+            project_identity: None,
+            selected_lease_ids: Vec::new(),
+        })
+    }
+
+    pub(crate) fn canonical_hash(&self) -> Result<OutputLeaseShapeHash, OutputLeaseError> {
+        if !bounded_nonempty(&self.operation, MAX_OUTPUT_LEASE_OPERATION_BYTES) {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        if self
+            .project_identity
+            .as_deref()
+            .is_some_and(|project| !bounded_nonempty(project, MAX_OUTPUT_LEASE_PROJECT_BYTES))
+        {
+            return Err(OutputLeaseError::InvalidProject);
+        }
+        let mut bytes = Vec::new();
+        append_string(&mut bytes, &self.operation)?;
+        append_optional_lease_id(&mut bytes, self.lease_id);
+        append_optional_owner(&mut bytes, self.owner.as_ref())?;
+        append_optional_resources(&mut bytes, self.resources.as_ref())?;
+        append_optional_resources(&mut bytes, self.resource_scope.as_ref())?;
+        append_optional_u64(&mut bytes, self.expected_generation);
+        append_optional_u64(&mut bytes, self.ttl_ms);
+        append_optional_owner(&mut bytes, self.transfer_owner.as_ref())?;
+        append_optional_string(&mut bytes, self.project_identity.as_deref())?;
+        let mut selected = self.selected_lease_ids.clone();
+        if selected.len() > MAX_OUTPUT_LEASE_SELECTED_IDS {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        selected.sort_unstable();
+        if selected.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        append_u64(
+            &mut bytes,
+            u64::try_from(selected.len()).map_err(|_| OutputLeaseError::InvalidRequest)?,
+        );
+        for lease_id in selected {
+            append_u64(&mut bytes, lease_id.0);
+        }
+        let digest = Sha256::digest(bytes);
+        Ok(OutputLeaseShapeHash(digest.into()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OutputLeaseRequestAction {
+    Acquire {
+        owner: OutputLeaseOwner,
+        resources: OutputLeaseResources,
+        project_identity: String,
+        ttl_ms: u64,
+    },
+    /// The normal one-click Enable path is allowed to reclaim one exact
+    /// expired lease owned by the same renderer/project. This is deliberately
+    /// separate from public Acquire and Recover so lifecycle semantics and
+    /// their caller-selected identities cannot be broadened accidentally.
+    EnableAcquireOrRecover {
+        owner: OutputLeaseOwner,
+        resources: OutputLeaseResources,
+        project_identity: String,
+        ttl_ms: u64,
+    },
+    /// AddDisplay is allowed to re-use the exact Both authority established
+    /// for the same owner/project after its TTL elapsed.  This is an
+    /// internal action: public Acquire and Recover retain their explicit
+    /// lifecycle semantics and never gain implicit recovery.
+    AuthorizeOrRecoverDisplay {
+        lease_id: OutputLeaseId,
+        owner: OutputLeaseOwner,
+        expected_generation: u64,
+        exact_resources: OutputLeaseResources,
+        project_identity: String,
+        ttl_ms: u64,
+    },
+    /// Internal authoring-only turnover after the native adapter has proved
+    /// physical retirement and rejected managed ownership. Generic Recover
+    /// never changes project binding; this action creates a different id.
+    ReplacePreviousProjectForAuthoring {
+        lease_id: OutputLeaseId,
+        owner: OutputLeaseOwner,
+        expected_generation: u64,
+        project_identity: String,
+        ttl_ms: u64,
+    },
+    Renew {
+        lease_id: OutputLeaseId,
+        owner: OutputLeaseOwner,
+        expected_generation: u64,
+        ttl_ms: u64,
+    },
+    #[cfg(test)]
+    ObserveExpiry {
+        lease_id: OutputLeaseId,
+    },
+    Recover {
+        lease_id: OutputLeaseId,
+        owner: OutputLeaseOwner,
+        expected_generation: u64,
+        ttl_ms: u64,
+    },
+    Relinquish {
+        lease_id: OutputLeaseId,
+        owner: OutputLeaseOwner,
+        expected_generation: u64,
+    },
+    ForceTransfer {
+        lease_id: OutputLeaseId,
+        expected_generation: u64,
+        new_owner: OutputLeaseOwner,
+        ttl_ms: u64,
+    },
+    AuthorizeOrdinary {
+        lease_id: OutputLeaseId,
+        owner: OutputLeaseOwner,
+        expected_generation: u64,
+        exact_resources: OutputLeaseResources,
+    },
+    /// Internal-only ordinary authorization for a lease which is currently
+    /// owned by the exact-Both keepalive runtime.  The runtime serializes this
+    /// action with its renewal CAS, so the request shape deliberately does
+    /// not include a generation which the keepalive is allowed to advance.
+    /// Routes must acquire the runtime's opaque serialized admission before
+    /// submitting this action; generic output-control paths must never build
+    /// it.
+    AuthorizeManagedExactBoth {
+        lease_id: OutputLeaseId,
+        owner: OutputLeaseOwner,
+        exact_resources: OutputLeaseResources,
+        project_identity: String,
+    },
+    RetireOwner {
+        owner: OutputLeaseOwner,
+    },
+    ProjectOrphan {
+        project_identity: String,
+        selected_lease_ids: Vec<OutputLeaseId>,
+        resource_scope: Option<OutputLeaseResources>,
+    },
+}
+
+impl OutputLeaseRequestAction {
+    fn operation(&self) -> &'static str {
+        match self {
+            Self::Acquire { .. } => "acquire",
+            Self::EnableAcquireOrRecover { .. } => "enable_acquire_or_recover",
+            Self::AuthorizeOrRecoverDisplay { .. } => "authorize_or_recover_display",
+            Self::ReplacePreviousProjectForAuthoring { .. } => {
+                "replace_previous_project_for_authoring"
+            }
+            Self::Renew { .. } => "renew",
+            #[cfg(test)]
+            Self::ObserveExpiry { .. } => "observe_expiry",
+            Self::Recover { .. } => "recover",
+            Self::Relinquish { .. } => "relinquish_output_lease",
+            Self::ForceTransfer { .. } => "force_transfer",
+            Self::AuthorizeOrdinary { .. } => "authorize_ordinary",
+            Self::AuthorizeManagedExactBoth { .. } => "authorize_managed_exact_both",
+            Self::RetireOwner { .. } => "retire_owner",
+            Self::ProjectOrphan { .. } => "project_orphan",
+        }
+    }
+
+    fn shape(&self) -> Result<OutputLeaseRequestShape, OutputLeaseError> {
+        let mut shape = OutputLeaseRequestShape::new(self.operation())?;
+        match self {
+            Self::Acquire {
+                owner,
+                resources,
+                project_identity,
+                ttl_ms,
+            }
+            | Self::EnableAcquireOrRecover {
+                owner,
+                resources,
+                project_identity,
+                ttl_ms,
+            } => {
+                shape.owner = Some(owner.clone());
+                shape.resources = Some(resources.clone());
+                shape.project_identity = Some(project_identity.clone());
+                shape.ttl_ms = Some(*ttl_ms);
+            }
+            Self::AuthorizeOrRecoverDisplay {
+                lease_id,
+                owner,
+                expected_generation,
+                exact_resources,
+                project_identity,
+                ttl_ms,
+            } => {
+                shape.lease_id = Some(*lease_id);
+                shape.owner = Some(owner.clone());
+                shape.expected_generation = Some(*expected_generation);
+                shape.resources = Some(exact_resources.clone());
+                shape.project_identity = Some(project_identity.clone());
+                shape.ttl_ms = Some(*ttl_ms);
+            }
+            Self::ReplacePreviousProjectForAuthoring {
+                lease_id,
+                owner,
+                expected_generation,
+                project_identity,
+                ttl_ms,
+            } => {
+                shape.lease_id = Some(*lease_id);
+                shape.owner = Some(owner.clone());
+                shape.expected_generation = Some(*expected_generation);
+                shape.project_identity = Some(project_identity.clone());
+                shape.ttl_ms = Some(*ttl_ms);
+            }
+            Self::Renew {
+                lease_id,
+                owner,
+                expected_generation,
+                ttl_ms,
+            }
+            | Self::Recover {
+                lease_id,
+                owner,
+                expected_generation,
+                ttl_ms,
+            } => {
+                shape.lease_id = Some(*lease_id);
+                shape.owner = Some(owner.clone());
+                shape.expected_generation = Some(*expected_generation);
+                shape.ttl_ms = Some(*ttl_ms);
+            }
+            #[cfg(test)]
+            Self::ObserveExpiry { lease_id } => {
+                shape.lease_id = Some(*lease_id);
+            }
+            Self::Relinquish {
+                lease_id,
+                owner,
+                expected_generation,
+            } => {
+                shape.lease_id = Some(*lease_id);
+                shape.owner = Some(owner.clone());
+                shape.expected_generation = Some(*expected_generation);
+            }
+            Self::ForceTransfer {
+                lease_id,
+                expected_generation,
+                new_owner,
+                ttl_ms,
+            } => {
+                shape.lease_id = Some(*lease_id);
+                shape.expected_generation = Some(*expected_generation);
+                shape.transfer_owner = Some(new_owner.clone());
+                shape.ttl_ms = Some(*ttl_ms);
+            }
+            Self::AuthorizeOrdinary {
+                lease_id,
+                owner,
+                expected_generation,
+                exact_resources,
+            } => {
+                shape.lease_id = Some(*lease_id);
+                shape.owner = Some(owner.clone());
+                shape.expected_generation = Some(*expected_generation);
+                shape.resources = Some(exact_resources.clone());
+            }
+            Self::AuthorizeManagedExactBoth {
+                lease_id,
+                owner,
+                exact_resources,
+                project_identity,
+            } => {
+                shape.lease_id = Some(*lease_id);
+                shape.owner = Some(owner.clone());
+                shape.resources = Some(exact_resources.clone());
+                shape.project_identity = Some(project_identity.clone());
+            }
+            Self::RetireOwner { owner } => {
+                shape.owner = Some(owner.clone());
+            }
+            Self::ProjectOrphan {
+                project_identity,
+                selected_lease_ids,
+                resource_scope,
+            } => {
+                shape.project_identity = Some(project_identity.clone());
+                shape.selected_lease_ids = selected_lease_ids.clone();
+                shape.resource_scope = resource_scope.clone();
+            }
+        }
+        Ok(shape)
+    }
+
+    /// The managed exact-Both bridge is intentionally distinguishable only
+    /// inside the native process.  It never exposes a mutable generation to
+    /// callers: the runtime acquires the serial gate before this request can
+    /// reach the registry.
+    pub(crate) fn managed_exact_both_lease_id(&self) -> Option<OutputLeaseId> {
+        match self {
+            Self::AuthorizeManagedExactBoth { lease_id, .. } => Some(*lease_id),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OutputLeaseRequest {
+    pub(crate) key: OutputLeaseRequestKey,
+    pub(crate) shape: OutputLeaseRequestShape,
+    pub(crate) shape_hash: OutputLeaseShapeHash,
+    pub(crate) action: Option<OutputLeaseRequestAction>,
+}
+
+impl OutputLeaseRequest {
+    #[cfg(test)]
+    pub(crate) fn new(
+        key: OutputLeaseRequestKey,
+        shape: OutputLeaseRequestShape,
+    ) -> Result<Self, OutputLeaseError> {
+        let shape_hash = shape.canonical_hash()?;
+        Ok(Self {
+            key,
+            shape,
+            shape_hash,
+            action: None,
+        })
+    }
+
+    pub(crate) fn from_action(
+        principal: impl Into<String>,
+        domain: impl Into<String>,
+        request_id: u64,
+        action: OutputLeaseRequestAction,
+    ) -> Result<Self, OutputLeaseError> {
+        let key = OutputLeaseRequestKey::new(principal, domain, request_id)?;
+        let shape = action.shape()?;
+        let shape_hash = shape.canonical_hash()?;
+        Ok(Self {
+            key,
+            shape,
+            shape_hash,
+            action: Some(action),
+        })
+    }
+}
+
+fn append_u64(bytes: &mut Vec<u8>, value: u64) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn append_string(bytes: &mut Vec<u8>, value: &str) -> Result<(), OutputLeaseError> {
+    append_u64(
+        bytes,
+        u64::try_from(value.len()).map_err(|_| OutputLeaseError::InvalidRequest)?,
+    );
+    bytes.extend_from_slice(value.as_bytes());
+    Ok(())
+}
+
+fn append_optional_string(
+    bytes: &mut Vec<u8>,
+    value: Option<&str>,
+) -> Result<(), OutputLeaseError> {
+    match value {
+        Some(value) => {
+            bytes.push(1);
+            append_string(bytes, value)?;
+        }
+        None => bytes.push(0),
+    }
+    Ok(())
+}
+
+fn append_optional_u64(bytes: &mut Vec<u8>, value: Option<u64>) {
+    match value {
+        Some(value) => {
+            bytes.push(1);
+            append_u64(bytes, value);
+        }
+        None => bytes.push(0),
+    }
+}
+
+fn append_optional_lease_id(bytes: &mut Vec<u8>, value: Option<OutputLeaseId>) {
+    append_optional_u64(bytes, value.map(|lease_id| lease_id.0));
+}
+
+fn append_optional_owner(
+    bytes: &mut Vec<u8>,
+    owner: Option<&OutputLeaseOwner>,
+) -> Result<(), OutputLeaseError> {
+    match owner {
+        Some(owner) => {
+            bytes.push(1);
+            append_string(bytes, &owner.principal)?;
+            append_string(bytes, &owner.window_label)?;
+            append_u64(bytes, owner.process_session_incarnation);
+            append_u64(bytes, owner.owner_incarnation);
+        }
+        None => bytes.push(0),
+    }
+    Ok(())
+}
+
+fn append_optional_resources(
+    bytes: &mut Vec<u8>,
+    resources: Option<&OutputLeaseResources>,
+) -> Result<(), OutputLeaseError> {
+    match resources {
+        Some(resources) => {
+            bytes.push(1);
+            append_u64(
+                bytes,
+                u64::try_from(resources.0.len()).map_err(|_| OutputLeaseError::InvalidRequest)?,
+            );
+            for resource in &resources.0 {
+                bytes.push(match resource {
+                    OutputLeaseResource::Lighting => 1,
+                    OutputLeaseResource::Video => 2,
+                });
+            }
+        }
+        None => bytes.push(0),
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum OutputLeaseOperationOutcome {
+    Acquired,
+    Renewed,
+    #[cfg(test)]
+    ExpiryObserved,
+    Recovered,
+    Relinquished,
+    Transferred,
+    OwnerRetired,
+    ProjectOrphaned,
+    Authorized,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OutputLeaseRequestReceipt {
+    pub(crate) key: OutputLeaseRequestKey,
+    pub(crate) shape_hash: OutputLeaseShapeHash,
+    pub(crate) lease_id: Option<OutputLeaseId>,
+    pub(crate) affected_lease_ids: Vec<OutputLeaseId>,
+    pub(crate) owner: Option<OutputLeaseOwner>,
+    pub(crate) process_session_incarnation: u64,
+    pub(crate) resources: Option<OutputLeaseResources>,
+    pub(crate) generation_before: Option<u64>,
+    pub(crate) generation_after: Option<u64>,
+    pub(crate) audit_sequence: u64,
+    pub(crate) changes: Vec<OutputLeaseChange>,
+    pub(crate) outcome: Result<OutputLeaseOperationOutcome, OutputLeaseError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OutputLeaseChange {
+    pub(crate) lease_id: OutputLeaseId,
+    pub(crate) before: Option<OutputLeaseSnapshot>,
+    pub(crate) after: Option<OutputLeaseSnapshot>,
+}
+
+fn validate_persisted_owner(owner: &OutputLeaseOwner) -> Result<(), OutputLeaseError> {
+    if !bounded_nonempty(&owner.principal, MAX_OUTPUT_LEASE_OWNER_PRINCIPAL_BYTES)
+        || !bounded_nonempty(&owner.window_label, MAX_OUTPUT_LEASE_OWNER_WINDOW_BYTES)
+        || owner.process_session_incarnation == 0
+        || owner.owner_incarnation == 0
+    {
+        return Err(OutputLeaseError::InvalidOwner);
+    }
+    Ok(())
+}
+
+fn validate_persisted_resources(resources: &OutputLeaseResources) -> Result<(), OutputLeaseError> {
+    if resources.0.len() > 2 {
+        return Err(OutputLeaseError::InvalidResources);
+    }
+    OutputLeaseResources::new(&resources.0).map(|_| ())
+}
+
+fn validate_persisted_snapshot(snapshot: &OutputLeaseSnapshot) -> Result<(), OutputLeaseError> {
+    if snapshot.generation == 0 && snapshot.phase != OutputLeasePhase::Unclaimed {
+        return Err(OutputLeaseError::InvalidTransition);
+    }
+    if let Some(owner) = snapshot.owner.as_ref() {
+        validate_persisted_owner(owner)?;
+    }
+    if let Some(resources) = snapshot.resources.as_ref() {
+        validate_persisted_resources(resources)?;
+    }
+    match snapshot.phase {
+        OutputLeasePhase::Unclaimed => {
+            if snapshot.owner.is_some()
+                || snapshot.resources.is_some()
+                || snapshot.expires_at_monotonic_ms.is_some()
+            {
+                return Err(OutputLeaseError::InvalidTransition);
+            }
+        }
+        OutputLeasePhase::HeldActive => {
+            if snapshot.owner.is_none()
+                || snapshot.resources.is_none()
+                || snapshot.expires_at_monotonic_ms.is_none()
+            {
+                return Err(OutputLeaseError::InvalidTransition);
+            }
+        }
+        OutputLeasePhase::HeldOrphaned => {
+            if snapshot.owner.is_none()
+                || snapshot.resources.is_none()
+                || snapshot.expires_at_monotonic_ms.is_some()
+            {
+                return Err(OutputLeaseError::InvalidTransition);
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_persisted_request_key(
+    key: &OutputLeaseRequestKey,
+) -> Result<(), OutputLeaseError> {
+    OutputLeaseRequestKey::new(key.principal.clone(), key.domain.clone(), key.request_id)
+        .map(|_| ())
+}
+
+pub(crate) fn validate_persisted_shape_hash(
+    shape_hash: &OutputLeaseShapeHash,
+) -> Result<(), OutputLeaseError> {
+    if shape_hash.0.iter().all(|byte| *byte == 0) {
+        Err(OutputLeaseError::InvalidRequest)
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn validate_persisted_receipt(
+    receipt: &OutputLeaseRequestReceipt,
+) -> Result<(), OutputLeaseError> {
+    validate_persisted_request_key(&receipt.key)?;
+    validate_persisted_shape_hash(&receipt.shape_hash)?;
+    if receipt.process_session_incarnation == 0
+        || receipt.audit_sequence == 0
+        || receipt.affected_lease_ids.len() > MAX_OUTPUT_LEASE_SELECTED_IDS
+        || receipt.changes.len() > MAX_OUTPUT_LEASES
+    {
+        return Err(OutputLeaseError::InvalidRequest);
+    }
+    if let Some(lease_id) = receipt.lease_id {
+        if lease_id.0 == 0 {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        if !receipt.affected_lease_ids.contains(&lease_id) {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+    }
+    if receipt
+        .affected_lease_ids
+        .iter()
+        .any(|lease_id| lease_id.0 == 0)
+        || receipt
+            .affected_lease_ids
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(OutputLeaseError::InvalidRequest);
+    }
+    if let Some(owner) = receipt.owner.as_ref() {
+        validate_persisted_owner(owner)?;
+    }
+    if let Some(resources) = receipt.resources.as_ref() {
+        validate_persisted_resources(resources)?;
+    }
+    for (index, change) in receipt.changes.iter().enumerate() {
+        if change.lease_id.0 == 0
+            || change.before.is_none() && change.after.is_none()
+            || receipt
+                .changes
+                .iter()
+                .take(index)
+                .any(|previous| previous.lease_id == change.lease_id)
+        {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        if let Some(before) = change.before.as_ref() {
+            validate_persisted_snapshot(before)?;
+        }
+        if let Some(after) = change.after.as_ref() {
+            validate_persisted_snapshot(after)?;
+        }
+    }
+    if let Some(first_change) = receipt.changes.first() {
+        if receipt.generation_before
+            != first_change
+                .before
+                .as_ref()
+                .map(|snapshot| snapshot.generation)
+            || receipt.generation_after
+                != first_change
+                    .after
+                    .as_ref()
+                    .map(|snapshot| snapshot.generation)
+        {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+    } else if receipt.generation_before.is_some() || receipt.generation_after.is_some() {
+        return Err(OutputLeaseError::InvalidRequest);
+    }
+    if receipt
+        .changes
+        .iter()
+        .any(|change| !receipt.affected_lease_ids.contains(&change.lease_id))
+    {
+        return Err(OutputLeaseError::InvalidRequest);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OutputLeaseAuditRecord {
+    pub(crate) sequence: u64,
+    pub(crate) receipt: OutputLeaseRequestReceipt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OutputLeaseLeaseView {
+    pub(crate) lease_id: OutputLeaseId,
+    pub(crate) project_identity: String,
+    pub(crate) snapshot: OutputLeaseSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DisplayAddLeaseAuthorityStatus {
+    HeldActive,
+    ExpiredRecoverable,
+    HeldOrphaned,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DisplayAddLeaseAuthorityView {
+    pub(crate) lease_id: OutputLeaseId,
+    pub(crate) generation: u64,
+    pub(crate) status: DisplayAddLeaseAuthorityStatus,
+    pub(crate) resources: OutputLeaseResources,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OutputLeaseRequestAdmission {
+    Terminal(OutputLeaseRequestReceipt),
+    InFlight(OutputLeaseRequestPermit),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OutputLeaseRequestPermit {
+    key: OutputLeaseRequestKey,
+    shape_hash: OutputLeaseShapeHash,
+    process_session_incarnation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutputLeaseRecord {
+    state: OutputLeaseState,
+    project_identity: String,
+    last_touched_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutputLeaseTerminalRecord {
+    shape_hash: OutputLeaseShapeHash,
+    receipt: OutputLeaseRequestReceipt,
+    expires_at_ms: u64,
+    last_used_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutputLeaseOriginState {
+    high_water_request_id: u64,
+    last_used_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutputLeaseInFlight {
+    shape_hash: OutputLeaseShapeHash,
+    operation_key: OutputLeaseRateKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct OutputLeaseRateKey {
+    principal: String,
+    operation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutputLeaseTokenBucket {
+    tokens_milli: u64,
+    observed_at_ms: u64,
+}
+
+impl OutputLeaseTokenBucket {
+    fn fresh(now_ms: u64) -> Self {
+        Self {
+            tokens_milli: OUTPUT_LEASE_TOKEN_BURST_MILLI,
+            observed_at_ms: now_ms,
+        }
+    }
+
+    fn try_take(&mut self, now_ms: u64) -> Result<bool, OutputLeaseError> {
+        if now_ms < self.observed_at_ms {
+            return Err(OutputLeaseError::ClockRollback);
+        }
+        let elapsed_ms = now_ms - self.observed_at_ms;
+        let refill = elapsed_ms
+            .checked_mul(OUTPUT_LEASE_TOKEN_RATE_PER_SECOND_MILLI)
+            .ok_or(OutputLeaseError::ClockExhausted)?;
+        self.tokens_milli = self
+            .tokens_milli
+            .saturating_add(refill)
+            .min(OUTPUT_LEASE_TOKEN_BURST_MILLI);
+        self.observed_at_ms = now_ms;
+        if self.tokens_milli < 1_000 {
+            return Ok(false);
+        }
+        self.tokens_milli -= 1_000;
+        Ok(true)
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OutputLeasePurgeSummary {
+    pub(crate) expired_leases_orphaned: usize,
+    pub(crate) unclaimed_leases_purged: usize,
+    pub(crate) receipts_purged: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OutputLeaseRegistry {
+    process_session_incarnation: u64,
+    leases: BTreeMap<OutputLeaseId, OutputLeaseRecord>,
+    resource_index: BTreeMap<OutputLeaseResource, BTreeSet<OutputLeaseId>>,
+    next_lease_id: u64,
+    last_now_ms: u64,
+    receipts: BTreeMap<OutputLeaseRequestKey, OutputLeaseTerminalRecord>,
+    origins: BTreeMap<OutputLeaseRequestOrigin, OutputLeaseOriginState>,
+    in_flight: BTreeMap<OutputLeaseRequestKey, OutputLeaseInFlight>,
+    operation_lanes: BTreeSet<OutputLeaseRateKey>,
+    token_buckets: BTreeMap<OutputLeaseRateKey, OutputLeaseTokenBucket>,
+    reserved_receipts: usize,
+    reserved_audit: usize,
+    audit: VecDeque<OutputLeaseAuditRecord>,
+    next_audit_sequence: u64,
+}
+
+impl OutputLeaseRegistry {
+    pub(crate) fn fresh_process(
+        process_session_incarnation: u64,
+    ) -> Result<Self, OutputLeaseError> {
+        if process_session_incarnation == 0 {
+            return Err(OutputLeaseError::InvalidOwner);
+        }
+        Ok(Self {
+            process_session_incarnation,
+            leases: BTreeMap::new(),
+            resource_index: BTreeMap::new(),
+            next_lease_id: 1,
+            last_now_ms: 0,
+            receipts: BTreeMap::new(),
+            origins: BTreeMap::new(),
+            in_flight: BTreeMap::new(),
+            operation_lanes: BTreeSet::new(),
+            token_buckets: BTreeMap::new(),
+            reserved_receipts: 0,
+            reserved_audit: 0,
+            audit: VecDeque::new(),
+            next_audit_sequence: 0,
+        })
+    }
+
+    pub(crate) fn process_session_incarnation(&self) -> u64 {
+        self.process_session_incarnation
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lease_count(&self) -> usize {
+        self.leases.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_lease_count(&self) -> usize {
+        self.leases
+            .values()
+            .filter(|record| {
+                matches!(
+                    record.state.snapshot.phase,
+                    OutputLeasePhase::HeldActive | OutputLeasePhase::HeldOrphaned
+                )
+            })
+            .count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn receipt_count(&self) -> usize {
+        self.receipts.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn origin_count(&self) -> usize {
+        self.origins.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn audit(&self) -> &VecDeque<OutputLeaseAuditRecord> {
+        &self.audit
+    }
+    pub(crate) fn diagnostic_audit(&self,before:Option<u64>)->Result<super::diagnostic_audit::Page,String> {
+        use super::diagnostic_audit::{page,Row,hex};
+        page("output_lease",self.audit.iter(),before,|r|r.sequence,|r,id|{
+            let receipt=&r.receipt;
+            let mut row=Row::new(id,"terminal",Some(&receipt.key.principal),Some(&receipt.key.domain),Some(receipt.key.request_id));
+            row.shape_sha256=Some(hex(&receipt.shape_hash.0));row.succeeded=Some(receipt.outcome.is_ok());
+            row.generation_before=receipt.generation_before;row.generation_after=receipt.generation_after;row
+        })
+    }
+
+    pub(crate) fn lease_view(
+        &self,
+        lease_id: OutputLeaseId,
+    ) -> Result<OutputLeaseLeaseView, OutputLeaseError> {
+        let record = self
+            .leases
+            .get(&lease_id)
+            .ok_or(OutputLeaseError::UnknownLease)?;
+        Ok(OutputLeaseLeaseView {
+            lease_id,
+            project_identity: record.project_identity.clone(),
+            snapshot: record.state.snapshot(),
+        })
+    }
+
+    pub(crate) fn lease_views(&self) -> Vec<OutputLeaseLeaseView> {
+        self.leases
+            .iter()
+            .map(|(&lease_id, record)| OutputLeaseLeaseView {
+                lease_id,
+                project_identity: record.project_identity.clone(),
+                snapshot: record.state.snapshot(),
+            })
+            .collect()
+    }
+
+    /// Read-only owner query. It never changes expiry authority or appends an
+    /// audit record; an active lease at its deadline is conservatively omitted
+    /// as unavailable and is orphaned by the next mutating registry request.
+    pub(crate) fn query_owner_leases(
+        &self,
+        owner: &OutputLeaseOwner,
+        now_ms: u64,
+    ) -> Result<Vec<OutputLeaseLeaseView>, OutputLeaseError> {
+        self.ensure_now(now_ms)?;
+        if owner.process_session_incarnation != self.process_session_incarnation {
+            return Err(OutputLeaseError::StaleOwner);
+        }
+        Ok(self
+            .lease_views()
+            .into_iter()
+            .filter(|view| {
+                if view.snapshot.owner.as_ref() != Some(owner) {
+                    return false;
+                }
+                match view.snapshot.phase {
+                    OutputLeasePhase::HeldActive => view
+                        .snapshot
+                        .expires_at_monotonic_ms
+                        .is_some_and(|deadline| now_ms < deadline),
+                    OutputLeasePhase::HeldOrphaned => true,
+                    OutputLeasePhase::Unclaimed => false,
+                }
+            })
+            .collect())
+    }
+
+    /// Pure authoring discovery, including an expired active claim at its
+    /// original generation. A read must neither orphan it nor hide its index.
+    /// Reconstruct the bounded index before returning even None, so missing,
+    /// dangling, noncanonical or overlapping claims cannot look available.
+    pub(crate) fn query_video_authoring_lease(
+        &self,
+        owner: &OutputLeaseOwner,
+        now_ms: u64,
+    ) -> Result<Option<OutputLeaseLeaseView>, OutputLeaseError> {
+        self.ensure_now(now_ms)?;
+        validate_persisted_owner(owner)?;
+        if owner.process_session_incarnation != self.process_session_incarnation {
+            return Err(OutputLeaseError::StaleOwner);
+        }
+        let mut expected_index: BTreeMap<OutputLeaseResource, BTreeSet<OutputLeaseId>> =
+            BTreeMap::new();
+        let mut selected = None;
+        for (&lease_id, record) in &self.leases {
+            let snapshot = &record.state.snapshot;
+            validate_persisted_snapshot(snapshot)?;
+            let Some(resources) = snapshot.resources.as_ref() else {
+                continue;
+            };
+            if OutputLeaseResources::new(resources.as_slice())? != *resources {
+                return Err(OutputLeaseError::InvalidResources);
+            }
+            for resource in resources.as_slice() {
+                let ids = expected_index.entry(*resource).or_default();
+                if !ids.is_empty() {
+                    return Err(OutputLeaseError::ResourceConflict);
+                }
+                ids.insert(lease_id);
+            }
+            if snapshot.owner.as_ref() == Some(owner)
+                && resources.as_slice().contains(&OutputLeaseResource::Video)
+            {
+                record.state.require_current_process(owner)?;
+                selected = Some(self.lease_view(lease_id)?);
+            }
+        }
+        if expected_index != self.resource_index {
+            return Err(OutputLeaseError::ResourceConflict);
+        }
+        Ok(selected)
+    }
+
+    fn ensure_now(&self, now_ms: u64) -> Result<(), OutputLeaseError> {
+        if now_ms < self.last_now_ms {
+            Err(OutputLeaseError::ClockRollback)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn advance_now(&mut self, now_ms: u64) -> Result<(), OutputLeaseError> {
+        self.ensure_now(now_ms)?;
+        self.last_now_ms = now_ms;
+        Ok(())
+    }
+
+    fn lookup_mut(
+        &mut self,
+        lease_id: OutputLeaseId,
+    ) -> Result<&mut OutputLeaseRecord, OutputLeaseError> {
+        self.leases
+            .get_mut(&lease_id)
+            .ok_or(OutputLeaseError::UnknownLease)
+    }
+
+    fn allocate_lease_id(&mut self) -> Result<OutputLeaseId, OutputLeaseError> {
+        let value = self.next_lease_id;
+        if value == 0 {
+            return Err(OutputLeaseError::LeaseIdExhausted);
+        }
+        self.next_lease_id = value
+            .checked_add(1)
+            .ok_or(OutputLeaseError::LeaseIdExhausted)?;
+        Ok(OutputLeaseId(value))
+    }
+
+    fn acquire(
+        &mut self,
+        owner: OutputLeaseOwner,
+        resources: OutputLeaseResources,
+        project_identity: impl Into<String>,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<OutputLeaseGrant, OutputLeaseError> {
+        let mut candidate = self.clone();
+        let result =
+            candidate.acquire_inner(owner, resources, project_identity.into(), now_ms, ttl_ms);
+        match result {
+            Ok(grant) => {
+                *self = candidate;
+                Ok(grant)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn acquire_inner(
+        &mut self,
+        owner: OutputLeaseOwner,
+        resources: OutputLeaseResources,
+        project_identity: String,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<OutputLeaseGrant, OutputLeaseError> {
+        self.advance_now(now_ms)?;
+        checked_deadline(now_ms, ttl_ms)?;
+        if owner.process_session_incarnation != self.process_session_incarnation {
+            return Err(OutputLeaseError::StaleOwner);
+        }
+        if !bounded_nonempty(&project_identity, MAX_OUTPUT_LEASE_PROJECT_BYTES) {
+            return Err(OutputLeaseError::InvalidProject);
+        }
+        let resources = OutputLeaseResources::new(resources.as_slice())?;
+        self.purge_unclaimed_for_capacity(now_ms);
+        if self.leases.len() >= MAX_OUTPUT_LEASES {
+            return Err(OutputLeaseError::LeaseCapacity);
+        }
+        if self.resources_overlap(&resources) {
+            return Err(OutputLeaseError::ResourceConflict);
+        }
+        let lease_id = self.allocate_lease_id()?;
+        let mut state = OutputLeaseState::fresh_process(self.process_session_incarnation)?;
+        let snapshot = state.acquire(owner, resources.clone(), now_ms, ttl_ms)?;
+        self.leases.insert(
+            lease_id,
+            OutputLeaseRecord {
+                state,
+                project_identity,
+                last_touched_ms: now_ms,
+            },
+        );
+        self.index_resources(lease_id, &resources);
+        Ok(OutputLeaseGrant { lease_id, snapshot })
+    }
+
+    fn enable_acquire_or_recover(
+        &mut self,
+        owner: OutputLeaseOwner,
+        resources: OutputLeaseResources,
+        project_identity: impl Into<String>,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<OutputLeaseEnableTransition, OutputLeaseError> {
+        let mut candidate = self.clone();
+        let result = candidate.enable_acquire_or_recover_inner(
+            owner,
+            resources,
+            project_identity.into(),
+            now_ms,
+            ttl_ms,
+        );
+        match result {
+            Ok(transition) => {
+                *self = candidate;
+                Ok(transition)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn enable_acquire_or_recover_inner(
+        &mut self,
+        owner: OutputLeaseOwner,
+        resources: OutputLeaseResources,
+        project_identity: String,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<OutputLeaseEnableTransition, OutputLeaseError> {
+        self.advance_now(now_ms)?;
+        checked_deadline(now_ms, ttl_ms)?;
+        if owner.process_session_incarnation != self.process_session_incarnation {
+            return Err(OutputLeaseError::StaleOwner);
+        }
+        if !bounded_nonempty(&project_identity, MAX_OUTPUT_LEASE_PROJECT_BYTES) {
+            return Err(OutputLeaseError::InvalidProject);
+        }
+        let resources = OutputLeaseResources::new(resources.as_slice())?;
+        let both = OutputLeaseResources::new(&[
+            OutputLeaseResource::Lighting,
+            OutputLeaseResource::Video,
+        ])?;
+        if resources != both {
+            return Err(OutputLeaseError::ResourceConflict);
+        }
+
+        // A deadline race is resolved on the private candidate before the
+        // overlap decision. The visible transition is either one exact
+        // orphan->active recovery or no mutation at all.
+        self.orphan_expired_overlapping_leases(&resources, now_ms)?;
+        let overlapping = self
+            .leases
+            .iter()
+            .filter_map(|(&lease_id, record)| {
+                record
+                    .state
+                    .snapshot
+                    .resources
+                    .as_ref()
+                    .filter(|lease_resources| lease_resources.overlaps(&resources))
+                    .map(|_| lease_id)
+            })
+            .collect::<Vec<_>>();
+        if overlapping.len() > 1 {
+            return Err(OutputLeaseError::ResourceConflict);
+        }
+
+        if let Some(lease_id) = overlapping.first().copied() {
+            let record = self.lookup_mut(lease_id)?;
+            if record.state.snapshot.phase != OutputLeasePhase::HeldOrphaned
+                || record.project_identity != project_identity
+                || record.state.snapshot.owner.as_ref() != Some(&owner)
+                || record.state.snapshot.resources.as_ref() != Some(&resources)
+            {
+                // An orphan belonging to a different owner/project/resource
+                // scope must not be silently replaced by Enable. That would
+                // turn stale authority into a fresh takeover.
+                return Err(OutputLeaseError::ResourceConflict);
+            }
+            let before = record.state.snapshot();
+            let snapshot = record
+                .state
+                .recover(&owner, before.generation, now_ms, ttl_ms)?;
+            record.last_touched_ms = now_ms;
+            return Ok(OutputLeaseEnableTransition {
+                lease_id,
+                snapshot,
+                before: Some(before),
+                recovered: true,
+            });
+        }
+
+        let grant = self.acquire_inner(owner, resources, project_identity, now_ms, ttl_ms)?;
+        Ok(OutputLeaseEnableTransition {
+            lease_id: grant.lease_id,
+            snapshot: grant.snapshot,
+            before: None,
+            recovered: false,
+        })
+    }
+
+    fn orphan_expired_overlapping_leases(
+        &mut self,
+        resources: &OutputLeaseResources,
+        now_ms: u64,
+    ) -> Result<(), OutputLeaseError> {
+        let ids = self
+            .leases
+            .iter()
+            .filter_map(|(&lease_id, record)| {
+                record
+                    .state
+                    .snapshot
+                    .resources
+                    .as_ref()
+                    .filter(|lease_resources| lease_resources.overlaps(resources))
+                    .map(|_| lease_id)
+            })
+            .collect::<Vec<_>>();
+        for lease_id in ids {
+            let record = self.lookup_mut(lease_id)?;
+            if record.state.snapshot.phase == OutputLeasePhase::HeldActive
+                && now_ms >= record.state.snapshot.expires_at_monotonic_ms.unwrap_or(0)
+            {
+                record.state.orphan_without_owner_check()?;
+                record.last_touched_ms = now_ms;
+            }
+        }
+        Ok(())
+    }
+
+    fn renew(
+        &mut self,
+        lease_id: OutputLeaseId,
+        owner: &OutputLeaseOwner,
+        expected_generation: u64,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<OutputLeaseSnapshot, OutputLeaseError> {
+        let mut candidate = self.clone();
+        let result = candidate.renew_inner(lease_id, owner, expected_generation, now_ms, ttl_ms);
+        match result {
+            Ok(snapshot) => {
+                *self = candidate;
+                Ok(snapshot)
+            }
+            Err(OutputLeaseError::Expired) => {
+                // Deadline expiry is an intentional authority transition. The
+                // core has already advanced the generation to orphaned.
+                *self = candidate;
+                Err(OutputLeaseError::Expired)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn renew_inner(
+        &mut self,
+        lease_id: OutputLeaseId,
+        owner: &OutputLeaseOwner,
+        expected_generation: u64,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<OutputLeaseSnapshot, OutputLeaseError> {
+        self.advance_now(now_ms)?;
+        checked_deadline(now_ms, ttl_ms)?;
+        let record = self.lookup_mut(lease_id)?;
+        let result = record
+            .state
+            .renew(owner, expected_generation, now_ms, ttl_ms);
+        if result.is_ok() || matches!(result, Err(OutputLeaseError::Expired)) {
+            record.last_touched_ms = now_ms;
+        }
+        result
+    }
+
+    /// Binds a manager arm evidence to one durable canonical `EnableOutput`
+    /// receipt and the registry's *current* exact-`Both` authority. The
+    /// runtime adapter must call this only after the durable journal has
+    /// confirmed the receipt; this core validates every registry-visible fact
+    /// and leaves later CAS capability issuance exclusively to the manager.
+    pub(crate) fn issue_managed_exact_both_durable_enable_evidence(
+        &self,
+        durable_receipt: &OutputLeaseRequestReceipt,
+        identity: OutputLeaseKeepaliveIdentity,
+    ) -> Result<OutputLeaseKeepaliveDurableEnableEvidence, OutputLeaseError> {
+        let exact_both = OutputLeaseResources::new(&[
+            OutputLeaseResource::Lighting,
+            OutputLeaseResource::Video,
+        ])?;
+        let lease_id = durable_receipt
+            .lease_id
+            .ok_or(OutputLeaseError::InvalidRequest)?;
+        let owner = durable_receipt
+            .owner
+            .as_ref()
+            .ok_or(OutputLeaseError::InvalidRequest)?;
+        let generation = durable_receipt
+            .generation_after
+            .ok_or(OutputLeaseError::InvalidRequest)?;
+        if durable_receipt.audit_sequence == 0
+            || durable_receipt.process_session_incarnation != self.process_session_incarnation
+            || generation == 0
+            || durable_receipt.resources.as_ref() != Some(&exact_both)
+            || !matches!(
+                &durable_receipt.outcome,
+                Ok(OutputLeaseOperationOutcome::Acquired | OutputLeaseOperationOutcome::Recovered)
+            )
+        {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        let terminal = self
+            .receipts
+            .get(&durable_receipt.key)
+            .ok_or(OutputLeaseError::ReceiptNotRetained)?;
+        if terminal.shape_hash != durable_receipt.shape_hash
+            || terminal.receipt != *durable_receipt
+            || self.last_now_ms >= terminal.expires_at_ms
+            || !self.audit.iter().any(|audit| {
+                audit.sequence == durable_receipt.audit_sequence
+                    && audit.receipt == *durable_receipt
+            })
+        {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        let record = self
+            .leases
+            .get(&lease_id)
+            .ok_or(OutputLeaseError::UnknownLease)?;
+        let snapshot = &record.state.snapshot;
+        if record.project_identity != identity.project_identity()
+            || snapshot.phase != OutputLeasePhase::HeldActive
+            || snapshot.owner.as_ref() != Some(owner)
+            || snapshot.resources.as_ref() != Some(&exact_both)
+            || snapshot.generation != generation
+            || snapshot.expires_at_monotonic_ms.is_none()
+            || owner.process_session_incarnation != self.process_session_incarnation
+            || durable_receipt.key.principal != owner.principal
+            || identity.session_identity()
+                != format!(
+                    "process:{};owner:{}",
+                    durable_receipt.process_session_incarnation, owner.owner_incarnation
+                )
+            || identity.request_correlation()
+                != format!(
+                    "principal:{};domain:{};request:{}",
+                    durable_receipt.key.principal,
+                    durable_receipt.key.domain,
+                    durable_receipt.key.request_id
+                )
+        {
+            return Err(OutputLeaseError::InvalidTransition);
+        }
+        let registry_owner = OutputLeaseKeepaliveRegistryOwner::from_verified_components(
+            owner.principal.clone(),
+            owner.window_label.clone(),
+            owner.process_session_incarnation,
+            owner.owner_incarnation,
+        )
+        .map_err(|_| OutputLeaseError::InvalidRequest)?;
+        let claim = OutputLeaseKeepaliveRegistryClaim::from_verified_durable_enable_receipt(
+            lease_id.encode(),
+            generation,
+            record.project_identity.clone(),
+            registry_owner,
+            durable_receipt.key.principal.clone(),
+            durable_receipt.key.domain.clone(),
+            durable_receipt.key.request_id,
+            durable_receipt.audit_sequence,
+        )
+        .map_err(|_| OutputLeaseError::InvalidRequest)?;
+        OutputLeaseKeepaliveDurableEnableEvidence::issue_after_verified_durable_enable_receipt(
+            identity, claim,
+        )
+        .map_err(|_| OutputLeaseError::InvalidRequest)
+    }
+
+    /// Issue non-arm cleanup authority after the caller has already committed
+    /// a durable exact-`Both` Enable but ordinary evidence issuance/admission
+    /// failed before the keepalive manager accepted it. This is deliberately a
+    /// static parent boundary: it reads neither the registry nor the durable
+    /// journal, so either originating lock may be poisoned. The caller may use
+    /// it only at the returned durable-commit boundary.
+    ///
+    /// The resulting opaque value cannot arm, renew, or defer an Enable. It
+    /// can only create a manager-owned canonical fail-stop, after which the
+    /// existing exact relinquish CAS independently revalidates current
+    /// registry authority before it can release anything.
+    pub(crate) fn issue_managed_exact_both_cleanup_only_evidence_after_durable_commit(
+        request: &OutputLeaseRequest,
+        durable_receipt: &OutputLeaseRequestReceipt,
+        identity: OutputLeaseKeepaliveIdentity,
+    ) -> Result<OutputLeaseKeepaliveDurableEnableCleanupOnlyEvidence, OutputLeaseError> {
+        let claim = Self::managed_exact_both_cleanup_only_claim_after_durable_commit(
+            request,
+            durable_receipt,
+            &identity,
+        )?;
+        OutputLeaseKeepaliveDurableEnableCleanupOnlyEvidence::issue_after_durable_enable_commit_without_current_registry_proof(
+            identity,
+            claim,
+        )
+        .map_err(|_| OutputLeaseError::InvalidRequest)
+    }
+
+    fn managed_exact_both_cleanup_only_claim_after_durable_commit(
+        request: &OutputLeaseRequest,
+        durable_receipt: &OutputLeaseRequestReceipt,
+        identity: &OutputLeaseKeepaliveIdentity,
+    ) -> Result<OutputLeaseKeepaliveRegistryClaim, OutputLeaseError> {
+        validate_persisted_request_key(&request.key)?;
+        validate_persisted_shape_hash(&request.shape_hash)?;
+        if request.shape.canonical_hash()? != request.shape_hash {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        let action = request
+            .action
+            .as_ref()
+            .ok_or(OutputLeaseError::InvalidRequest)?;
+        if request.shape != action.shape()? {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        let (owner, resources, project_identity, ttl_ms) = match action {
+            OutputLeaseRequestAction::EnableAcquireOrRecover {
+                owner,
+                resources,
+                project_identity,
+                ttl_ms,
+            } => (owner, resources, project_identity, *ttl_ms),
+            _ => return Err(OutputLeaseError::InvalidRequest),
+        };
+        let exact_both = OutputLeaseResources::new(&[
+            OutputLeaseResource::Lighting,
+            OutputLeaseResource::Video,
+        ])?;
+        if resources != &exact_both || ttl_ms != OUTPUT_LEASE_MANAGED_EXACT_BOTH_TTL_MS {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        validate_persisted_receipt(durable_receipt)?;
+        if durable_receipt.key != request.key
+            || durable_receipt.shape_hash != request.shape_hash
+            || durable_receipt.audit_sequence == 0
+            || durable_receipt.audit_sequence == u64::MAX
+            || durable_receipt.process_session_incarnation != owner.process_session_incarnation
+            || durable_receipt.key.principal != owner.principal
+            || durable_receipt.owner.as_ref() != Some(owner)
+            || durable_receipt.resources.as_ref() != Some(&exact_both)
+            || !matches!(
+                &durable_receipt.outcome,
+                Ok(OutputLeaseOperationOutcome::Acquired | OutputLeaseOperationOutcome::Recovered)
+            )
+        {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        let lease_id = durable_receipt
+            .lease_id
+            .ok_or(OutputLeaseError::InvalidRequest)?;
+        let generation = durable_receipt
+            .generation_after
+            .ok_or(OutputLeaseError::InvalidRequest)?;
+        if generation == 0
+            || durable_receipt.affected_lease_ids.len() != 1
+            || durable_receipt.affected_lease_ids[0] != lease_id
+            || durable_receipt.changes.len() != 1
+        {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        let change = &durable_receipt.changes[0];
+        let after = change
+            .after
+            .as_ref()
+            .ok_or(OutputLeaseError::InvalidRequest)?;
+        if change.lease_id != lease_id
+            || after.phase != OutputLeasePhase::HeldActive
+            || after.owner.as_ref() != Some(owner)
+            || after.resources.as_ref() != Some(&exact_both)
+            || after.generation != generation
+            || after.expires_at_monotonic_ms.is_none()
+        {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        match &durable_receipt.outcome {
+            Ok(OutputLeaseOperationOutcome::Acquired) => {
+                if generation != 1
+                    || durable_receipt.generation_before.is_some()
+                    || change.before.is_some()
+                {
+                    return Err(OutputLeaseError::InvalidRequest);
+                }
+            }
+            Ok(OutputLeaseOperationOutcome::Recovered) => {
+                let before = change
+                    .before
+                    .as_ref()
+                    .ok_or(OutputLeaseError::InvalidRequest)?;
+                if before.phase != OutputLeasePhase::HeldOrphaned
+                    || before.owner.as_ref() != Some(owner)
+                    || before.resources.as_ref() != Some(&exact_both)
+                    || durable_receipt.generation_before != Some(before.generation)
+                    || before.generation.checked_add(1) != Some(generation)
+                {
+                    return Err(OutputLeaseError::InvalidRequest);
+                }
+            }
+            _ => return Err(OutputLeaseError::InvalidRequest),
+        }
+        if identity.project_identity() != project_identity
+            || identity.owner_identity() != owner.principal
+            || identity.window_label() != owner.window_label
+            || identity.session_identity()
+                != format!(
+                    "process:{};owner:{}",
+                    durable_receipt.process_session_incarnation, owner.owner_incarnation
+                )
+            || identity.request_correlation()
+                != format!(
+                    "principal:{};domain:{};request:{}",
+                    request.key.principal, request.key.domain, request.key.request_id
+                )
+        {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        let registry_owner = OutputLeaseKeepaliveRegistryOwner::from_verified_components(
+            owner.principal.clone(),
+            owner.window_label.clone(),
+            owner.process_session_incarnation,
+            owner.owner_incarnation,
+        )
+        .map_err(|_| OutputLeaseError::InvalidRequest)?;
+        OutputLeaseKeepaliveRegistryClaim::from_verified_durable_enable_receipt(
+            lease_id.encode(),
+            generation,
+            project_identity.clone(),
+            registry_owner,
+            durable_receipt.key.principal.clone(),
+            durable_receipt.key.domain.clone(),
+            durable_receipt.key.request_id,
+            durable_receipt.audit_sequence,
+        )
+        .map_err(|_| OutputLeaseError::InvalidRequest)
+    }
+
+    /// Backend-only CAS renewal for the exact managed `Lighting+Video` lease
+    /// at the fixed 60,000 ms managed-keepalive TTL.
+    ///
+    /// This deliberately bypasses public request identities, operation lanes,
+    /// token buckets, terminal receipts, and the public audit queue. The caller
+    /// must already have correlated a durable canonical `EnableOutput` receipt
+    /// with the same lease, owner, and project, then serialize this result
+    /// through the managed keepalive state machine. No public command calls
+    /// this boundary.
+    pub(crate) fn renew_managed_exact_both(
+        &mut self,
+        capability: OutputLeaseKeepaliveRenewalCapability,
+        now_ms: u64,
+    ) -> OutputLeaseKeepaliveRenewalCasReceipt {
+        match capability.consume_for_registry() {
+            OutputLeaseKeepaliveRegistryRenewalIngress::Rejected(receipt) => receipt,
+            OutputLeaseKeepaliveRegistryRenewalIngress::Claimed(claim) => {
+                match self.renew_managed_exact_both_claim(&claim, now_ms) {
+                    Ok(snapshot) => {
+                        let renewed_lease =
+                            OutputLeaseKeepaliveExactBothLease::from_verified_exact_both(
+                                claim.lease().lease_id().to_owned(),
+                                snapshot.generation,
+                            )
+                            .expect(
+                                "registry only returns a canonical exact-Both renewal snapshot",
+                            );
+                        OutputLeaseKeepaliveRenewalCasReceipt::Renewed(
+                            OutputLeaseKeepaliveRenewalSuccessReceipt::from_registry_success(
+                                claim,
+                                renewed_lease,
+                            ),
+                        )
+                    }
+                    Err(error) => {
+                        let detail = OutputLeaseKeepalivePortError::detail(format!("{error:?}"))
+                            .expect("static output-lease errors fit the keepalive error bound");
+                        OutputLeaseKeepaliveRenewalCasReceipt::Rejected(
+                            OutputLeaseKeepaliveRenewalFailureReceipt::from_registry_claim(
+                                claim, detail,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fn renew_managed_exact_both_claim(
+        &mut self,
+        claim: &OutputLeaseKeepaliveRegistryRenewalClaim,
+        now_ms: u64,
+    ) -> Result<OutputLeaseSnapshot, OutputLeaseError> {
+        let (lease_id, owner, project_identity, expected_generation) =
+            Self::managed_exact_both_claim_components(
+                claim.registry_claim(),
+                claim.lease(),
+                claim.identity(),
+            )?;
+        let mut candidate = self.clone();
+        candidate.ensure_now(now_ms)?;
+        checked_deadline(now_ms, OUTPUT_LEASE_MANAGED_EXACT_BOTH_TTL_MS)?;
+        let exact_both = OutputLeaseResources::new(&[
+            OutputLeaseResource::Lighting,
+            OutputLeaseResource::Video,
+        ])?;
+        {
+            let record = candidate
+                .leases
+                .get(&lease_id)
+                .ok_or(OutputLeaseError::UnknownLease)?;
+            if record.project_identity != project_identity
+                || record.state.snapshot.resources.as_ref() != Some(&exact_both)
+            {
+                return Err(OutputLeaseError::ResourceConflict);
+            }
+        }
+        let result = candidate.renew_inner(
+            lease_id,
+            &owner,
+            expected_generation,
+            now_ms,
+            OUTPUT_LEASE_MANAGED_EXACT_BOTH_TTL_MS,
+        );
+        match result {
+            Ok(snapshot) => {
+                *self = candidate;
+                Ok(snapshot)
+            }
+            Err(OutputLeaseError::Expired) => {
+                // Expiry is authority truth, not a retryable CAS miss. Publish
+                // the orphaned generation so fail-stop cannot leave a stale
+                // active lease visible while retiring physical outputs.
+                *self = candidate;
+                Err(OutputLeaseError::Expired)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Backend-only CAS relinquish for the exact managed `Lighting+Video`
+    /// lease. This is intentionally separate from the public request path:
+    /// its only intended caller is the keepalive adapter after a successful
+    /// canonical fail-stop, and it consumes that adapter's opaque permit.
+    ///
+    /// Unlike ordinary relinquish, expiry is observed before authority is
+    /// released.  An exact active lease that has reached its deadline is
+    /// published as orphaned and returns `Expired`; the adapter must not turn
+    /// an expired authority transition into an apparently clean relinquish.
+    /// All identity/scope CAS failures leave the registry unchanged.
+    pub(crate) fn relinquish_managed_exact_both(
+        &mut self,
+        permit: OutputLeaseKeepaliveRelinquishPermit,
+        now_ms: u64,
+    ) -> OutputLeaseKeepaliveRelinquishCasReceipt {
+        match permit.consume_for_registry() {
+            OutputLeaseKeepaliveRegistryRelinquishIngress::Rejected(receipt) => receipt,
+            OutputLeaseKeepaliveRegistryRelinquishIngress::Claimed(claim) => {
+                let failure_claim = claim.clone();
+                match self.relinquish_managed_exact_both_claim(claim, now_ms) {
+                    Ok(receipt) => OutputLeaseKeepaliveRelinquishCasReceipt::Released(receipt),
+                    Err(error) => {
+                        let detail = OutputLeaseKeepalivePortError::detail(format!("{error:?}"))
+                            .expect("static output-lease errors fit the keepalive error bound");
+                        OutputLeaseKeepaliveRelinquishCasReceipt::Rejected(
+                            OutputLeaseKeepaliveRelinquishFailureReceipt::from_registry_claim(
+                                failure_claim,
+                                detail,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fn relinquish_managed_exact_both_claim(
+        &mut self,
+        claim: OutputLeaseKeepaliveRegistryRelinquishClaim,
+        now_ms: u64,
+    ) -> Result<OutputLeaseKeepaliveExactRelinquishReceipt, OutputLeaseError> {
+        let (lease_id, owner, project_identity, expected_generation) =
+            Self::managed_exact_both_claim_components(
+                claim.registry_claim(),
+                claim.lease(),
+                claim.identity(),
+            )?;
+        let mut candidate = self.clone();
+        candidate.ensure_now(now_ms)?;
+        let exact_both = OutputLeaseResources::new(&[
+            OutputLeaseResource::Lighting,
+            OutputLeaseResource::Video,
+        ])?;
+        let expired_active = {
+            let record = candidate
+                .leases
+                .get(&lease_id)
+                .ok_or(OutputLeaseError::UnknownLease)?;
+            if record.project_identity != project_identity
+                || record.state.snapshot.resources.as_ref() != Some(&exact_both)
+            {
+                return Err(OutputLeaseError::ResourceConflict);
+            }
+            record.state.require_generation(expected_generation)?;
+            record.state.require_owner(&owner)?;
+            record.state.snapshot.phase == OutputLeasePhase::HeldActive
+                && now_ms >= record.state.snapshot.expires_at_monotonic_ms.unwrap_or(0)
+        };
+        if expired_active {
+            candidate.advance_now(now_ms)?;
+            let record = candidate.lookup_mut(lease_id)?;
+            record.state.orphan_without_owner_check()?;
+            record.last_touched_ms = now_ms;
+            *self = candidate;
+            return Err(OutputLeaseError::Expired);
+        }
+        candidate.advance_now(now_ms)?;
+        let (resources, snapshot) = {
+            let record = candidate.lookup_mut(lease_id)?;
+            let resources = record.state.snapshot().resources;
+            let snapshot = record
+                .state
+                .relinquish_output_lease(&owner, expected_generation)?;
+            record.last_touched_ms = now_ms;
+            (resources, snapshot)
+        };
+        if let Some(resources) = resources.as_ref() {
+            candidate.unindex_resources(lease_id, resources);
+        }
+        let released_index_cleared = resources.as_ref().is_none_or(|resources| {
+            resources.as_slice().iter().all(|resource| {
+                candidate
+                    .resource_index
+                    .get(resource)
+                    .is_none_or(|indexed_lease_ids| !indexed_lease_ids.contains(&lease_id))
+            })
+        });
+        let receipt = OutputLeaseKeepaliveExactRelinquishReceipt::issue_after_verified_exact_managed_registry_relinquish(
+            claim,
+            snapshot.generation,
+            snapshot.phase == OutputLeasePhase::Unclaimed,
+            snapshot.owner.is_none(),
+            snapshot.resources.is_none(),
+            snapshot.expires_at_monotonic_ms.is_none(),
+            released_index_cleared,
+        )
+        .map_err(|_| OutputLeaseError::InvalidTransition)?;
+        *self = candidate;
+        Ok(receipt)
+    }
+
+    /// Backend-only non-mutating proof for a completed old managed run A and
+    /// a separately current durable Enable B. The manager may consume a
+    /// successful proof to retire A and arm B, but this registry path never
+    /// releases, renews, transfers, or otherwise changes B's authority.
+    ///
+    /// The opaque capability is issued only after A completed the canonical
+    /// zero-failure fail-stop. Its parent-only claim binds both A and B to
+    /// exact owner/project/lease/generation/durable-receipt identities. A
+    /// stale A must not CAS-mutate a newer B merely because the same physical
+    /// resources are involved.
+    pub(crate) fn prove_managed_exact_both_supersession(
+        &mut self,
+        capability: OutputLeaseKeepaliveSupersessionCapability,
+        now_ms: u64,
+    ) -> OutputLeaseKeepaliveSupersessionCasReceipt {
+        match capability.consume_for_registry() {
+            OutputLeaseKeepaliveRegistrySupersessionIngress::Rejected(receipt) => receipt,
+            OutputLeaseKeepaliveRegistrySupersessionIngress::Claimed(claim) => {
+                let failure_claim = claim.clone();
+                match self.prove_managed_exact_both_supersession_claim(&claim, now_ms) {
+                    Ok(()) => OutputLeaseKeepaliveSupersessionCasReceipt::Proven(
+                        OutputLeaseKeepaliveSupersessionSuccessReceipt::from_registry_verified_current_success(
+                            claim,
+                        ),
+                    ),
+                    Err(error) => {
+                        let detail = OutputLeaseKeepalivePortError::detail(format!("{error:?}"))
+                            .expect("static output-lease errors fit the keepalive error bound");
+                        OutputLeaseKeepaliveSupersessionCasReceipt::Rejected(
+                            OutputLeaseKeepaliveSupersessionFailureReceipt::from_registry_claim(
+                                failure_claim,
+                                detail,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fn prove_managed_exact_both_supersession_claim(
+        &mut self,
+        claim: &OutputLeaseKeepaliveRegistrySupersessionClaim,
+        now_ms: u64,
+    ) -> Result<(), OutputLeaseError> {
+        let (old_lease_id, old_owner, old_project_identity, old_generation) =
+            Self::managed_exact_both_claim_components(
+                claim.old_registry_claim(),
+                claim.old_lease(),
+                claim.old_identity(),
+            )?;
+        let (new_lease_id, new_owner, new_project_identity, new_generation) =
+            Self::managed_exact_both_claim_components(
+                claim.new_registry_claim(),
+                claim.new_lease(),
+                claim.new_identity(),
+            )?;
+        let exact_both = OutputLeaseResources::new(&[
+            OutputLeaseResource::Lighting,
+            OutputLeaseResource::Video,
+        ])?;
+        let mut candidate = self.clone();
+        candidate.ensure_now(now_ms)?;
+
+        // B must still be backed by its retained canonical durable Enable
+        // receipt. This repeats the evidence issuance checks at the moment of
+        // A's retirement, so a stale/replayed receipt cannot be promoted by a
+        // manager-only comparison.
+        let durable_key = OutputLeaseRequestKey::new(
+            claim
+                .new_registry_claim()
+                .durable_receipt_principal()
+                .to_owned(),
+            claim
+                .new_registry_claim()
+                .durable_receipt_domain()
+                .to_owned(),
+            claim.new_registry_claim().durable_receipt_request_id(),
+        )?;
+        let terminal = candidate
+            .receipts
+            .get(&durable_key)
+            .ok_or(OutputLeaseError::ReceiptNotRetained)?;
+        let durable_receipt = &terminal.receipt;
+        if terminal.expires_at_ms <= now_ms
+            || durable_receipt.key != durable_key
+            || durable_receipt.lease_id != Some(new_lease_id)
+            || durable_receipt.owner.as_ref() != Some(&new_owner)
+            || durable_receipt.process_session_incarnation != candidate.process_session_incarnation
+            || durable_receipt.resources.as_ref() != Some(&exact_both)
+            || durable_receipt.generation_after != Some(new_generation)
+            || durable_receipt.audit_sequence
+                != claim.new_registry_claim().durable_receipt_issuance()
+            || !matches!(
+                durable_receipt.outcome,
+                Ok(OutputLeaseOperationOutcome::Acquired | OutputLeaseOperationOutcome::Recovered)
+            )
+            || !candidate.audit.iter().any(|audit| {
+                audit.sequence == durable_receipt.audit_sequence
+                    && audit.receipt == *durable_receipt
+            })
+        {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+
+        let new_is_expired = {
+            let record = candidate
+                .leases
+                .get(&new_lease_id)
+                .ok_or(OutputLeaseError::UnknownLease)?;
+            if new_owner.process_session_incarnation != candidate.process_session_incarnation
+                || record.project_identity != new_project_identity
+                || record.state.snapshot.resources.as_ref() != Some(&exact_both)
+            {
+                return Err(OutputLeaseError::ResourceConflict);
+            }
+            if record.state.snapshot.phase != OutputLeasePhase::HeldActive
+                || record.state.snapshot.owner.as_ref() != Some(&new_owner)
+                || record.state.snapshot.generation != new_generation
+            {
+                return Err(OutputLeaseError::InvalidTransition);
+            }
+            now_ms >= record.state.snapshot.expires_at_monotonic_ms.unwrap_or(0)
+        };
+        if new_is_expired {
+            // Expiry is the sole proof failure that changes registry truth.
+            // Publish B's orphaned successor atomically, then keep A Faulted;
+            // a caller must obtain a fresh durable Enable before trying again.
+            candidate.advance_now(now_ms)?;
+            let record = candidate.lookup_mut(new_lease_id)?;
+            record.state.orphan_without_owner_check()?;
+            record.last_touched_ms = now_ms;
+            *self = candidate;
+            return Err(OutputLeaseError::Expired);
+        }
+
+        // A must no longer be the exact active authority. We deliberately do
+        // not require a record for A (it may have been released or recovered
+        // into B), but an exact still-active A blocks the proof even if it is
+        // near expiry. The manager cannot discard physical retirement duties
+        // until registry truth says the old authority has changed.
+        let old_is_current_exact_active =
+            candidate.leases.get(&old_lease_id).is_some_and(|record| {
+                record.project_identity == old_project_identity
+                    && record.state.snapshot.phase == OutputLeasePhase::HeldActive
+                    && record.state.snapshot.owner.as_ref() == Some(&old_owner)
+                    && record.state.snapshot.resources.as_ref() == Some(&exact_both)
+                    && record.state.snapshot.generation == old_generation
+            });
+        if old_is_current_exact_active {
+            return Err(OutputLeaseError::InvalidTransition);
+        }
+
+        // The proof has no public request/audit/index side effects. Advancing
+        // the monotonic observation is the only candidate mutation on success.
+        candidate.advance_now(now_ms)?;
+        *self = candidate;
+        Ok(())
+    }
+
+    fn managed_exact_both_claim_components(
+        registry_claim: &OutputLeaseKeepaliveRegistryClaim,
+        lease: &OutputLeaseKeepaliveExactBothLease,
+        identity: &OutputLeaseKeepaliveIdentity,
+    ) -> Result<(OutputLeaseId, OutputLeaseOwner, String, u64), OutputLeaseError> {
+        if lease.lease_id() != registry_claim.lease_id()
+            || lease.generation() != registry_claim.generation()
+            || identity.project_identity() != registry_claim.project_identity()
+            || identity.owner_identity() != registry_claim.owner().principal()
+            || identity.window_label() != registry_claim.owner().window_label()
+            || identity.session_identity()
+                != format!(
+                    "process:{};owner:{}",
+                    registry_claim.owner().process_session_incarnation(),
+                    registry_claim.owner().owner_incarnation()
+                )
+            || identity.request_correlation()
+                != format!(
+                    "principal:{};domain:{};request:{}",
+                    registry_claim.durable_receipt_principal(),
+                    registry_claim.durable_receipt_domain(),
+                    registry_claim.durable_receipt_request_id()
+                )
+            || registry_claim.durable_receipt_issuance() == 0
+            || registry_claim.durable_receipt_request_id() == 0
+            || registry_claim.durable_receipt_principal() != registry_claim.owner().principal()
+        {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        let lease_id = OutputLeaseId::decode(registry_claim.lease_id())?;
+        let owner = OutputLeaseOwner::new(
+            registry_claim.owner().principal().to_owned(),
+            registry_claim.owner().window_label().to_owned(),
+            registry_claim.owner().process_session_incarnation(),
+            registry_claim.owner().owner_incarnation(),
+        )?;
+        if !bounded_nonempty(
+            registry_claim.durable_receipt_domain(),
+            MAX_OUTPUT_LEASE_REQUEST_DOMAIN_BYTES,
+        ) {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        Ok((
+            lease_id,
+            owner,
+            registry_claim.project_identity().to_owned(),
+            registry_claim.generation(),
+        ))
+    }
+
+    #[cfg(test)]
+    fn observe_expiry(
+        &mut self,
+        lease_id: OutputLeaseId,
+        now_ms: u64,
+    ) -> Result<bool, OutputLeaseError> {
+        let mut candidate = self.clone();
+        candidate.advance_now(now_ms)?;
+        let record = candidate.lookup_mut(lease_id)?;
+        let changed = record.state.observe_expiry(now_ms)?;
+        if changed {
+            record.last_touched_ms = now_ms;
+        }
+        *self = candidate;
+        Ok(changed)
+    }
+
+    fn recover(
+        &mut self,
+        lease_id: OutputLeaseId,
+        owner: &OutputLeaseOwner,
+        expected_generation: u64,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<OutputLeaseSnapshot, OutputLeaseError> {
+        let mut candidate = self.clone();
+        candidate.advance_now(now_ms)?;
+        checked_deadline(now_ms, ttl_ms)?;
+        let record = candidate.lookup_mut(lease_id)?;
+        let snapshot = record
+            .state
+            .recover(owner, expected_generation, now_ms, ttl_ms)?;
+        record.last_touched_ms = now_ms;
+        *self = candidate;
+        Ok(snapshot)
+    }
+
+    /// Both authority changes remain private if validation or the new Acquire
+    /// fails. The enclosing submit_request_with_commit keeps this candidate
+    /// private again until its complete two-lease receipt is durably recorded.
+    fn replace_previous_project_for_authoring(
+        &mut self,
+        lease_id: OutputLeaseId,
+        owner: &OutputLeaseOwner,
+        expected_generation: u64,
+        project_identity: &str,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<(OutputLeaseGrant, OutputLeaseChange), OutputLeaseError> {
+        let mut candidate = self.clone();
+        candidate.advance_now(now_ms)?;
+        checked_deadline(now_ms, ttl_ms)?;
+        if owner.process_session_incarnation != candidate.process_session_incarnation {
+            return Err(OutputLeaseError::StaleOwner);
+        }
+        if !bounded_nonempty(project_identity, MAX_OUTPUT_LEASE_PROJECT_BYTES) {
+            return Err(OutputLeaseError::InvalidProject);
+        }
+        let record = candidate
+            .leases
+            .get(&lease_id)
+            .ok_or(OutputLeaseError::UnknownLease)?;
+        record.state.require_current_process(owner)?;
+        record.state.require_owner(owner)?;
+        record.state.require_generation(expected_generation)?;
+        if record.project_identity == project_identity {
+            return Err(OutputLeaseError::InvalidProject);
+        }
+        let before = record.state.snapshot();
+        if !matches!(
+            before.phase,
+            OutputLeasePhase::HeldActive | OutputLeasePhase::HeldOrphaned
+        ) {
+            return Err(OutputLeaseError::InvalidTransition);
+        }
+        let resources = before
+            .resources
+            .clone()
+            .ok_or(OutputLeaseError::ResourceConflict)?;
+        if !matches!(
+            resources.as_slice(),
+            [OutputLeaseResource::Video]
+                | [OutputLeaseResource::Lighting, OutputLeaseResource::Video]
+        ) {
+            return Err(OutputLeaseError::ResourceConflict);
+        }
+        if candidate
+            .query_video_authoring_lease(owner, now_ms)?
+            .map(|view| view.lease_id)
+            != Some(lease_id)
+        {
+            return Err(OutputLeaseError::ResourceConflict);
+        }
+        let after = candidate.relinquish_output_lease(
+            lease_id,
+            owner,
+            expected_generation,
+            now_ms,
+        )?;
+        let grant = candidate.acquire_inner(
+            owner.clone(),
+            resources,
+            project_identity.to_string(),
+            now_ms,
+            ttl_ms,
+        )?;
+        *self = candidate;
+        Ok((
+            grant,
+            OutputLeaseChange {
+                lease_id,
+                before: Some(before),
+                after: Some(after),
+            },
+        ))
+    }
+
+    fn relinquish_output_lease(
+        &mut self,
+        lease_id: OutputLeaseId,
+        owner: &OutputLeaseOwner,
+        expected_generation: u64,
+        now_ms: u64,
+    ) -> Result<OutputLeaseSnapshot, OutputLeaseError> {
+        let mut candidate = self.clone();
+        candidate.advance_now(now_ms)?;
+        let resources = candidate
+            .leases
+            .get(&lease_id)
+            .ok_or(OutputLeaseError::UnknownLease)?
+            .state
+            .snapshot()
+            .resources;
+        let record = candidate.lookup_mut(lease_id)?;
+        let snapshot = record
+            .state
+            .relinquish_output_lease(owner, expected_generation)?;
+        record.last_touched_ms = now_ms;
+        if let Some(resources) = resources.as_ref() {
+            candidate.unindex_resources(lease_id, resources);
+        }
+        *self = candidate;
+        Ok(snapshot)
+    }
+
+    fn force_transfer(
+        &mut self,
+        lease_id: OutputLeaseId,
+        expected_generation: u64,
+        new_owner: OutputLeaseOwner,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<OutputLeaseSnapshot, OutputLeaseError> {
+        let mut candidate = self.clone();
+        candidate.advance_now(now_ms)?;
+        checked_deadline(now_ms, ttl_ms)?;
+        let record = candidate.lookup_mut(lease_id)?;
+        let result = record
+            .state
+            .force_transfer(expected_generation, new_owner, now_ms, ttl_ms);
+        if result.is_ok() || matches!(result, Err(OutputLeaseError::Expired)) {
+            record.last_touched_ms = now_ms;
+        }
+        match result {
+            Ok(snapshot) => {
+                *self = candidate;
+                Ok(snapshot)
+            }
+            Err(OutputLeaseError::Expired) => {
+                *self = candidate;
+                Err(OutputLeaseError::Expired)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn authorize_ordinary(
+        &mut self,
+        lease_id: OutputLeaseId,
+        owner: &OutputLeaseOwner,
+        expected_generation: u64,
+        exact_resources: &OutputLeaseResources,
+        now_ms: u64,
+    ) -> Result<OutputLeaseSnapshot, OutputLeaseError> {
+        let mut candidate = self.clone();
+        candidate.advance_now(now_ms)?;
+        let exact_resources = OutputLeaseResources::new(exact_resources.as_slice())?;
+        let record = candidate.lookup_mut(lease_id)?;
+        record.state.require_current_process(owner)?;
+        record.state.require_generation(expected_generation)?;
+        if record.state.snapshot.phase != OutputLeasePhase::HeldActive {
+            return Err(OutputLeaseError::InvalidTransition);
+        }
+        if record.state.snapshot.resources.as_ref() != Some(&exact_resources) {
+            return Err(OutputLeaseError::ResourceConflict);
+        }
+        record.state.require_owner(owner)?;
+        if now_ms >= record.state.snapshot.expires_at_monotonic_ms.unwrap_or(0) {
+            record.state.orphan_without_owner_check()?;
+            record.last_touched_ms = now_ms;
+            *self = candidate;
+            return Err(OutputLeaseError::Expired);
+        }
+        Ok(record.state.snapshot())
+    }
+
+    /// Authorize a route from the one managed exact-Both lease without
+    /// accepting a caller-supplied generation.  The caller is required to
+    /// hold the keepalive runtime's serial gate until it has acquired this
+    /// registry lock; that is what makes a concurrent renewal impossible.
+    /// This does not broaden ordinary authorization: owner, project, exact
+    /// Both resources, active phase, current process, and expiry are all
+    /// revalidated here on the live candidate.
+    fn authorize_managed_exact_both(
+        &mut self,
+        lease_id: OutputLeaseId,
+        owner: &OutputLeaseOwner,
+        exact_resources: &OutputLeaseResources,
+        project_identity: &str,
+        now_ms: u64,
+    ) -> Result<OutputLeaseSnapshot, OutputLeaseError> {
+        let mut candidate = self.clone();
+        candidate.advance_now(now_ms)?;
+        if !bounded_nonempty(project_identity, MAX_OUTPUT_LEASE_PROJECT_BYTES) {
+            return Err(OutputLeaseError::InvalidProject);
+        }
+        let exact_resources = OutputLeaseResources::new(exact_resources.as_slice())?;
+        let both = OutputLeaseResources::new(&[
+            OutputLeaseResource::Lighting,
+            OutputLeaseResource::Video,
+        ])?;
+        if exact_resources != both {
+            return Err(OutputLeaseError::ResourceConflict);
+        }
+        let record = candidate.lookup_mut(lease_id)?;
+        record.state.require_current_process(owner)?;
+        if record.state.snapshot.phase != OutputLeasePhase::HeldActive {
+            return Err(OutputLeaseError::InvalidTransition);
+        }
+        if record.project_identity != project_identity
+            || record.state.snapshot.resources.as_ref() != Some(&exact_resources)
+        {
+            return Err(OutputLeaseError::ResourceConflict);
+        }
+        record.state.require_owner(owner)?;
+        if now_ms >= record.state.snapshot.expires_at_monotonic_ms.unwrap_or(0) {
+            record.state.orphan_without_owner_check()?;
+            record.last_touched_ms = now_ms;
+            *self = candidate;
+            return Err(OutputLeaseError::Expired);
+        }
+        Ok(record.state.snapshot())
+    }
+
+    /// Authorize Display operations against an exact Video-capable
+    /// authority.  Unlike public `authorize_ordinary`, this action resolves a
+    /// deadline race on a private candidate: an exact same-owner/project
+    /// active lease at its deadline is orphaned and immediately recovered.
+    /// No other lease, owner, project, resource scope, or generation may be
+    /// adopted.
+    fn authorize_or_recover_display(
+        &mut self,
+        lease_id: OutputLeaseId,
+        owner: &OutputLeaseOwner,
+        expected_generation: u64,
+        exact_resources: &OutputLeaseResources,
+        context: DisplayAuthorizationContext<'_>,
+    ) -> Result<OutputLeaseSnapshot, OutputLeaseError> {
+        let DisplayAuthorizationContext {
+            project_identity,
+            now_ms,
+            ttl_ms,
+        } = context;
+        let mut candidate = self.clone();
+        candidate.advance_now(now_ms)?;
+        checked_deadline(now_ms, ttl_ms)?;
+        if owner.process_session_incarnation != candidate.process_session_incarnation {
+            return Err(OutputLeaseError::StaleOwner);
+        }
+        if !bounded_nonempty(project_identity, MAX_OUTPUT_LEASE_PROJECT_BYTES) {
+            return Err(OutputLeaseError::InvalidProject);
+        }
+        let exact_resources = OutputLeaseResources::new(exact_resources.as_slice())?;
+        let both = OutputLeaseResources::new(&[
+            OutputLeaseResource::Lighting,
+            OutputLeaseResource::Video,
+        ])?;
+        if !exact_resources.as_slice().contains(&OutputLeaseResource::Video) {
+            return Err(OutputLeaseError::ResourceConflict);
+        }
+
+        let overlapping = candidate
+            .leases
+            .iter()
+            .filter_map(|(&candidate_id, record)| {
+                record
+                    .state
+                    .snapshot
+                    .resources
+                    .as_ref()
+                    .filter(|resources| resources.overlaps(&both))
+                    .map(|_| candidate_id)
+            })
+            .collect::<Vec<_>>();
+        if overlapping.len() != 1 || overlapping[0] != lease_id {
+            return Err(OutputLeaseError::ResourceConflict);
+        }
+
+        let record = candidate.lookup_mut(lease_id)?;
+        if record.project_identity != project_identity
+            || record.state.snapshot.resources.as_ref() != Some(&exact_resources)
+        {
+            return Err(OutputLeaseError::ResourceConflict);
+        }
+        record.state.require_current_process(owner)?;
+        record.state.require_generation(expected_generation)?;
+        record.state.require_owner(owner)?;
+
+        match record.state.snapshot.phase {
+            OutputLeasePhase::HeldActive => {
+                if now_ms < record.state.snapshot.expires_at_monotonic_ms.unwrap_or(0) {
+                    let snapshot = record.state.snapshot();
+                    *self = candidate;
+                    return Ok(snapshot);
+                }
+                record.state.orphan_without_owner_check()?;
+                record.last_touched_ms = now_ms;
+                let generation = record.state.snapshot.generation;
+                let snapshot = record.state.recover(owner, generation, now_ms, ttl_ms)?;
+                record.last_touched_ms = now_ms;
+                *self = candidate;
+                Ok(snapshot)
+            }
+            OutputLeasePhase::HeldOrphaned => {
+                let snapshot = record
+                    .state
+                    .recover(owner, expected_generation, now_ms, ttl_ms)?;
+                record.last_touched_ms = now_ms;
+                *self = candidate;
+                Ok(snapshot)
+            }
+            OutputLeasePhase::Unclaimed => Err(OutputLeaseError::InvalidTransition),
+        }
+    }
+
+    fn resources_overlap(&self, resources: &OutputLeaseResources) -> bool {
+        resources.as_slice().iter().any(|resource| {
+            self.resource_index
+                .get(resource)
+                .is_some_and(|ids| !ids.is_empty())
+        })
+    }
+
+    fn index_resources(&mut self, lease_id: OutputLeaseId, resources: &OutputLeaseResources) {
+        for resource in resources.as_slice() {
+            self.resource_index
+                .entry(*resource)
+                .or_default()
+                .insert(lease_id);
+        }
+    }
+
+    fn unindex_resources(&mut self, lease_id: OutputLeaseId, resources: &OutputLeaseResources) {
+        for resource in resources.as_slice() {
+            if let Some(ids) = self.resource_index.get_mut(resource) {
+                ids.remove(&lease_id);
+                if ids.is_empty() {
+                    self.resource_index.remove(resource);
+                }
+            }
+        }
+    }
+
+    fn retire_owner(
+        &mut self,
+        owner: &OutputLeaseOwner,
+        now_ms: u64,
+    ) -> Result<Vec<OutputLeaseId>, OutputLeaseError> {
+        let mut candidate = self.clone();
+        candidate.advance_now(now_ms)?;
+        if owner.process_session_incarnation != candidate.process_session_incarnation {
+            return Err(OutputLeaseError::StaleOwner);
+        }
+        let ids = candidate
+            .leases
+            .iter()
+            .filter_map(|(&lease_id, record)| {
+                (record.state.snapshot.owner.as_ref() == Some(owner)
+                    && record.state.snapshot.phase == OutputLeasePhase::HeldActive)
+                    .then_some(lease_id)
+            })
+            .collect::<Vec<_>>();
+        for lease_id in &ids {
+            let record = candidate.lookup_mut(*lease_id)?;
+            let generation = record.state.snapshot.generation;
+            record.state.orphan(generation)?;
+            record.last_touched_ms = now_ms;
+        }
+        *self = candidate;
+        Ok(ids)
+    }
+
+    /// Orphan only selected leases belonging to `project_identity` and, when
+    /// supplied, overlapping the selected resource scope. Empty selection
+    /// means all leases in that project; no physical operation is possible.
+    fn project_orphan(
+        &mut self,
+        project_identity: &str,
+        selected_lease_ids: &[OutputLeaseId],
+        resource_scope: Option<&OutputLeaseResources>,
+        now_ms: u64,
+    ) -> Result<Vec<OutputLeaseId>, OutputLeaseError> {
+        let mut candidate = self.clone();
+        candidate.advance_now(now_ms)?;
+        if !bounded_nonempty(project_identity, MAX_OUTPUT_LEASE_PROJECT_BYTES) {
+            return Err(OutputLeaseError::InvalidProject);
+        }
+        let mut selected = selected_lease_ids.to_vec();
+        selected.sort_unstable();
+        if selected.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        if let Some(scope) = resource_scope {
+            OutputLeaseResources::new(scope.as_slice())?;
+        }
+        let is_selected = |lease_id: OutputLeaseId| {
+            selected.is_empty() || selected.binary_search(&lease_id).is_ok()
+        };
+        let ids = candidate
+            .leases
+            .iter()
+            .filter_map(|(&lease_id, record)| {
+                if record.project_identity != project_identity
+                    || !is_selected(lease_id)
+                    || record.state.snapshot.phase != OutputLeasePhase::HeldActive
+                {
+                    return None;
+                }
+                if let Some(scope) = resource_scope {
+                    if !record
+                        .state
+                        .snapshot
+                        .resources
+                        .as_ref()
+                        .is_some_and(|resources| resources.overlaps(scope))
+                    {
+                        return None;
+                    }
+                }
+                Some(lease_id)
+            })
+            .collect::<Vec<_>>();
+        for lease_id in &ids {
+            let record = candidate.lookup_mut(*lease_id)?;
+            let generation = record.state.snapshot.generation;
+            record.state.orphan(generation)?;
+            record.last_touched_ms = now_ms;
+        }
+        *self = candidate;
+        Ok(ids)
+    }
+
+    fn purge_unclaimed_for_capacity(&mut self, now_ms: u64) {
+        let stale = self
+            .leases
+            .iter()
+            .filter_map(|(&lease_id, record)| {
+                (record.state.snapshot.phase == OutputLeasePhase::Unclaimed
+                    && unclaimed_retention_elapsed(record.last_touched_ms, now_ms))
+                .then_some(lease_id)
+            })
+            .collect::<Vec<_>>();
+        for lease_id in stale {
+            self.leases.remove(&lease_id);
+        }
+    }
+
+    #[cfg(test)]
+    fn purge(&mut self, now_ms: u64) -> Result<OutputLeasePurgeSummary, OutputLeaseError> {
+        let mut candidate = self.clone();
+        candidate.advance_now(now_ms)?;
+        let mut summary = OutputLeasePurgeSummary {
+            expired_leases_orphaned: 0,
+            unclaimed_leases_purged: 0,
+            receipts_purged: 0,
+        };
+        let active_ids = candidate
+            .leases
+            .iter()
+            .filter_map(|(&lease_id, record)| {
+                (record.state.snapshot.phase == OutputLeasePhase::HeldActive).then_some(lease_id)
+            })
+            .collect::<Vec<_>>();
+        for lease_id in active_ids {
+            let record = candidate.lookup_mut(lease_id)?;
+            if record.state.observe_expiry(now_ms)? {
+                record.last_touched_ms = now_ms;
+                summary.expired_leases_orphaned += 1;
+            }
+        }
+        let stale_leases = candidate
+            .leases
+            .iter()
+            .filter_map(|(&lease_id, record)| {
+                (record.state.snapshot.phase == OutputLeasePhase::Unclaimed
+                    && unclaimed_retention_elapsed(record.last_touched_ms, now_ms))
+                .then_some(lease_id)
+            })
+            .collect::<Vec<_>>();
+        for lease_id in stale_leases {
+            candidate.leases.remove(&lease_id);
+            summary.unclaimed_leases_purged += 1;
+        }
+        candidate.purge_inactive_token_buckets(now_ms);
+        summary.receipts_purged = candidate.purge_receipts(now_ms)?;
+        *self = candidate;
+        Ok(summary)
+    }
+
+    fn purge_receipts(&mut self, now_ms: u64) -> Result<usize, OutputLeaseError> {
+        checked_deadline(now_ms, OUTPUT_LEASE_RECEIPT_TTL_MS)?;
+        let mut purged = 0;
+        let expired = self
+            .receipts
+            .iter()
+            .filter_map(|(key, record)| (record.expires_at_ms <= now_ms).then_some(key.clone()))
+            .collect::<Vec<_>>();
+        for key in expired {
+            self.receipts.remove(&key);
+            purged += 1;
+        }
+        Ok(purged)
+    }
+
+    fn make_room_for_receipt(&mut self, now_ms: u64) -> Result<(), OutputLeaseError> {
+        self.purge_receipts(now_ms)?;
+        while self.receipts.len() + self.reserved_receipts >= MAX_OUTPUT_LEASE_REQUESTS {
+            let oldest = self
+                .receipts
+                .iter()
+                .min_by_key(|(_, record)| record.last_used_ms)
+                .map(|(key, _)| key.clone());
+            let Some(oldest) = oldest else {
+                return Err(OutputLeaseError::RequestCapacity);
+            };
+            self.receipts.remove(&oldest);
+        }
+        Ok(())
+    }
+
+    fn purge_inactive_token_buckets(&mut self, now_ms: u64) {
+        let stale = self
+            .token_buckets
+            .iter()
+            .filter_map(|(key, bucket)| {
+                let lane_in_use = self.operation_lanes.contains(key)
+                    || self
+                        .in_flight
+                        .values()
+                        .any(|in_flight| in_flight.operation_key == *key);
+                (!lane_in_use && bucket_idle_elapsed(bucket.observed_at_ms, now_ms))
+                    .then_some(key.clone())
+            })
+            .collect::<Vec<_>>();
+        for key in stale {
+            self.token_buckets.remove(&key);
+        }
+    }
+
+    #[cfg(test)]
+    fn begin_request(
+        &mut self,
+        request: &OutputLeaseRequest,
+        now_ms: u64,
+    ) -> Result<OutputLeaseRequestAdmission, OutputLeaseError> {
+        let expected_hash = request.shape.canonical_hash()?;
+        if expected_hash != request.shape_hash {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        let mut candidate = self.clone();
+        let admission = candidate.begin_request_inner(request, now_ms)?;
+        if matches!(admission, OutputLeaseRequestAdmission::InFlight(_)) {
+            *self = candidate;
+        }
+        Ok(admission)
+    }
+
+    fn begin_request_inner(
+        &mut self,
+        request: &OutputLeaseRequest,
+        now_ms: u64,
+    ) -> Result<OutputLeaseRequestAdmission, OutputLeaseError> {
+        if request.shape.canonical_hash()? != request.shape_hash {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        self.advance_now(now_ms)?;
+        self.purge_receipts(now_ms)?;
+        if let Some(record) = self.receipts.get_mut(&request.key) {
+            record.last_used_ms = now_ms.max(record.last_used_ms);
+            if record.shape_hash == request.shape_hash {
+                return Ok(OutputLeaseRequestAdmission::Terminal(
+                    record.receipt.clone(),
+                ));
+            }
+            return Err(OutputLeaseError::Conflict);
+        }
+        if let Some(in_flight) = self.in_flight.get(&request.key) {
+            // An in-flight different-shape request is a conflict, not Busy;
+            // this ordering prevents a caller from probing a live request.
+            if in_flight.shape_hash != request.shape_hash {
+                return Err(OutputLeaseError::Conflict);
+            }
+            return Err(OutputLeaseError::Busy);
+        }
+        let origin = OutputLeaseRequestOrigin::from(&request.key);
+        if self
+            .origins
+            .get(&origin)
+            .is_some_and(|state| request.key.request_id <= state.high_water_request_id)
+        {
+            return Err(OutputLeaseError::ReceiptNotRetained);
+        }
+        if !self.origins.contains_key(&origin)
+            && self.origins.len() >= MAX_OUTPUT_LEASE_REQUEST_ORIGINS
+        {
+            return Err(OutputLeaseError::RequestCapacity);
+        }
+        let operation_key = OutputLeaseRateKey {
+            principal: request.key.principal.clone(),
+            operation: request.shape.operation.clone(),
+        };
+        if self.operation_lanes.contains(&operation_key) {
+            return Err(OutputLeaseError::Busy);
+        }
+        if self.in_flight.len() >= MAX_OUTPUT_LEASE_LANES {
+            return Err(OutputLeaseError::LaneCapacity);
+        }
+        self.make_room_for_receipt(now_ms)?;
+        if !self.token_buckets.contains_key(&operation_key) {
+            self.purge_inactive_token_buckets(now_ms);
+            if self.token_buckets.len() >= MAX_OUTPUT_LEASE_TOKEN_BUCKETS {
+                return Err(OutputLeaseError::RequestCapacity);
+            }
+        }
+        let bucket = self
+            .token_buckets
+            .entry(operation_key.clone())
+            .or_insert_with(|| OutputLeaseTokenBucket::fresh(now_ms));
+        if !bucket.try_take(now_ms)? {
+            return Err(OutputLeaseError::RateLimited);
+        }
+        let origin_state = self
+            .origins
+            .entry(origin)
+            .or_insert(OutputLeaseOriginState {
+                high_water_request_id: 0,
+                last_used_ms: now_ms,
+            });
+        origin_state.high_water_request_id = request.key.request_id;
+        origin_state.last_used_ms = now_ms;
+        self.in_flight.insert(
+            request.key.clone(),
+            OutputLeaseInFlight {
+                shape_hash: request.shape_hash.clone(),
+                operation_key: operation_key.clone(),
+            },
+        );
+        self.operation_lanes.insert(operation_key);
+        self.reserved_receipts += 1;
+        self.reserved_audit += 1;
+        Ok(OutputLeaseRequestAdmission::InFlight(
+            OutputLeaseRequestPermit {
+                key: request.key.clone(),
+                shape_hash: request.shape_hash.clone(),
+                process_session_incarnation: self.process_session_incarnation,
+            },
+        ))
+    }
+
+    #[cfg(test)]
+    fn complete_request(
+        &mut self,
+        permit: OutputLeaseRequestPermit,
+        receipt: OutputLeaseRequestReceipt,
+        now_ms: u64,
+    ) -> Result<OutputLeaseRequestReceipt, OutputLeaseError> {
+        let mut candidate = self.clone();
+        let result = candidate.complete_request_inner(permit, receipt, now_ms);
+        match result {
+            Ok(receipt) => {
+                *self = candidate;
+                Ok(receipt)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn complete_request_inner(
+        &mut self,
+        permit: OutputLeaseRequestPermit,
+        mut receipt: OutputLeaseRequestReceipt,
+        now_ms: u64,
+    ) -> Result<OutputLeaseRequestReceipt, OutputLeaseError> {
+        self.advance_now(now_ms)?;
+        if permit.process_session_incarnation != self.process_session_incarnation
+            || receipt.key != permit.key
+            || receipt.shape_hash != permit.shape_hash
+        {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        let in_flight = self
+            .in_flight
+            .get(&permit.key)
+            .ok_or(OutputLeaseError::RequestNotInFlight)?;
+        if in_flight.shape_hash != permit.shape_hash {
+            return Err(OutputLeaseError::RequestNotInFlight);
+        }
+        let terminal_deadline = checked_deadline(now_ms, OUTPUT_LEASE_RECEIPT_TTL_MS)?;
+        let sequence = self
+            .next_audit_sequence
+            .checked_add(1)
+            .ok_or(OutputLeaseError::AuditCapacity)?;
+        if sequence == 0 || sequence > u64::MAX - 1 {
+            return Err(OutputLeaseError::AuditCapacity);
+        }
+        let operation_key = in_flight.operation_key.clone();
+        self.in_flight.remove(&permit.key);
+        self.operation_lanes.remove(&operation_key);
+        self.reserved_receipts = self.reserved_receipts.saturating_sub(1);
+        self.reserved_audit = self.reserved_audit.saturating_sub(1);
+        if self.receipts.len() >= MAX_OUTPUT_LEASE_REQUESTS {
+            return Err(OutputLeaseError::RequestCapacity);
+        }
+        receipt.audit_sequence = sequence;
+        self.receipts.insert(
+            permit.key.clone(),
+            OutputLeaseTerminalRecord {
+                shape_hash: permit.shape_hash,
+                receipt: receipt.clone(),
+                expires_at_ms: terminal_deadline,
+                last_used_ms: now_ms,
+            },
+        );
+        self.next_audit_sequence = sequence;
+        if self.audit.len() >= MAX_OUTPUT_LEASE_AUDIT_RECORDS {
+            self.audit.pop_front();
+        }
+        self.audit.push_back(OutputLeaseAuditRecord {
+            sequence,
+            receipt: receipt.clone(),
+        });
+        Ok(receipt)
+    }
+
+    #[cfg(test)]
+    fn cancel_request(
+        &mut self,
+        permit: OutputLeaseRequestPermit,
+        now_ms: u64,
+    ) -> Result<(), OutputLeaseError> {
+        let mut candidate = self.clone();
+        candidate.advance_now(now_ms)?;
+        let in_flight = candidate
+            .in_flight
+            .get(&permit.key)
+            .ok_or(OutputLeaseError::RequestNotInFlight)?;
+        if in_flight.shape_hash != permit.shape_hash {
+            return Err(OutputLeaseError::RequestNotInFlight);
+        }
+        let operation_key = in_flight.operation_key.clone();
+        candidate.in_flight.remove(&permit.key);
+        candidate.operation_lanes.remove(&operation_key);
+        candidate.reserved_receipts = candidate.reserved_receipts.saturating_sub(1);
+        candidate.reserved_audit = candidate.reserved_audit.saturating_sub(1);
+        *self = candidate;
+        Ok(())
+    }
+
+    pub(crate) fn submit_request(
+        &mut self,
+        request: &OutputLeaseRequest,
+        now_ms: u64,
+    ) -> Result<OutputLeaseRequestReceipt, OutputLeaseError> {
+        self.submit_request_with_commit(request, now_ms, |_| Ok(()))
+    }
+
+    /// Submit one authority request while giving the caller a durable commit
+    /// seam.  The candidate registry reaches its terminal receipt before the
+    /// callback runs, but the live registry is not replaced until the callback
+    /// has durably recorded that receipt.  A failed journal write therefore
+    /// leaves both authority and receipt state uncommitted; a crash after this
+    /// seam cannot expose a committed request without its terminal evidence.
+    pub(crate) fn submit_request_with_commit<Commit>(
+        &mut self,
+        request: &OutputLeaseRequest,
+        now_ms: u64,
+        commit: Commit,
+    ) -> Result<OutputLeaseRequestReceipt, OutputLeaseError>
+    where
+        Commit: FnOnce(&OutputLeaseRequestReceipt) -> Result<(), OutputLeaseError>,
+    {
+        self.submit_request_with_commit_inner(request, now_ms, false, commit)
+    }
+
+    /// The only registry entrypoint which may apply the private managed
+    /// exact-Both action.  Its opaque runtime guard is required and bound to
+    /// the same lease before a candidate/admission/receipt can be created.
+    pub(crate) fn submit_managed_exact_both_request_with_commit<Commit>(
+        &mut self,
+        request: &OutputLeaseRequest,
+        authorization: &OutputLeaseKeepaliveManagedExactBothAuthorizationGuard<'_>,
+        now_ms: u64,
+        commit: Commit,
+    ) -> Result<OutputLeaseRequestReceipt, OutputLeaseError>
+    where
+        Commit: FnOnce(&OutputLeaseRequestReceipt) -> Result<(), OutputLeaseError>,
+    {
+        let Some(lease_id) = request
+            .action
+            .as_ref()
+            .and_then(OutputLeaseRequestAction::managed_exact_both_lease_id)
+        else {
+            return Err(OutputLeaseError::InvalidRequest);
+        };
+        if !authorization.authorizes_lease_id(&lease_id.encode()) {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        self.submit_request_with_commit_inner(request, now_ms, true, commit)
+    }
+
+    fn submit_request_with_commit_inner<Commit>(
+        &mut self,
+        request: &OutputLeaseRequest,
+        now_ms: u64,
+        allow_managed_exact_both: bool,
+        commit: Commit,
+    ) -> Result<OutputLeaseRequestReceipt, OutputLeaseError>
+    where
+        Commit: FnOnce(&OutputLeaseRequestReceipt) -> Result<(), OutputLeaseError>,
+    {
+        if request
+            .action
+            .as_ref()
+            .and_then(OutputLeaseRequestAction::managed_exact_both_lease_id)
+            .is_some()
+            && !allow_managed_exact_both
+        {
+            return Err(OutputLeaseError::InvalidRequest);
+        }
+        let mut candidate = self.clone();
+        let admission = candidate.begin_request_inner(request, now_ms)?;
+        match admission {
+            OutputLeaseRequestAdmission::Terminal(receipt) => Ok(receipt),
+            OutputLeaseRequestAdmission::InFlight(permit) => {
+                let Some(action) = request.action.as_ref() else {
+                    return Err(OutputLeaseError::InvalidRequest);
+                };
+                let applied = candidate.apply_action(action, now_ms, allow_managed_exact_both);
+                let receipt = candidate.receipt_for_action(request, applied);
+                let receipt = candidate.complete_request_inner(permit, receipt, now_ms)?;
+                commit(&receipt)?;
+                *self = candidate;
+                Ok(receipt)
+            }
+        }
+    }
+
+    /// Check admission and identity on a private candidate. A fresh request
+    /// reserves nothing in live authority; this seam lets the OutputControl
+    /// lane reject cross-operation request laundering before any mutation.
+    pub(crate) fn next_request_id(&self) -> Result<u64, String> {
+        self.origins
+            .values()
+            .map(|origin| origin.high_water_request_id)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| "Output request identity registry is exhausted".to_string())
+    }
+
+    pub(crate) fn preflight_request(
+        &self,
+        request: &OutputLeaseRequest,
+        now_ms: u64,
+    ) -> Result<(), OutputLeaseError> {
+        let mut candidate = self.clone();
+        candidate.begin_request_inner(request, now_ms).map(|_| ())
+    }
+
+    fn apply_action(
+        &mut self,
+        action: &OutputLeaseRequestAction,
+        now_ms: u64,
+        allow_managed_exact_both: bool,
+    ) -> OutputLeaseApplyResult {
+        match action {
+            OutputLeaseRequestAction::Acquire {
+                owner,
+                resources,
+                project_identity,
+                ttl_ms,
+            } => {
+                let result = self.acquire(
+                    owner.clone(),
+                    resources.clone(),
+                    project_identity.clone(),
+                    now_ms,
+                    *ttl_ms,
+                );
+                match result {
+                    Ok(grant) => OutputLeaseApplyResult::success(
+                        vec![grant.lease_id],
+                        Some(owner.clone()),
+                        grant.snapshot.resources.clone(),
+                        vec![OutputLeaseChange {
+                            lease_id: grant.lease_id,
+                            before: None,
+                            after: Some(grant.snapshot.clone()),
+                        }],
+                        OutputLeaseOperationOutcome::Acquired,
+                    ),
+                    Err(error) => {
+                        OutputLeaseApplyResult::error(Vec::new(), None, None, Vec::new(), error)
+                    }
+                }
+            }
+            OutputLeaseRequestAction::EnableAcquireOrRecover {
+                owner,
+                resources,
+                project_identity,
+                ttl_ms,
+            } => {
+                let result = self.enable_acquire_or_recover(
+                    owner.clone(),
+                    resources.clone(),
+                    project_identity.clone(),
+                    now_ms,
+                    *ttl_ms,
+                );
+                match result {
+                    Ok(transition) => OutputLeaseApplyResult::success(
+                        vec![transition.lease_id],
+                        Some(owner.clone()),
+                        Some(resources.clone()),
+                        vec![OutputLeaseChange {
+                            lease_id: transition.lease_id,
+                            before: transition.before,
+                            after: Some(transition.snapshot),
+                        }],
+                        if transition.recovered {
+                            OutputLeaseOperationOutcome::Recovered
+                        } else {
+                            OutputLeaseOperationOutcome::Acquired
+                        },
+                    ),
+                    Err(error) => {
+                        OutputLeaseApplyResult::error(Vec::new(), None, None, Vec::new(), error)
+                    }
+                }
+            }
+            OutputLeaseRequestAction::AuthorizeOrRecoverDisplay {
+                lease_id,
+                owner,
+                expected_generation,
+                exact_resources,
+                project_identity,
+                ttl_ms,
+            } => {
+                let before = self.lease_view(*lease_id).ok();
+                let result = self.authorize_or_recover_display(
+                    *lease_id,
+                    owner,
+                    *expected_generation,
+                    exact_resources,
+                    DisplayAuthorizationContext {
+                        project_identity,
+                        now_ms,
+                        ttl_ms: *ttl_ms,
+                    },
+                );
+                let after = self.lease_view(*lease_id).ok();
+                let mut changes = generation_change(*lease_id, before.as_ref(), after.as_ref());
+                if changes.is_empty() && result.is_ok() {
+                    if let (Some(before), Some(after)) = (before.as_ref(), after.as_ref()) {
+                        changes.push(OutputLeaseChange {
+                            lease_id: *lease_id,
+                            before: Some(before.snapshot.clone()),
+                            after: Some(after.snapshot.clone()),
+                        });
+                    }
+                }
+                match result {
+                    Ok(_) => OutputLeaseApplyResult::success(
+                        vec![*lease_id],
+                        Some(owner.clone()),
+                        Some(exact_resources.clone()),
+                        changes,
+                        OutputLeaseOperationOutcome::Authorized,
+                    ),
+                    Err(error) => OutputLeaseApplyResult::error(
+                        vec![*lease_id],
+                        Some(owner.clone()),
+                        Some(exact_resources.clone()),
+                        changes,
+                        error,
+                    ),
+                }
+            }
+            OutputLeaseRequestAction::ReplacePreviousProjectForAuthoring {
+                lease_id,
+                owner,
+                expected_generation,
+                project_identity,
+                ttl_ms,
+            } => {
+                let previous_resources = self
+                    .lease_view(*lease_id)
+                    .ok()
+                    .and_then(|view| view.snapshot.resources);
+                match self.replace_previous_project_for_authoring(
+                    *lease_id,
+                    owner,
+                    *expected_generation,
+                    project_identity,
+                    now_ms,
+                    *ttl_ms,
+                ) {
+                    Ok((grant, previous_change)) => OutputLeaseApplyResult::success(
+                        vec![grant.lease_id, *lease_id],
+                        Some(owner.clone()),
+                        grant.snapshot.resources.clone(),
+                        vec![
+                            OutputLeaseChange {
+                                lease_id: grant.lease_id,
+                                before: None,
+                                after: Some(grant.snapshot),
+                            },
+                            previous_change,
+                        ],
+                        OutputLeaseOperationOutcome::Acquired,
+                    ),
+                    Err(error) => OutputLeaseApplyResult::error(
+                        vec![*lease_id],
+                        Some(owner.clone()),
+                        previous_resources,
+                        Vec::new(),
+                        error,
+                    ),
+                }
+            }
+            OutputLeaseRequestAction::Renew {
+                lease_id,
+                owner,
+                expected_generation,
+                ttl_ms,
+            } => self.apply_single_lease_action(
+                *lease_id,
+                Some(owner.clone()),
+                OutputLeaseOperationOutcome::Renewed,
+                |registry| registry.renew(*lease_id, owner, *expected_generation, now_ms, *ttl_ms),
+            ),
+            #[cfg(test)]
+            OutputLeaseRequestAction::ObserveExpiry { lease_id } => {
+                let before = self.lease_view(*lease_id).ok();
+                let result = self.observe_expiry(*lease_id, now_ms);
+                let after = self.lease_view(*lease_id).ok();
+                let changes = generation_change(*lease_id, before.as_ref(), after.as_ref());
+                match result {
+                    Ok(_) => OutputLeaseApplyResult::success(
+                        vec![*lease_id],
+                        before.as_ref().and_then(|view| view.snapshot.owner.clone()),
+                        after
+                            .as_ref()
+                            .and_then(|view| view.snapshot.resources.clone()),
+                        changes,
+                        OutputLeaseOperationOutcome::ExpiryObserved,
+                    ),
+                    Err(error) => OutputLeaseApplyResult::error(
+                        vec![*lease_id],
+                        before.as_ref().and_then(|view| view.snapshot.owner.clone()),
+                        before
+                            .as_ref()
+                            .and_then(|view| view.snapshot.resources.clone()),
+                        changes,
+                        error,
+                    ),
+                }
+            }
+            OutputLeaseRequestAction::Recover {
+                lease_id,
+                owner,
+                expected_generation,
+                ttl_ms,
+            } => self.apply_single_lease_action(
+                *lease_id,
+                Some(owner.clone()),
+                OutputLeaseOperationOutcome::Recovered,
+                |registry| {
+                    registry.recover(*lease_id, owner, *expected_generation, now_ms, *ttl_ms)
+                },
+            ),
+            OutputLeaseRequestAction::Relinquish {
+                lease_id,
+                owner,
+                expected_generation,
+            } => self.apply_single_lease_action(
+                *lease_id,
+                Some(owner.clone()),
+                OutputLeaseOperationOutcome::Relinquished,
+                |registry| {
+                    registry.relinquish_output_lease(*lease_id, owner, *expected_generation, now_ms)
+                },
+            ),
+            OutputLeaseRequestAction::ForceTransfer {
+                lease_id,
+                expected_generation,
+                new_owner,
+                ttl_ms,
+            } => self.apply_single_lease_action(
+                *lease_id,
+                Some(new_owner.clone()),
+                OutputLeaseOperationOutcome::Transferred,
+                |registry| {
+                    registry.force_transfer(
+                        *lease_id,
+                        *expected_generation,
+                        new_owner.clone(),
+                        now_ms,
+                        *ttl_ms,
+                    )
+                },
+            ),
+            OutputLeaseRequestAction::AuthorizeOrdinary {
+                lease_id,
+                owner,
+                expected_generation,
+                exact_resources,
+            } => {
+                let before = self.lease_view(*lease_id).ok();
+                let result = self.authorize_ordinary(
+                    *lease_id,
+                    owner,
+                    *expected_generation,
+                    exact_resources,
+                    now_ms,
+                );
+                let after = self.lease_view(*lease_id).ok();
+                let changes = match (before.as_ref(), after.as_ref()) {
+                    (Some(before), Some(after)) => vec![OutputLeaseChange {
+                        lease_id: *lease_id,
+                        before: Some(before.snapshot.clone()),
+                        after: Some(after.snapshot.clone()),
+                    }],
+                    _ => generation_change(*lease_id, before.as_ref(), after.as_ref()),
+                };
+                match result {
+                    Ok(_) => OutputLeaseApplyResult::success(
+                        vec![*lease_id],
+                        Some(owner.clone()),
+                        Some(exact_resources.clone()),
+                        changes,
+                        OutputLeaseOperationOutcome::Authorized,
+                    ),
+                    Err(error) => OutputLeaseApplyResult::error(
+                        vec![*lease_id],
+                        Some(owner.clone()),
+                        Some(exact_resources.clone()),
+                        changes,
+                        error,
+                    ),
+                }
+            }
+            OutputLeaseRequestAction::AuthorizeManagedExactBoth {
+                lease_id,
+                owner,
+                exact_resources,
+                project_identity,
+            } => {
+                if !allow_managed_exact_both {
+                    return OutputLeaseApplyResult::error(
+                        vec![*lease_id],
+                        Some(owner.clone()),
+                        Some(exact_resources.clone()),
+                        Vec::new(),
+                        OutputLeaseError::InvalidRequest,
+                    );
+                }
+                let before = self.lease_view(*lease_id).ok();
+                let result = self.authorize_managed_exact_both(
+                    *lease_id,
+                    owner,
+                    exact_resources,
+                    project_identity,
+                    now_ms,
+                );
+                let after = self.lease_view(*lease_id).ok();
+                let changes = match (before.as_ref(), after.as_ref()) {
+                    (Some(before), Some(after)) => vec![OutputLeaseChange {
+                        lease_id: *lease_id,
+                        before: Some(before.snapshot.clone()),
+                        after: Some(after.snapshot.clone()),
+                    }],
+                    _ => generation_change(*lease_id, before.as_ref(), after.as_ref()),
+                };
+                match result {
+                    Ok(_) => OutputLeaseApplyResult::success(
+                        vec![*lease_id],
+                        Some(owner.clone()),
+                        Some(exact_resources.clone()),
+                        changes,
+                        OutputLeaseOperationOutcome::Authorized,
+                    ),
+                    Err(error) => OutputLeaseApplyResult::error(
+                        vec![*lease_id],
+                        Some(owner.clone()),
+                        Some(exact_resources.clone()),
+                        changes,
+                        error,
+                    ),
+                }
+            }
+            OutputLeaseRequestAction::RetireOwner { owner } => {
+                let before = self
+                    .lease_views()
+                    .into_iter()
+                    .filter(|view| {
+                        view.snapshot.phase == OutputLeasePhase::HeldActive
+                            && view.snapshot.owner.as_ref() == Some(owner)
+                    })
+                    .collect::<Vec<_>>();
+                let result = self.retire_owner(owner, now_ms);
+                let affected_lease_ids = result.clone().unwrap_or_default();
+                let after = affected_lease_ids
+                    .iter()
+                    .filter_map(|lease_id| self.lease_view(*lease_id).ok())
+                    .collect::<Vec<_>>();
+                let changes = generation_changes(&before, &after);
+                match result {
+                    Ok(_) => OutputLeaseApplyResult::success(
+                        affected_lease_ids,
+                        Some(owner.clone()),
+                        None,
+                        changes,
+                        OutputLeaseOperationOutcome::OwnerRetired,
+                    ),
+                    Err(error) => OutputLeaseApplyResult::error(
+                        affected_lease_ids,
+                        Some(owner.clone()),
+                        None,
+                        changes,
+                        error,
+                    ),
+                }
+            }
+            OutputLeaseRequestAction::ProjectOrphan {
+                project_identity,
+                selected_lease_ids,
+                resource_scope,
+            } => {
+                let before = self
+                    .lease_views()
+                    .into_iter()
+                    .filter(|view| {
+                        view.project_identity == *project_identity
+                            && (selected_lease_ids.is_empty()
+                                || selected_lease_ids.contains(&view.lease_id))
+                            && resource_scope.as_ref().is_none_or(|scope| {
+                                view.snapshot
+                                    .resources
+                                    .as_ref()
+                                    .is_some_and(|resources| resources.overlaps(scope))
+                            })
+                            && view.snapshot.phase == OutputLeasePhase::HeldActive
+                    })
+                    .collect::<Vec<_>>();
+                let result = self.project_orphan(
+                    project_identity,
+                    selected_lease_ids,
+                    resource_scope.as_ref(),
+                    now_ms,
+                );
+                let affected_lease_ids = result.clone().unwrap_or_default();
+                let after = affected_lease_ids
+                    .iter()
+                    .filter_map(|lease_id| self.lease_view(*lease_id).ok())
+                    .collect::<Vec<_>>();
+                let changes = generation_changes(&before, &after);
+                match result {
+                    Ok(_) => OutputLeaseApplyResult::success(
+                        affected_lease_ids,
+                        None,
+                        None,
+                        changes,
+                        OutputLeaseOperationOutcome::ProjectOrphaned,
+                    ),
+                    Err(error) => OutputLeaseApplyResult::error(
+                        affected_lease_ids,
+                        None,
+                        None,
+                        changes,
+                        error,
+                    ),
+                }
+            }
+        }
+    }
+
+    fn apply_single_lease_action<F>(
+        &mut self,
+        lease_id: OutputLeaseId,
+        owner: Option<OutputLeaseOwner>,
+        success: OutputLeaseOperationOutcome,
+        action: F,
+    ) -> OutputLeaseApplyResult
+    where
+        F: FnOnce(&mut Self) -> Result<OutputLeaseSnapshot, OutputLeaseError>,
+    {
+        let before = self.lease_view(lease_id).ok();
+        let result = action(self);
+        let after = self.lease_view(lease_id).ok();
+        let resources = before
+            .as_ref()
+            .and_then(|view| view.snapshot.resources.clone())
+            .or_else(|| {
+                after
+                    .as_ref()
+                    .and_then(|view| view.snapshot.resources.clone())
+            });
+        let changes = generation_change(lease_id, before.as_ref(), after.as_ref());
+        match result {
+            Ok(_) => OutputLeaseApplyResult::success(
+                vec![lease_id],
+                owner.or_else(|| before.and_then(|view| view.snapshot.owner)),
+                resources,
+                changes,
+                success,
+            ),
+            Err(error) => OutputLeaseApplyResult::error(
+                vec![lease_id],
+                owner.or_else(|| before.and_then(|view| view.snapshot.owner)),
+                resources,
+                changes,
+                error,
+            ),
+        }
+    }
+
+    fn receipt_for_action(
+        &self,
+        request: &OutputLeaseRequest,
+        applied: OutputLeaseApplyResult,
+    ) -> OutputLeaseRequestReceipt {
+        let lease_id = applied.lease_ids.first().copied();
+        // The primary id is semantic (the new authoring lease), whereas the
+        // persisted affected-id set must remain in canonical ascending order.
+        let mut affected_lease_ids = applied.lease_ids;
+        affected_lease_ids.sort_unstable();
+        let (generation_before, generation_after) = applied
+            .changes
+            .first()
+            .map(|change| {
+                (
+                    change.before.as_ref().map(|snapshot| snapshot.generation),
+                    change.after.as_ref().map(|snapshot| snapshot.generation),
+                )
+            })
+            .unwrap_or((None, None));
+        OutputLeaseRequestReceipt {
+            key: request.key.clone(),
+            shape_hash: request.shape_hash.clone(),
+            lease_id,
+            affected_lease_ids,
+            owner: applied.owner,
+            process_session_incarnation: self.process_session_incarnation,
+            resources: applied.resources,
+            generation_before,
+            generation_after,
+            audit_sequence: 0,
+            changes: applied.changes,
+            outcome: applied.outcome,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutputLeaseApplyResult {
+    lease_ids: Vec<OutputLeaseId>,
+    owner: Option<OutputLeaseOwner>,
+    resources: Option<OutputLeaseResources>,
+    changes: Vec<OutputLeaseChange>,
+    outcome: Result<OutputLeaseOperationOutcome, OutputLeaseError>,
+}
+
+impl OutputLeaseApplyResult {
+    fn success(
+        lease_ids: Vec<OutputLeaseId>,
+        owner: Option<OutputLeaseOwner>,
+        resources: Option<OutputLeaseResources>,
+        changes: Vec<OutputLeaseChange>,
+        outcome: OutputLeaseOperationOutcome,
+    ) -> Self {
+        Self {
+            lease_ids,
+            owner,
+            resources,
+            changes,
+            outcome: Ok(outcome),
+        }
+    }
+
+    fn error(
+        lease_ids: Vec<OutputLeaseId>,
+        owner: Option<OutputLeaseOwner>,
+        resources: Option<OutputLeaseResources>,
+        changes: Vec<OutputLeaseChange>,
+        error: OutputLeaseError,
+    ) -> Self {
+        Self {
+            lease_ids,
+            owner,
+            resources,
+            changes,
+            outcome: Err(error),
+        }
+    }
+}
+
+fn generation_change(
+    lease_id: OutputLeaseId,
+    before: Option<&OutputLeaseLeaseView>,
+    after: Option<&OutputLeaseLeaseView>,
+) -> Vec<OutputLeaseChange> {
+    match (before, after) {
+        (Some(before), Some(after)) if before.snapshot.generation != after.snapshot.generation => {
+            vec![OutputLeaseChange {
+                lease_id,
+                before: Some(before.snapshot.clone()),
+                after: Some(after.snapshot.clone()),
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn generation_changes(
+    before: &[OutputLeaseLeaseView],
+    after: &[OutputLeaseLeaseView],
+) -> Vec<OutputLeaseChange> {
+    before
+        .iter()
+        .filter_map(|before| {
+            let after = after
+                .iter()
+                .find(|candidate| candidate.lease_id == before.lease_id)?;
+            (before.snapshot.generation != after.snapshot.generation).then_some(OutputLeaseChange {
+                lease_id: before.lease_id,
+                before: Some(before.snapshot.clone()),
+                after: Some(after.snapshot.clone()),
+            })
+        })
+        .collect()
+}
+
+/// Dedicated read-only authority for the AddDisplay path. It exposes the
+/// exact expired lease needed for the atomic Add candidate without
+/// changing the public lifecycle query semantics. Any split, foreign,
+/// Lighting-only, or multiple overlapping lease is unavailable.
+impl OutputLeaseRegistry {
+    pub(crate) fn query_display_add_authority(
+        &self,
+        owner: &OutputLeaseOwner,
+        project_identity: &str,
+        now_ms: u64,
+    ) -> Result<DisplayAddLeaseAuthorityView, OutputLeaseError> {
+        self.ensure_now(now_ms)?;
+        if owner.process_session_incarnation != self.process_session_incarnation {
+            return Err(OutputLeaseError::StaleOwner);
+        }
+        if !bounded_nonempty(project_identity, MAX_OUTPUT_LEASE_PROJECT_BYTES) {
+            return Err(OutputLeaseError::InvalidProject);
+        }
+        let both = OutputLeaseResources::new(&[
+            OutputLeaseResource::Lighting,
+            OutputLeaseResource::Video,
+        ])?;
+        let overlapping = self
+            .leases
+            .iter()
+            .filter_map(|(&lease_id, record)| {
+                let resources = record.state.snapshot.resources.as_ref()?;
+                resources.overlaps(&both).then_some((lease_id, record))
+            })
+            .collect::<Vec<_>>();
+        if overlapping.len() != 1 {
+            return Err(OutputLeaseError::ResourceConflict);
+        }
+        let (lease_id, record) = overlapping[0];
+        if record.project_identity != project_identity
+            || record.state.snapshot.owner.as_ref() != Some(owner)
+            || !record.state.snapshot.resources.as_ref()
+                .is_some_and(|resources| resources.as_slice().contains(&OutputLeaseResource::Video))
+        {
+            return Err(OutputLeaseError::ResourceConflict);
+        }
+        let status = match record.state.snapshot.phase {
+            OutputLeasePhase::HeldActive => {
+                if now_ms < record.state.snapshot.expires_at_monotonic_ms.unwrap_or(0) {
+                    DisplayAddLeaseAuthorityStatus::HeldActive
+                } else {
+                    DisplayAddLeaseAuthorityStatus::ExpiredRecoverable
+                }
+            }
+            OutputLeasePhase::HeldOrphaned => DisplayAddLeaseAuthorityStatus::HeldOrphaned,
+            OutputLeasePhase::Unclaimed => DisplayAddLeaseAuthorityStatus::Unavailable,
+        };
+        if status == DisplayAddLeaseAuthorityStatus::Unavailable {
+            return Err(OutputLeaseError::InvalidTransition);
+        }
+        Ok(DisplayAddLeaseAuthorityView {
+            lease_id,
+            generation: record.state.snapshot.generation,
+            status,
+            resources: record.state.snapshot.resources.clone().ok_or(OutputLeaseError::ResourceConflict)?,
+        })
+    }
+}
+
+fn unclaimed_retention_elapsed(last_touched_ms: u64, now_ms: u64) -> bool {
+    last_touched_ms
+        .checked_add(OUTPUT_LEASE_UNCLAIMED_RETENTION_MS)
+        .is_some_and(|deadline| now_ms >= deadline)
+}
+
+fn bucket_idle_elapsed(observed_at_ms: u64, now_ms: u64) -> bool {
+    observed_at_ms
+        .checked_add(OUTPUT_LEASE_TOKEN_BUCKET_IDLE_PURGE_MS)
+        .is_some_and(|deadline| now_ms >= deadline)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn owner(process: u64, incarnation: u64) -> OutputLeaseOwner {
+        OutputLeaseOwner::new("local-ui", "main", process, incarnation).unwrap()
+    }
+
+    fn both() -> OutputLeaseResources {
+        OutputLeaseResources::new(&[OutputLeaseResource::Video, OutputLeaseResource::Lighting])
+            .unwrap()
+    }
+
+    #[test]
+    fn output_lease_validates_owner_and_canonical_resources() {
+        assert_eq!(
+            OutputLeaseOwner::new("", "main", 1, 1),
+            Err(OutputLeaseError::InvalidOwner)
+        );
+        assert_eq!(
+            OutputLeaseResources::new(&[]),
+            Err(OutputLeaseError::InvalidResources)
+        );
+        assert_eq!(
+            OutputLeaseResources::new(&[
+                OutputLeaseResource::Lighting,
+                OutputLeaseResource::Lighting,
+            ]),
+            Err(OutputLeaseError::InvalidResources)
+        );
+        assert_eq!(
+            both().0,
+            vec![OutputLeaseResource::Lighting, OutputLeaseResource::Video]
+        );
+    }
+
+    #[test]
+    fn output_lease_acquire_renew_expire_and_recover_are_generation_fenced() {
+        let mut state = OutputLeaseState::fresh_process(7).unwrap();
+        let owner = owner(7, 11);
+        let acquired = state.acquire(owner.clone(), both(), 100, 50).unwrap();
+        assert_eq!(acquired.generation, 1);
+        assert_eq!(acquired.expires_at_monotonic_ms, Some(150));
+        let renewed = state.renew(&owner, 1, 120, 50).unwrap();
+        assert_eq!(renewed.generation, 2);
+        assert!(!state.observe_expiry(169).unwrap());
+        assert!(state.observe_expiry(170).unwrap());
+        assert_eq!(state.snapshot.phase, OutputLeasePhase::HeldOrphaned);
+        let recovered = state.recover(&owner, 3, 200, 50).unwrap();
+        assert_eq!(recovered.generation, 4);
+        assert_eq!(recovered.phase, OutputLeasePhase::HeldActive);
+    }
+
+    #[test]
+    fn output_lease_rejects_owner_incarnation_aba_without_mutation() {
+        let mut state = OutputLeaseState::fresh_process(9).unwrap();
+        let current = owner(9, 1);
+        state.acquire(current.clone(), both(), 0, 10).unwrap();
+        let before = state.snapshot();
+        assert_eq!(
+            state.renew(&owner(9, 2), 1, 1, 10),
+            Err(OutputLeaseError::StaleOwner)
+        );
+        assert_eq!(state.snapshot(), before);
+        assert_eq!(
+            state.renew(&owner(10, 1), 1, 1, 10),
+            Err(OutputLeaseError::StaleOwner)
+        );
+        assert_eq!(state.snapshot(), before);
+    }
+
+    #[test]
+    fn output_lease_relinquish_and_restart_do_not_reclaim_authority() {
+        let mut state = OutputLeaseState::fresh_process(3).unwrap();
+        let owner = owner(3, 4);
+        state.acquire(owner.clone(), both(), 0, 10).unwrap();
+        let released = state.relinquish_output_lease(&owner, 1).unwrap();
+        assert_eq!(released.phase, OutputLeasePhase::Unclaimed);
+        assert!(released.owner.is_none());
+        let restarted = OutputLeaseState::fresh_process(99).unwrap();
+        assert_eq!(restarted.snapshot().phase, OutputLeasePhase::Unclaimed);
+        assert_eq!(restarted.snapshot().generation, 0);
+    }
+
+    #[test]
+    fn output_lease_force_transfer_is_atomic_and_authority_only() {
+        let mut state = OutputLeaseState::fresh_process(1).unwrap();
+        let old = owner(1, 1);
+        let new = owner(1, 2);
+        state.acquire(old, both(), 5, 10).unwrap();
+        let before = state.snapshot();
+        assert_eq!(
+            state.force_transfer(2, new.clone(), 6, 10),
+            Err(OutputLeaseError::StaleGeneration)
+        );
+        assert_eq!(state.snapshot(), before);
+        let transferred = state.force_transfer(1, new.clone(), 6, 10).unwrap();
+        assert_eq!(transferred.owner, Some(new));
+        assert_eq!(transferred.resources, before.resources);
+        assert_eq!(transferred.generation, 2);
+        assert_eq!(transferred.phase, OutputLeasePhase::HeldActive);
+    }
+
+    #[test]
+    fn output_lease_project_orphan_and_invalid_requests_are_atomic() {
+        let mut state = OutputLeaseState::fresh_process(2).unwrap();
+        let owner = owner(2, 3);
+        state.acquire(owner.clone(), both(), 10, 10).unwrap();
+        let orphaned = state.orphan(1).unwrap();
+        assert_eq!(orphaned.phase, OutputLeasePhase::HeldOrphaned);
+        assert_eq!(orphaned.generation, 2);
+        let before = state.snapshot();
+        assert_eq!(
+            state.recover(&owner, 2, u64::MAX, 1),
+            Err(OutputLeaseError::ClockExhausted)
+        );
+        assert_eq!(state.snapshot(), before);
+        assert_eq!(
+            state.recover(&owner, 2, 0, MAX_OUTPUT_LEASE_TTL_MS + 1),
+            Err(OutputLeaseError::InvalidTtl)
+        );
+        assert_eq!(state.snapshot(), before);
+    }
+
+    #[test]
+    fn output_lease_restart_rejects_cached_owner_and_overflow_is_atomic() {
+        let cached_owner = owner(1, 5);
+        let mut restarted = OutputLeaseState::fresh_process(2).unwrap();
+        let before = restarted.snapshot();
+        assert_eq!(
+            restarted.acquire(cached_owner, both(), 0, 10),
+            Err(OutputLeaseError::StaleOwner)
+        );
+        assert_eq!(restarted.snapshot(), before);
+
+        restarted.snapshot.generation = u64::MAX;
+        let exhausted = restarted.snapshot();
+        assert_eq!(
+            restarted.acquire(owner(2, 1), both(), 0, 10),
+            Err(OutputLeaseError::GenerationExhausted)
+        );
+        assert_eq!(restarted.snapshot(), exhausted);
+    }
+
+    #[test]
+    fn output_lease_renew_at_deadline_observes_orphaning() {
+        let mut state = OutputLeaseState::fresh_process(4).unwrap();
+        let owner = owner(4, 1);
+        state.acquire(owner.clone(), both(), 10, 5).unwrap();
+        assert_eq!(
+            state.renew(&owner, 1, 15, 5),
+            Err(OutputLeaseError::Expired)
+        );
+        assert_eq!(state.snapshot().phase, OutputLeasePhase::HeldOrphaned);
+        assert_eq!(state.snapshot().generation, 2);
+    }
+
+    #[test]
+    fn output_lease_transfer_at_deadline_observes_expiry_before_transfer() {
+        let mut state = OutputLeaseState::fresh_process(6).unwrap();
+        state.acquire(owner(6, 1), both(), 20, 5).unwrap();
+        assert_eq!(
+            state.force_transfer(1, owner(6, 2), 25, 5),
+            Err(OutputLeaseError::Expired)
+        );
+        let orphaned = state.snapshot();
+        assert_eq!(orphaned.phase, OutputLeasePhase::HeldOrphaned);
+        assert_eq!(orphaned.generation, 2);
+        assert_eq!(orphaned.owner, Some(owner(6, 1)));
+        let transferred = state.force_transfer(2, owner(6, 2), 25, 5).unwrap();
+        assert_eq!(transferred.generation, 3);
+        assert_eq!(transferred.phase, OutputLeasePhase::HeldActive);
+    }
+
+    #[test]
+    fn output_lease_transfer_rejects_a_different_process_without_mutation() {
+        let mut state = OutputLeaseState::fresh_process(8).unwrap();
+        state.acquire(owner(8, 1), both(), 0, 10).unwrap();
+        let before = state.snapshot();
+        assert_eq!(
+            state.force_transfer(1, owner(9, 1), 1, 5),
+            Err(OutputLeaseError::StaleOwner)
+        );
+        assert_eq!(state.snapshot(), before);
+    }
+
+    fn lighting() -> OutputLeaseResources {
+        OutputLeaseResources::new(&[OutputLeaseResource::Lighting]).unwrap()
+    }
+
+    fn video() -> OutputLeaseResources {
+        OutputLeaseResources::new(&[OutputLeaseResource::Video]).unwrap()
+    }
+
+    fn registry(process: u64) -> OutputLeaseRegistry {
+        OutputLeaseRegistry::fresh_process(process).unwrap()
+    }
+
+    fn observe_request(request_id: u64, lease_id: u64) -> OutputLeaseRequest {
+        OutputLeaseRequest::from_action(
+            "principal-a",
+            "output-lease",
+            request_id,
+            OutputLeaseRequestAction::ObserveExpiry {
+                lease_id: OutputLeaseId(lease_id),
+            },
+        )
+        .unwrap()
+    }
+
+    fn enable_request(
+        request_id: u64,
+        owner: OutputLeaseOwner,
+        project_identity: &str,
+        ttl_ms: u64,
+    ) -> OutputLeaseRequest {
+        OutputLeaseRequest::from_action(
+            "local-ui",
+            "output-control",
+            request_id,
+            OutputLeaseRequestAction::EnableAcquireOrRecover {
+                owner,
+                resources: both(),
+                project_identity: project_identity.to_string(),
+                ttl_ms,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn output_lease_enable_acquires_fresh_then_recovers_exact_expired_authority() {
+        let mut registry = registry(40);
+        let current_owner = owner(40, 1);
+        let acquired = registry
+            .submit_request(
+                &enable_request(1, current_owner.clone(), "project-40", 10),
+                0,
+            )
+            .unwrap();
+        assert_eq!(acquired.outcome, Ok(OutputLeaseOperationOutcome::Acquired));
+        let lease_id = acquired.lease_id.unwrap();
+        assert_eq!(acquired.changes.len(), 1);
+        assert!(acquired.changes[0].before.is_none());
+        assert_eq!(
+            acquired.changes[0].after.as_ref().unwrap().phase,
+            OutputLeasePhase::HeldActive
+        );
+
+        // now == deadline is the exact expiry boundary. Enable privately
+        // orphans then recovers the same authority without publishing the
+        // intermediate orphaned candidate.
+        let recovered = registry
+            .submit_request(
+                &enable_request(2, current_owner.clone(), "project-40", 10),
+                10,
+            )
+            .unwrap();
+        assert_eq!(recovered.lease_id, Some(lease_id));
+        assert_eq!(
+            recovered.outcome,
+            Ok(OutputLeaseOperationOutcome::Recovered)
+        );
+        assert_eq!(recovered.changes.len(), 1);
+        let change = &recovered.changes[0];
+        assert_eq!(
+            change.before.as_ref().unwrap().phase,
+            OutputLeasePhase::HeldOrphaned
+        );
+        assert_eq!(change.before.as_ref().unwrap().generation, 2);
+        assert_eq!(
+            change.after.as_ref().unwrap().phase,
+            OutputLeasePhase::HeldActive
+        );
+        assert_eq!(change.after.as_ref().unwrap().generation, 3);
+        assert_eq!(
+            change.after.as_ref().unwrap().owner.as_ref(),
+            Some(&current_owner)
+        );
+        assert_eq!(
+            change.after.as_ref().unwrap().resources.as_ref(),
+            Some(&both())
+        );
+        assert_eq!(registry.active_lease_count(), 1);
+
+        let replay = registry
+            .submit_request(&enable_request(2, current_owner, "project-40", 10), 10)
+            .unwrap();
+        assert_eq!(replay, recovered);
+        assert_eq!(registry.active_lease_count(), 1);
+    }
+
+    #[test]
+    fn output_lease_enable_recovery_rejects_active_foreign_project_and_scope_without_mutation() {
+        let mut active = registry(41);
+        let current_owner = owner(41, 1);
+        active
+            .acquire(current_owner.clone(), both(), "project-41", 0, 10)
+            .unwrap();
+        let before_active = active.clone();
+        assert_eq!(
+            active.enable_acquire_or_recover(current_owner.clone(), both(), "project-41", 9, 10,),
+            Err(OutputLeaseError::ResourceConflict)
+        );
+        assert_eq!(active, before_active);
+
+        for (candidate_owner, project_identity, resources) in [
+            (owner(41, 2), "project-41", both()),
+            (current_owner.clone(), "project-other", both()),
+            (current_owner.clone(), "project-41", lighting()),
+            (current_owner.clone(), "project-41", video()),
+        ] {
+            let mut candidate = before_active.clone();
+            let before = candidate.clone();
+            assert_eq!(
+                candidate.enable_acquire_or_recover(
+                    candidate_owner,
+                    resources,
+                    project_identity,
+                    10,
+                    10,
+                ),
+                Err(OutputLeaseError::ResourceConflict)
+            );
+            assert_eq!(candidate, before);
+        }
+
+        let mut stale_process = before_active.clone();
+        let before_stale = stale_process.clone();
+        assert_eq!(
+            stale_process.enable_acquire_or_recover(owner(99, 1), both(), "project-41", 10, 10,),
+            Err(OutputLeaseError::StaleOwner)
+        );
+        assert_eq!(stale_process, before_stale);
+    }
+
+    #[test]
+    fn output_lease_enable_rejects_ambiguous_split_leases_and_preserves_public_semantics() {
+        let mut split = registry(42);
+        split
+            .acquire(owner(42, 1), lighting(), "project-42", 0, 10)
+            .unwrap();
+        split
+            .acquire(owner(42, 1), video(), "project-42", 0, 10)
+            .unwrap();
+        let before_split = split.clone();
+        assert_eq!(
+            split.enable_acquire_or_recover(owner(42, 1), both(), "project-42", 10, 10,),
+            Err(OutputLeaseError::ResourceConflict)
+        );
+        assert_eq!(split, before_split);
+
+        // Public Acquire remains strict and does not silently adopt expired
+        // authority. Public Recover still requires the explicit lease id and
+        // generation after an observed expiry.
+        let mut public = registry(43);
+        let grant = public
+            .acquire(owner(43, 1), both(), "project-43", 0, 10)
+            .unwrap();
+        let before_acquire = public.clone();
+        assert_eq!(
+            public.acquire(owner(43, 1), both(), "project-43", 10, 10),
+            Err(OutputLeaseError::ResourceConflict)
+        );
+        assert_eq!(public, before_acquire);
+        assert!(public.observe_expiry(grant.lease_id, 10).unwrap());
+        assert_eq!(
+            public.recover(grant.lease_id, &owner(43, 1), 1, 10, 10),
+            Err(OutputLeaseError::StaleGeneration)
+        );
+        assert_eq!(
+            public
+                .recover(grant.lease_id, &owner(43, 1), 2, 10, 10)
+                .unwrap()
+                .phase,
+            OutputLeasePhase::HeldActive
+        );
+    }
+
+    #[test]
+    fn output_lease_registry_authorize_ordinary_is_exact_and_deadline_fenced() {
+        let mut registry = registry(19);
+        let grant = registry
+            .acquire(owner(19, 1), lighting(), "project-a", 0, 10)
+            .unwrap();
+        assert_eq!(grant.lease_id.encode(), "lease-0000000000000001");
+        assert_eq!(
+            OutputLeaseId::decode(&grant.lease_id.encode()),
+            Ok(grant.lease_id)
+        );
+        assert_eq!(
+            OutputLeaseId::decode("lease-000000000000000A"),
+            Err(OutputLeaseError::InvalidRequest)
+        );
+
+        let request = OutputLeaseRequest::from_action(
+            "local-ui",
+            "output-control",
+            1,
+            OutputLeaseRequestAction::AuthorizeOrdinary {
+                lease_id: grant.lease_id,
+                owner: owner(19, 1),
+                expected_generation: 1,
+                exact_resources: lighting(),
+            },
+        )
+        .unwrap();
+        let receipt = registry.submit_request(&request, 1).unwrap();
+        assert_eq!(receipt.outcome, Ok(OutputLeaseOperationOutcome::Authorized));
+        assert_eq!(receipt.audit_sequence, 1);
+        assert_eq!(receipt.changes.len(), 1);
+        assert_eq!(
+            receipt.changes[0].before.as_ref().unwrap().generation,
+            receipt.changes[0].after.as_ref().unwrap().generation
+        );
+        let retry = registry.submit_request(&request, 1).unwrap();
+        assert_eq!(retry, receipt);
+        assert_eq!(registry.audit().len(), 1);
+
+        let expired_request = OutputLeaseRequest::from_action(
+            "local-ui",
+            "output-control",
+            2,
+            OutputLeaseRequestAction::AuthorizeOrdinary {
+                lease_id: grant.lease_id,
+                owner: owner(19, 1),
+                expected_generation: 1,
+                exact_resources: lighting(),
+            },
+        )
+        .unwrap();
+        let expired = registry.submit_request(&expired_request, 10).unwrap();
+        assert_eq!(expired.outcome, Err(OutputLeaseError::Expired));
+        assert_eq!(expired.generation_before, Some(1));
+        assert_eq!(expired.generation_after, Some(2));
+        assert_eq!(
+            registry.lease_view(grant.lease_id).unwrap().snapshot.phase,
+            OutputLeasePhase::HeldOrphaned
+        );
+    }
+
+    #[test]
+    fn generic_managed_exact_both_action_is_rejected_but_ordinary_stale_is_rejected() {
+        let mut registry = registry(71);
+        let current_owner = owner(71, 1);
+        let grant = registry
+            .acquire(current_owner.clone(), both(), "project-71", 0, 20)
+            .unwrap();
+
+        // Deterministically model the keepalive renewing after an ordinary
+        // UI lease sample but before route admission.
+        let renewed = registry
+            .renew(grant.lease_id, &current_owner, 1, 5, 20)
+            .unwrap();
+        assert_eq!(renewed.generation, 2);
+
+        let unmanaged_stale = OutputLeaseRequest::from_action(
+            "local-ui",
+            "output-control",
+            1,
+            OutputLeaseRequestAction::AuthorizeOrdinary {
+                lease_id: grant.lease_id,
+                owner: current_owner.clone(),
+                expected_generation: 1,
+                exact_resources: both(),
+            },
+        )
+        .unwrap();
+        let stale_receipt = registry.submit_request(&unmanaged_stale, 6).unwrap();
+        assert_eq!(
+            stale_receipt.outcome,
+            Err(OutputLeaseError::StaleGeneration)
+        );
+        assert_eq!(stale_receipt.generation_before, Some(2));
+        assert_eq!(stale_receipt.generation_after, Some(2));
+
+        // The private action is not itself a registry capability.  The
+        // runtime-only specialized submit entrypoint must carry its opaque
+        // guard before even an in-flight receipt can be created.
+        let managed = OutputLeaseRequest::from_action(
+            "local-ui",
+            "output-control",
+            2,
+            OutputLeaseRequestAction::AuthorizeManagedExactBoth {
+                lease_id: grant.lease_id,
+                owner: current_owner.clone(),
+                exact_resources: both(),
+                project_identity: "project-71".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            registry.submit_request(&managed, 6),
+            Err(OutputLeaseError::InvalidRequest)
+        );
+        assert_eq!(
+            registry
+                .lease_view(grant.lease_id)
+                .unwrap()
+                .snapshot
+                .generation,
+            2
+        );
+    }
+
+    #[test]
+    fn add_display_authorization_recovers_only_exact_expired_both_authority() {
+        let mut lease_registry = registry(24);
+        let current_owner = owner(24, 1);
+        let grant = lease_registry
+            .acquire(current_owner.clone(), both(), "project-24", 0, 10)
+            .unwrap();
+
+        let request = |request_id: u64, owner: OutputLeaseOwner, generation: u64, project: &str| {
+            OutputLeaseRequest::from_action(
+                "local-ui",
+                "output-control",
+                request_id,
+                OutputLeaseRequestAction::AuthorizeOrRecoverDisplay {
+                    lease_id: grant.lease_id,
+                    owner,
+                    expected_generation: generation,
+                    exact_resources: both(),
+                    project_identity: project.to_string(),
+                    ttl_ms: 10,
+                },
+            )
+            .unwrap()
+        };
+
+        // The AddDisplay operation sees the active lease exactly at its
+        // deadline and resolves active->orphaned->active on its private
+        // candidate. The public Acquire route remains unchanged.
+        let recovered = lease_registry
+            .submit_request(&request(1, current_owner.clone(), 1, "project-24"), 10)
+            .unwrap();
+        assert_eq!(
+            recovered.outcome,
+            Ok(OutputLeaseOperationOutcome::Authorized)
+        );
+        assert_eq!(recovered.lease_id, Some(grant.lease_id));
+        assert_eq!(recovered.generation_before, Some(1));
+        assert_eq!(recovered.generation_after, Some(3));
+        assert_eq!(
+            lease_registry
+                .lease_view(grant.lease_id)
+                .unwrap()
+                .snapshot
+                .phase,
+            OutputLeasePhase::HeldActive
+        );
+
+        // An already-orphaned exact lease is also recoverable when the
+        // caller supplies the current generation; no stale generation is
+        // guessed or accepted.
+        lease_registry
+            .observe_expiry(grant.lease_id, 20)
+            .expect("active lease should expire");
+        let orphaned_generation = lease_registry
+            .lease_view(grant.lease_id)
+            .unwrap()
+            .snapshot
+            .generation;
+        let recovered_again = lease_registry
+            .submit_request(
+                &request(2, current_owner.clone(), orphaned_generation, "project-24"),
+                20,
+            )
+            .unwrap();
+        assert_eq!(
+            recovered_again.outcome,
+            Ok(OutputLeaseOperationOutcome::Authorized)
+        );
+        assert_eq!(recovered_again.generation_before, Some(orphaned_generation));
+        assert_eq!(
+            recovered_again.generation_after,
+            Some(orphaned_generation + 1)
+        );
+
+        let query_before_add = lease_registry
+            .query_display_add_authority(&current_owner, "project-24", 30)
+            .unwrap();
+        assert_eq!(
+            query_before_add.status,
+            DisplayAddLeaseAuthorityStatus::ExpiredRecoverable
+        );
+        let query_snapshot = lease_registry.lease_view(grant.lease_id).unwrap();
+        let recovered_from_query = lease_registry
+            .submit_request(
+                &request(
+                    3,
+                    current_owner.clone(),
+                    query_before_add.generation,
+                    "project-24",
+                ),
+                30,
+            )
+            .unwrap();
+        assert_eq!(
+            recovered_from_query.outcome,
+            Ok(OutputLeaseOperationOutcome::Authorized)
+        );
+        assert_eq!(
+            lease_registry
+                .lease_view(grant.lease_id)
+                .unwrap()
+                .snapshot
+                .phase,
+            OutputLeasePhase::HeldActive
+        );
+        assert_eq!(query_snapshot.snapshot.phase, OutputLeasePhase::HeldActive);
+
+        let before_reject = lease_registry.lease_view(grant.lease_id).unwrap();
+        let rejected = lease_registry
+            .submit_request(
+                &request(
+                    4,
+                    owner(24, 2),
+                    query_before_add.generation + 2,
+                    "project-24",
+                ),
+                30,
+            )
+            .unwrap();
+        assert_eq!(rejected.outcome, Err(OutputLeaseError::StaleOwner));
+        assert_eq!(
+            lease_registry.lease_view(grant.lease_id).unwrap(),
+            before_reject
+        );
+
+        let mut public = registry(25);
+        let public_grant = public
+            .acquire(owner(25, 1), both(), "project-25", 0, 10)
+            .unwrap();
+        assert_eq!(
+            public.acquire(owner(25, 1), both(), "project-25", 10, 10),
+            Err(OutputLeaseError::ResourceConflict)
+        );
+        assert_eq!(
+            public.recover(public_grant.lease_id, &owner(25, 1), 1, 10, 10),
+            Err(OutputLeaseError::InvalidTransition)
+        );
+    }
+
+    #[test]
+    fn display_video_only_recovery_preserves_scope_and_rejects_invalid_authority() {
+        let mut leases = registry(52);
+        let current = owner(52, 1);
+        let grant = leases
+            .acquire(current.clone(), video(), "project-52", 0, 10)
+            .unwrap();
+        let before_query = leases.clone();
+        let query = leases
+            .query_display_add_authority(&current, "project-52", 10)
+            .unwrap();
+        assert_eq!(query.resources, video());
+        assert_eq!(
+            query.status,
+            DisplayAddLeaseAuthorityStatus::ExpiredRecoverable
+        );
+        assert_eq!(
+            leases, before_query,
+            "discovery never mutates expiry or audit"
+        );
+        let request = |id, own, generation, resources, project: &str| {
+            OutputLeaseRequest::from_action(
+                "local-ui",
+                "output-control",
+                id,
+                OutputLeaseRequestAction::AuthorizeOrRecoverDisplay {
+                    lease_id: grant.lease_id,
+                    owner: own,
+                    expected_generation: generation,
+                    exact_resources: resources,
+                    project_identity: project.into(),
+                    ttl_ms: 10,
+                },
+            )
+            .unwrap()
+        };
+        for (id, own, generation, resources, project) in [
+            (1, current.clone(), 2, video(), "project-52"),
+            (2, owner(52, 2), 1, video(), "project-52"),
+            (3, current.clone(), 1, both(), "project-52"),
+            (4, current.clone(), 1, lighting(), "project-52"),
+            (5, current.clone(), 1, video(), "another-project"),
+        ] {
+            let before = leases.lease_view(grant.lease_id).unwrap();
+            let receipt = leases
+                .submit_request(&request(id, own, generation, resources, project), 10)
+                .unwrap();
+            assert!(receipt.outcome.is_err());
+            assert_eq!(leases.lease_view(grant.lease_id).unwrap(), before);
+        }
+        let receipt = leases
+            .submit_request(&request(6, current.clone(), 1, video(), "project-52"), 10)
+            .unwrap();
+        assert_eq!(receipt.outcome, Ok(OutputLeaseOperationOutcome::Authorized));
+        assert_eq!(
+            leases
+                .lease_view(grant.lease_id)
+                .unwrap()
+                .snapshot
+                .resources,
+            Some(video())
+        );
+        assert_eq!(receipt.generation_after, Some(3));
+        leases
+            .acquire(current.clone(), lighting(), "project-52", 10, 10)
+            .unwrap();
+        assert_eq!(
+            leases.query_display_add_authority(&current, "project-52", 10),
+            Err(OutputLeaseError::ResourceConflict)
+        );
+        let before = leases.lease_view(grant.lease_id).unwrap();
+        let receipt = leases
+            .submit_request(&request(7, current, 3, video(), "project-52"), 10)
+            .unwrap();
+        assert_eq!(receipt.outcome, Err(OutputLeaseError::ResourceConflict));
+        assert_eq!(leases.lease_view(grant.lease_id).unwrap(), before);
+    }
+
+    #[test]
+    fn output_lease_registry_coexists_only_for_non_overlapping_canonical_resources() {
+        let mut registry = registry(20);
+        let first = registry
+            .acquire(owner(20, 1), lighting(), "project-a", 0, 100)
+            .unwrap();
+        let second = registry
+            .acquire(owner(20, 2), video(), "project-b", 0, 100)
+            .unwrap();
+        assert_ne!(first.lease_id, second.lease_id);
+        assert_eq!(registry.active_lease_count(), 2);
+        let before = registry.clone();
+        for resources in [lighting(), video(), both()] {
+            assert_eq!(
+                registry.acquire(owner(20, 3), resources, "project-c", 0, 100),
+                Err(OutputLeaseError::ResourceConflict)
+            );
+            assert_eq!(registry, before);
+        }
+        assert_eq!(
+            registry
+                .lease_view(first.lease_id)
+                .unwrap()
+                .snapshot
+                .resources,
+            Some(lighting())
+        );
+    }
+
+    #[test]
+    fn output_lease_registry_expiry_receipt_records_orphan_generation_without_physical_delta() {
+        let mut registry = registry(21);
+        let grant = registry
+            .acquire(owner(21, 1), lighting(), "project-a", 0, 10)
+            .unwrap();
+        let request = OutputLeaseRequest::from_action(
+            "local-ui",
+            "output-lease",
+            1,
+            OutputLeaseRequestAction::Renew {
+                lease_id: grant.lease_id,
+                owner: owner(21, 1),
+                expected_generation: 1,
+                ttl_ms: 10,
+            },
+        )
+        .unwrap();
+        let receipt = registry.submit_request(&request, 10).unwrap();
+        assert_eq!(receipt.outcome, Err(OutputLeaseError::Expired));
+        assert_eq!(receipt.generation_before, Some(1));
+        assert_eq!(receipt.generation_after, Some(2));
+        assert_eq!(registry.active_lease_count(), 1);
+        assert_eq!(
+            registry.lease_view(grant.lease_id).unwrap().snapshot.phase,
+            OutputLeasePhase::HeldOrphaned
+        );
+        assert_eq!(registry.process_session_incarnation(), 21);
+        assert_eq!(registry.receipt_count(), 1);
+        assert_eq!(receipt.shape_hash.0.len(), 32);
+    }
+
+    #[test]
+    fn output_lease_registry_request_retry_conflict_and_busy_are_exact_and_atomic() {
+        let mut registry = registry(22);
+        let request = observe_request(7, 900);
+        let first = registry.submit_request(&request, 0).unwrap();
+        let audit_count = registry.audit().len();
+        let retry = registry.submit_request(&request, 0).unwrap();
+        assert_eq!(retry, first);
+        assert_eq!(registry.audit().len(), audit_count);
+
+        let mut changed_shape = OutputLeaseRequestShape::new("observe_expiry").unwrap();
+        changed_shape.lease_id = Some(OutputLeaseId(901));
+        let changed = OutputLeaseRequest::new(request.key.clone(), changed_shape).unwrap();
+        let before_conflict = registry.clone();
+        assert_eq!(
+            registry.begin_request(&changed, 0),
+            Err(OutputLeaseError::Conflict)
+        );
+        assert_eq!(registry, before_conflict);
+
+        let busy_request = observe_request(8, 902);
+        let admission = registry.begin_request(&busy_request, 0).unwrap();
+        let OutputLeaseRequestAdmission::InFlight(permit) = admission else {
+            panic!("new request must reserve an in-flight lane")
+        };
+        assert_eq!(
+            registry.begin_request(&busy_request, 0),
+            Err(OutputLeaseError::Busy)
+        );
+        let mut changed_in_flight_shape = OutputLeaseRequestShape::new("observe_expiry").unwrap();
+        changed_in_flight_shape.lease_id = Some(OutputLeaseId(903));
+        let changed_in_flight =
+            OutputLeaseRequest::new(busy_request.key.clone(), changed_in_flight_shape).unwrap();
+        assert_eq!(
+            registry.begin_request(&changed_in_flight, 0),
+            Err(OutputLeaseError::Conflict)
+        );
+        registry.cancel_request(permit, 0).unwrap();
+        assert_eq!(registry.audit().len(), audit_count);
+    }
+
+    #[test]
+    fn output_lease_registry_same_identity_cross_operation_is_conflict_before_admission() {
+        let mut registry = registry(29);
+        let acquire = OutputLeaseRequest::from_action(
+            "principal-a",
+            "output-lease",
+            1,
+            OutputLeaseRequestAction::Acquire {
+                owner: owner(29, 1),
+                resources: lighting(),
+                project_identity: "project".to_string(),
+                ttl_ms: 100,
+            },
+        )
+        .unwrap();
+        let acquired = registry.submit_request(&acquire, 0).unwrap();
+        let transfer = OutputLeaseRequest::from_action(
+            "principal-a",
+            "output-lease",
+            1,
+            OutputLeaseRequestAction::ForceTransfer {
+                lease_id: acquired.lease_id.unwrap(),
+                expected_generation: 1,
+                new_owner: owner(29, 2),
+                ttl_ms: 100,
+            },
+        )
+        .unwrap();
+        let before = registry.clone();
+        assert_eq!(
+            registry.submit_request(&transfer, 0),
+            Err(OutputLeaseError::Conflict)
+        );
+        assert_eq!(registry, before);
+    }
+
+    #[test]
+    fn output_lease_registry_submit_completion_failure_is_full_registry_atomic() {
+        let mut submit_registry = registry(30);
+        submit_registry.next_audit_sequence = u64::MAX - 1;
+        let before = submit_registry.clone();
+        assert_eq!(
+            submit_registry.submit_request(&observe_request(1, 3_000), 0),
+            Err(OutputLeaseError::AuditCapacity)
+        );
+        assert_eq!(submit_registry, before);
+
+        let mut public_registry = registry(30);
+        let request = observe_request(1, 3_001);
+        let OutputLeaseRequestAdmission::InFlight(permit) =
+            public_registry.begin_request(&request, 0).unwrap()
+        else {
+            panic!("a fresh request must reserve a completion lane")
+        };
+        public_registry.next_audit_sequence = u64::MAX - 1;
+        let before_public_failure = public_registry.clone();
+        let receipt = OutputLeaseRequestReceipt {
+            key: request.key.clone(),
+            shape_hash: request.shape_hash.clone(),
+            lease_id: None,
+            affected_lease_ids: Vec::new(),
+            owner: None,
+            process_session_incarnation: public_registry.process_session_incarnation,
+            resources: None,
+            generation_before: None,
+            generation_after: None,
+            audit_sequence: 0,
+            changes: Vec::new(),
+            outcome: Err(OutputLeaseError::UnknownLease),
+        };
+        assert_eq!(
+            public_registry.complete_request(permit, receipt, 0),
+            Err(OutputLeaseError::AuditCapacity)
+        );
+        assert_eq!(public_registry, before_public_failure);
+    }
+
+    #[test]
+    fn output_lease_registry_string_and_cardinality_bounds_fail_closed() {
+        assert_eq!(
+            OutputLeaseOwner::new(
+                "x".repeat(MAX_OUTPUT_LEASE_OWNER_PRINCIPAL_BYTES + 1),
+                "main",
+                1,
+                1,
+            ),
+            Err(OutputLeaseError::InvalidOwner)
+        );
+        assert_eq!(
+            OutputLeaseOwner::new(
+                "local",
+                "x".repeat(MAX_OUTPUT_LEASE_OWNER_WINDOW_BYTES + 1),
+                1,
+                1,
+            ),
+            Err(OutputLeaseError::InvalidOwner)
+        );
+        assert_eq!(
+            OutputLeaseRequestKey::new(
+                "x".repeat(MAX_OUTPUT_LEASE_REQUEST_PRINCIPAL_BYTES + 1),
+                "domain",
+                1,
+            ),
+            Err(OutputLeaseError::InvalidRequest)
+        );
+        assert_eq!(
+            OutputLeaseRequestShape::new("x".repeat(MAX_OUTPUT_LEASE_OPERATION_BYTES + 1)),
+            Err(OutputLeaseError::InvalidRequest)
+        );
+        let mut shape = OutputLeaseRequestShape::new("observe_expiry").unwrap();
+        shape.selected_lease_ids = (1..=(MAX_OUTPUT_LEASE_SELECTED_IDS as u64 + 1))
+            .map(OutputLeaseId)
+            .collect();
+        assert_eq!(
+            shape.canonical_hash(),
+            Err(OutputLeaseError::InvalidRequest)
+        );
+        assert_eq!(
+            OutputLeaseRequest::from_action(
+                "principal",
+                "domain",
+                1,
+                OutputLeaseRequestAction::Acquire {
+                    owner: owner(1, 1),
+                    resources: lighting(),
+                    project_identity: "x".repeat(MAX_OUTPUT_LEASE_PROJECT_BYTES + 1),
+                    ttl_ms: 10,
+                },
+            ),
+            Err(OutputLeaseError::InvalidProject)
+        );
+    }
+
+    #[test]
+    fn output_lease_registry_origin_and_token_bounds_are_bounded() {
+        let mut registry = registry(31);
+        for origin_id in 0..MAX_OUTPUT_LEASE_REQUEST_ORIGINS {
+            let request = OutputLeaseRequest::from_action(
+                format!("principal-{origin_id}"),
+                "output-lease",
+                1,
+                OutputLeaseRequestAction::ObserveExpiry {
+                    lease_id: OutputLeaseId(4_000 + origin_id as u64),
+                },
+            )
+            .unwrap();
+            registry.submit_request(&request, 0).unwrap();
+        }
+        assert_eq!(registry.origin_count(), MAX_OUTPUT_LEASE_REQUEST_ORIGINS);
+        assert_eq!(registry.token_buckets.len(), MAX_OUTPUT_LEASE_TOKEN_BUCKETS);
+        let next = OutputLeaseRequest::from_action(
+            "principal-overflow",
+            "output-lease",
+            1,
+            OutputLeaseRequestAction::ObserveExpiry {
+                lease_id: OutputLeaseId(9_999),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            registry.submit_request(&next, 0),
+            Err(OutputLeaseError::RequestCapacity)
+        );
+        assert_eq!(registry.origin_count(), MAX_OUTPUT_LEASE_REQUEST_ORIGINS);
+    }
+
+    #[test]
+    fn output_lease_registry_ten_thousand_sequential_requests_keep_truth_bounded() {
+        let mut registry = registry(32);
+        for request_id in 1..=10_000_u64 {
+            let request = observe_request(request_id, 5_000 + request_id);
+            registry
+                .submit_request(&request, (request_id - 1) * 250)
+                .unwrap();
+        }
+        assert_eq!(registry.lease_count(), 0);
+        assert_eq!(registry.active_lease_count(), 0);
+        assert_eq!(registry.origin_count(), 1);
+        assert_eq!(registry.token_buckets.len(), 1);
+        assert!(registry.receipt_count() <= MAX_OUTPUT_LEASE_REQUESTS);
+        assert!(registry.audit().len() <= MAX_OUTPUT_LEASE_AUDIT_RECORDS);
+        assert!(registry.in_flight.is_empty());
+        assert!(registry.operation_lanes.is_empty());
+        let before = registry.clone();
+        assert_eq!(
+            registry.submit_request(&observe_request(1, 5_001), 2_500_000),
+            Err(OutputLeaseError::ReceiptNotRetained)
+        );
+        assert_eq!(registry, before);
+    }
+
+    #[test]
+    fn output_lease_registry_inflight_old_owner_is_fenced_after_transfer() {
+        let mut registry = registry(33);
+        let old_owner = owner(33, 1);
+        let grant = registry
+            .acquire(old_owner.clone(), lighting(), "project", 0, 100)
+            .unwrap();
+        let request = OutputLeaseRequest::from_action(
+            "principal-old",
+            "output-lease",
+            1,
+            OutputLeaseRequestAction::Renew {
+                lease_id: grant.lease_id,
+                owner: old_owner.clone(),
+                expected_generation: 1,
+                ttl_ms: 100,
+            },
+        )
+        .unwrap();
+        let admission = registry.begin_request(&request, 0).unwrap();
+        let OutputLeaseRequestAdmission::InFlight(permit) = admission else {
+            panic!("request must be in flight")
+        };
+        registry
+            .force_transfer(grant.lease_id, 1, owner(33, 2), 0, 100)
+            .unwrap();
+        let before = registry.clone();
+        assert_eq!(
+            registry.renew(grant.lease_id, &old_owner, 1, 0, 100),
+            Err(OutputLeaseError::StaleGeneration)
+        );
+        assert_eq!(registry, before);
+        registry.cancel_request(permit, 0).unwrap();
+    }
+
+    #[test]
+    fn output_lease_registry_multi_lease_receipt_restores_actual_change_truth() {
+        let mut registry = registry(34);
+        let first = registry
+            .acquire(owner(34, 1), lighting(), "project", 0, 100)
+            .unwrap();
+        let second = registry
+            .acquire(owner(34, 2), video(), "project", 0, 100)
+            .unwrap();
+        let request = OutputLeaseRequest::from_action(
+            "principal-project",
+            "output-lease",
+            1,
+            OutputLeaseRequestAction::ProjectOrphan {
+                project_identity: "project".to_string(),
+                selected_lease_ids: vec![second.lease_id, first.lease_id],
+                resource_scope: None,
+            },
+        )
+        .unwrap();
+        let receipt = registry.submit_request(&request, 0).unwrap();
+        assert_eq!(receipt.changes.len(), 2);
+        for change in &receipt.changes {
+            assert!(change.before.is_some());
+            assert_eq!(
+                change.before.as_ref().unwrap().phase,
+                OutputLeasePhase::HeldActive
+            );
+            assert_eq!(
+                change.after.as_ref().unwrap().phase,
+                OutputLeasePhase::HeldOrphaned
+            );
+            assert_eq!(
+                change.after.as_ref().unwrap().generation,
+                change.before.as_ref().unwrap().generation + 1
+            );
+            assert!(change.after.as_ref().unwrap().resources.is_some());
+        }
+        assert_eq!(registry.audit().back().unwrap().receipt, receipt);
+    }
+
+    #[test]
+    fn output_lease_registry_request_lifecycle_covers_recover_relinquish_and_retirement() {
+        let mut registry = registry(35);
+        let first = OutputLeaseRequest::from_action(
+            "principal-lifecycle",
+            "output-lease",
+            1,
+            OutputLeaseRequestAction::Acquire {
+                owner: owner(35, 1),
+                resources: lighting(),
+                project_identity: "project".to_string(),
+                ttl_ms: 10,
+            },
+        )
+        .unwrap();
+        let first_receipt = registry.submit_request(&first, 0).unwrap();
+        let lease_id = first_receipt.lease_id.unwrap();
+        registry
+            .submit_request(
+                &OutputLeaseRequest::from_action(
+                    "principal-lifecycle",
+                    "output-lease",
+                    2,
+                    OutputLeaseRequestAction::Renew {
+                        lease_id,
+                        owner: owner(35, 1),
+                        expected_generation: 1,
+                        ttl_ms: 10,
+                    },
+                )
+                .unwrap(),
+                5,
+            )
+            .unwrap();
+        registry
+            .submit_request(
+                &OutputLeaseRequest::from_action(
+                    "principal-lifecycle",
+                    "output-lease",
+                    3,
+                    OutputLeaseRequestAction::ObserveExpiry { lease_id },
+                )
+                .unwrap(),
+                15,
+            )
+            .unwrap();
+        registry
+            .submit_request(
+                &OutputLeaseRequest::from_action(
+                    "principal-lifecycle",
+                    "output-lease",
+                    4,
+                    OutputLeaseRequestAction::Recover {
+                        lease_id,
+                        owner: owner(35, 1),
+                        expected_generation: 3,
+                        ttl_ms: 10,
+                    },
+                )
+                .unwrap(),
+                16,
+            )
+            .unwrap();
+        registry
+            .submit_request(
+                &OutputLeaseRequest::from_action(
+                    "principal-lifecycle",
+                    "output-lease",
+                    5,
+                    OutputLeaseRequestAction::Relinquish {
+                        lease_id,
+                        owner: owner(35, 1),
+                        expected_generation: 4,
+                    },
+                )
+                .unwrap(),
+                16,
+            )
+            .unwrap();
+        let second = OutputLeaseRequest::from_action(
+            "principal-lifecycle",
+            "output-lease",
+            6,
+            OutputLeaseRequestAction::Acquire {
+                owner: owner(35, 2),
+                resources: video(),
+                project_identity: "project-two".to_string(),
+                ttl_ms: 100,
+            },
+        )
+        .unwrap();
+        let second_id = registry
+            .submit_request(&second, 16)
+            .unwrap()
+            .lease_id
+            .unwrap();
+        let retired = registry
+            .submit_request(
+                &OutputLeaseRequest::from_action(
+                    "principal-lifecycle",
+                    "output-lease",
+                    7,
+                    OutputLeaseRequestAction::RetireOwner {
+                        owner: owner(35, 2),
+                    },
+                )
+                .unwrap(),
+                16,
+            )
+            .unwrap();
+        assert_eq!(retired.affected_lease_ids, vec![second_id]);
+        assert_eq!(retired.changes.len(), 1);
+        assert_eq!(
+            registry.lease_view(second_id).unwrap().snapshot.phase,
+            OutputLeasePhase::HeldOrphaned
+        );
+    }
+
+    #[test]
+    fn output_lease_registry_rate_bucket_is_burst_eight_and_clock_rollback_fails_closed() {
+        let mut registry = registry(23);
+        for request_id in 1..=8 {
+            registry
+                .submit_request(&observe_request(request_id, 1_000 + request_id), 0)
+                .unwrap();
+        }
+        let before = registry.clone();
+        assert_eq!(
+            registry.submit_request(&observe_request(9, 1_009), 0),
+            Err(OutputLeaseError::RateLimited)
+        );
+        assert_eq!(registry, before);
+        assert_eq!(
+            registry.submit_request(&observe_request(10, 1_010), 0),
+            Err(OutputLeaseError::RateLimited)
+        );
+        let refilled = registry
+            .submit_request(&observe_request(11, 1_011), 250)
+            .unwrap();
+        assert_eq!(refilled.outcome, Err(OutputLeaseError::UnknownLease));
+        assert_eq!(
+            registry.submit_request(&observe_request(12, 1_012), 200),
+            Err(OutputLeaseError::ClockRollback)
+        );
+    }
+
+    #[test]
+    fn output_lease_registry_lifecycle_recover_relinquish_and_restart_are_process_bound() {
+        let mut registry = registry(26);
+        let current = owner(26, 1);
+        let grant = registry
+            .acquire(current.clone(), lighting(), "project", 0, 10)
+            .unwrap();
+        assert!(registry.observe_expiry(grant.lease_id, 10).unwrap());
+        assert_eq!(
+            registry
+                .recover(grant.lease_id, &current, 2, 11, 10)
+                .unwrap()
+                .generation,
+            3
+        );
+        assert_eq!(
+            registry
+                .relinquish_output_lease(grant.lease_id, &current, 3, 11)
+                .unwrap()
+                .phase,
+            OutputLeasePhase::Unclaimed
+        );
+        let restarted = OutputLeaseRegistry::fresh_process(27).unwrap();
+        assert_eq!(restarted.lease_count(), 0);
+        assert_eq!(restarted.active_lease_count(), 0);
+    }
+
+    #[test]
+    fn output_lease_registry_receipt_purge_keeps_high_water_and_bounded_history() {
+        let mut registry = registry(28);
+        let first = observe_request(1, 2_000);
+        let first_receipt = registry.submit_request(&first, 0).unwrap();
+        assert_eq!(registry.receipt_count(), 1);
+        let purged = registry.purge(60_000).unwrap();
+        assert_eq!(purged.receipts_purged, 1);
+        assert_eq!(registry.receipt_count(), 0);
+        assert_eq!(registry.origin_count(), 1);
+        assert_eq!(
+            registry.submit_request(&first, 60_000),
+            Err(OutputLeaseError::ReceiptNotRetained)
+        );
+        assert_eq!(registry.origin_count(), 1);
+        assert_eq!(first_receipt.key, first.key);
+
+        for request_id in 2..=MAX_OUTPUT_LEASE_REQUESTS as u64 + 1 {
+            let request = observe_request(request_id, 2_000 + request_id);
+            let _ = registry.submit_request(&request, 60_000);
+        }
+        assert!(registry.receipt_count() <= MAX_OUTPUT_LEASE_REQUESTS);
+        assert!(registry.origin_count() <= MAX_OUTPUT_LEASE_REQUEST_ORIGINS);
+    }
+
+    #[test]
+    fn output_lease_registry_owner_project_orphan_and_transfer_are_generation_exact() {
+        let mut registry = registry(24);
+        let owner_a = owner(24, 1);
+        let owner_b = owner(24, 2);
+        let lighting_lease = registry
+            .acquire(owner_a.clone(), lighting(), "project-a", 0, 100)
+            .unwrap();
+        let video_lease = registry
+            .acquire(owner_b.clone(), video(), "project-b", 0, 100)
+            .unwrap();
+        assert_eq!(
+            registry.project_orphan(
+                "project-a",
+                &[lighting_lease.lease_id, video_lease.lease_id],
+                Some(&lighting()),
+                0,
+            ),
+            Ok(vec![lighting_lease.lease_id])
+        );
+        assert_eq!(
+            registry
+                .lease_view(lighting_lease.lease_id)
+                .unwrap()
+                .snapshot
+                .phase,
+            OutputLeasePhase::HeldOrphaned
+        );
+        assert_eq!(
+            registry
+                .lease_view(video_lease.lease_id)
+                .unwrap()
+                .snapshot
+                .phase,
+            OutputLeasePhase::HeldActive
+        );
+        assert_eq!(
+            registry.retire_owner(&owner_b, 0),
+            Ok(vec![video_lease.lease_id])
+        );
+        let before = registry.clone();
+        assert_eq!(
+            registry.force_transfer(lighting_lease.lease_id, 1, owner(24, 3), 0, 100,),
+            Err(OutputLeaseError::StaleGeneration)
+        );
+        assert_eq!(registry, before);
+    }
+
+    #[test]
+    fn output_lease_registry_capacity_purge_and_id_overflow_preserve_live_authority() {
+        let mut registry = registry(25);
+        for incarnation in 1..=MAX_OUTPUT_LEASES as u64 {
+            let grant = registry
+                .acquire(owner(25, incarnation), lighting(), "project", 0, 100)
+                .unwrap();
+            registry
+                .relinquish_output_lease(grant.lease_id, &owner(25, incarnation), 1, 0)
+                .unwrap();
+        }
+        let live = registry
+            .acquire(owner(25, 99), video(), "live", 0, 100)
+            .unwrap_err();
+        assert_eq!(live, OutputLeaseError::LeaseCapacity);
+        let purged = registry.purge(60_000).unwrap();
+        assert_eq!(purged.unclaimed_leases_purged, MAX_OUTPUT_LEASES);
+        let grant = registry
+            .acquire(owner(25, 99), video(), "live", 60_000, 100)
+            .unwrap();
+        let before = registry.clone();
+        registry.next_lease_id = u64::MAX;
+        assert_eq!(
+            registry.acquire(owner(25, 100), lighting(), "overflow", 60_000, 100),
+            Err(OutputLeaseError::LeaseIdExhausted)
+        );
+        assert_eq!(
+            registry.leases.get(&grant.lease_id),
+            before.leases.get(&grant.lease_id)
+        );
+        assert_eq!(registry.resource_index, before.resource_index);
+    }
+}
+
+// The managed keepalive is a production child of the lease authority so only
+// this parent registry can consume its private CAS capabilities and issue its
+// private completion receipts.  Runtime wiring remains a later tranche.
+#[path = "output_lease_keepalive.rs"]
+pub(crate) mod output_lease_keepalive;
+
+#[cfg(test)]
+#[path = "output_lease_managed_keepalive_tests.rs"]
+mod output_lease_managed_keepalive_tests;
+
+#[cfg(test)]
+#[path = "video_authoring_lease_registry_tests.rs"]
+mod video_authoring_lease_registry_tests;

@@ -1,0 +1,4669 @@
+//! Local-only control-plane inventory.
+//!
+//! This module intentionally provides discovery metadata, not an execution
+//! transport.  It is compiled from the same `generate_handler!` source that
+//! Tauri uses so a newly registered command is fail-closed as R5/Unavailable
+//! until an explicit, reviewed R0 classification is added here.
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    sync::LazyLock,
+};
+
+use engine::control_plane_engine_command_descriptors;
+use io::{control_plane_midi_osc_dmx_descriptors, control_plane_remote_descriptors};
+use protocol::control_plane::{
+    OperationAuditRequirement, OperationAvailability, OperationCapability, OperationClass,
+    OperationDescriptor, OperationIdempotency, OperationRegistry, OperationRisk,
+    OperationSourceFamily, SchemaIdentity, CONTROL_PLANE_SCHEMA_VERSION,
+};
+use protocol::control_plane_command::{
+    CUE_LIST_DELETE_OPERATION_ID, CUE_LIST_RENAME_OPERATION_ID, CUE_LIST_REORDER_OPERATION_ID,
+    OUTPUT_BLACKOUT_RELEASE_OPERATION_ID, OUTPUT_BLACKOUT_SET_OPERATION_ID,
+    OUTPUT_CONTROL_AUTHORITY_QUERY_OPERATION_ID, OUTPUT_CONTROL_COMMAND_SCHEMA_VERSION,
+    OUTPUT_DISPLAY_ADD_OPERATION_ID, OUTPUT_DISPLAY_WINDOW_SET_OPEN_OPERATION_ID,
+    OUTPUT_EXTERNAL_ADD_OPERATION_ID, OUTPUT_VIDEO_CONFIGURE_OPERATION_ID,
+    OUTPUT_VIDEO_REMOVE_OPERATION_ID,
+    OUTPUT_DSF2026_ARTNET_ACCEPTANCE_PROBE_OPERATION_ID,
+    OUTPUT_DSF2026_ARTNET_ACCEPTANCE_PROBE_RECONCILE_OPERATION_ID, OUTPUT_ENABLE_OPERATION_ID,
+    OUTPUT_LEASE_ACQUIRE_OPERATION_ID, OUTPUT_LEASE_AUTHORITY_QUERY_OPERATION_ID,
+    OUTPUT_LEASE_FORCE_TRANSFER_OPERATION_ID,
+    OUTPUT_LEASE_RECOVER_OPERATION_ID, OUTPUT_LEASE_RELINQUISH_OPERATION_ID,
+    OUTPUT_LEASE_RENEW_OPERATION_ID, OUTPUT_OWNERSHIP_ARM_OPERATION_ID,
+    OUTPUT_GROUP_SUBMASTER_SET_OPERATION_ID, OUTPUT_LIGHTING_MASTER_SET_OPERATION_ID,
+    OUTPUT_VIDEO_CLIP_LAUNCH_OPERATION_ID, OUTPUT_VIDEO_CLIP_TAKE_OPERATION_ID,
+    OUTPUT_VIDEO_MASTER_SET_OPERATION_ID,
+    OUTPUT_SHOW_ARTNET_LOOPBACK_ROUTE_ENABLE_OPERATION_ID,
+    OUTPUT_NETWORK_DMX_ROUTES_SET_OPERATION_ID,
+    OUTPUT_SHOW_SERIAL_DMX_SAFETY_BLACKOUT_ROUTE_ENABLE_OPERATION_ID,
+    OUTPUT_SHOW_SERIAL_DMX_SAFETY_BLACKOUT_ROUTE_STOP_OPERATION_ID,
+    OUTPUT_USB_DMX_UNIVERSE_ROUTE_ENABLE_OPERATION_ID,
+    OUTPUT_USB_DMX_UNIVERSE_ROUTE_STOP_OPERATION_ID,
+    OUTPUT_SHOW_SPOUT_OUTPUTS_ENABLE_OPERATION_ID, OUTPUT_SHOW_SPOUT_OUTPUTS_RESET_OPERATION_ID,
+    OUTPUT_STANDBY_TAKEOVER_OPERATION_ID, OUTPUT_VIDEO_COMPOSITION_ASSIGN_OPERATION_ID,
+    SAFETY_BLACKOUT_ENGAGE_OPERATION_ID, SCENE_CREATE_AUTHORITATIVE_V1_OPERATION_ID,
+    SET_EFFECT_ENABLED_OPERATION_ID, TIMELINE_FOLLOW_ABORT_AUTHORITY_QUERY_OPERATION_ID,
+    TIMELINE_FOLLOW_ABORT_OPERATION_ID, TIMELINE_LOOP_RUNTIME_AUTHORITY_QUERY_OPERATION_ID,
+    TIMELINE_LOOP_RUNTIME_OPERATION_ID, TIMELINE_TRANSPORT_AUTHORITY_QUERY_OPERATION_ID,
+    TIMELINE_TRANSPORT_SET_PLAYING_OPERATION_ID,
+};
+use protocol::control_plane_registry_v2::{
+    AdapterPolicy, CanonicalControlPlaneRegistry, CanonicalOperationDescriptor,
+    CanonicalRegistryValidationError, CanonicalSourceFamily, ConsentPolicy, PayloadPolicy,
+    RatePolicy, ReceiptPolicy, SourceDisposition, SourceInventoryDescriptor, SourceKey, SourceRole,
+    TypedSchemaProjection,
+};
+use protocol::control_plane_project::{PROJECT_NEW_OPERATION_ID, PROJECT_OPEN_OPERATION_ID, PROJECT_BACKUP_RESTORE_OPERATION_ID,
+    PROJECT_REPLACEMENT_AUTHORITY_OPERATION_ID};
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+const MAX_REGISTERED_OPERATIONS: usize = 2048;
+const OUTPUT_DISPLAY_ADD_AUTHORITY_QUERY_OPERATION_ID: &str =
+    "syndocal.query.output.display.add.authority.v1";
+const OUTPUT_DSF2026_ARTNET_ACCEPTANCE_PROBE_STATUS_QUERY_OPERATION_ID: &str =
+    "syndocal.query.output.dsf2026_artnet_acceptance_probe.status.v1";
+const MAIN_RS_SOURCE: &str = include_str!("main.rs");
+const FRONTEND_INVOKE_MANIFEST: &str = include_str!("../../src/tauri-invoke-manifest.json");
+const KEYBOARD_SHORTCUT_SOURCE_MANIFEST: &str =
+    include_str!("../../src/keyboard-shortcut-source-manifest.json");
+const KEYBOARD_SHORTCUT_SOURCE_MANIFEST_SCHEMA_VERSION: u16 = 1;
+const KEYBOARD_APP_SHORTCUT_SOURCE_COUNT: usize = 30;
+const KEYBOARD_PROJECT_FILE_SHORTCUT_SOURCE_COUNT: usize = 3;
+const FROZEN_TAURI_ROUTE_ADMISSION_COUNT: usize = 595;
+const FROZEN_TAURI_ROUTE_ADMISSION_SHA256: &str =
+    "9eb5bf1fa3833fa7a821759565f4b46cb4fc1da234d466ca28cf0f348aa055ec";
+/// The command source is parsed and validated exactly once.  Local discovery
+/// calls only clone this immutable, validated value; they never parse source
+/// text or make an external request on the invocation path.
+static VALIDATED_REGISTRY: LazyLock<Result<OperationRegistry, ControlPlaneRegistryError>> =
+    LazyLock::new(build_registry);
+static VALIDATED_CANONICAL_REGISTRY: LazyLock<
+    Result<CanonicalControlPlaneRegistry, ControlPlaneRegistryError>,
+> = LazyLock::new(build_canonical_registry);
+
+/// Server-side admission class for the exact production Tauri inventory.
+/// `None` is the fail-closed answer for every unregistered command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TauriRouteAdmissionClass {
+    ReadOnly,
+    RendererTicketedProjectMutation,
+    BackendAuthoritativeProjectMutation,
+    ProjectReplacement,
+    ProjectHistory,
+    /// Payloadless same-machine output activation.  Its handler owns the R4
+    /// lease/safety fence, so it must not be admitted as a project/runtime
+    /// route merely because it changes a physical endpoint.
+    LocalPhysicalMutation,
+    RuntimeMutation,
+    FileExportMutation,
+    SafetyMutation,
+    RecoveryMaintenance,
+    /// Local broker lifecycle; edits retain their normal project transaction.
+    AgentTransportMaintenance,
+    Retired,
+}
+
+static TAURI_ROUTE_ADMISSION_CLASSES: LazyLock<
+    Result<BTreeMap<String, TauriRouteAdmissionClass>, ControlPlaneRegistryError>,
+> = LazyLock::new(|| {
+    let registered = registered_tauri_command_names_from_source(MAIN_RS_SOURCE)?;
+    let inventory_fingerprint = format!("{:x}", Sha256::digest(registered.join("\n").as_bytes()));
+    if registered.len() != FROZEN_TAURI_ROUTE_ADMISSION_COUNT
+        || inventory_fingerprint != FROZEN_TAURI_ROUTE_ADMISSION_SHA256
+    {
+        return Err(ControlPlaneRegistryError::MissingRegistryDescriptor(
+            format!(
+                "D3 admission inventory changed (count {}, SHA-256 {inventory_fingerprint}); review every route class before admission",
+                registered.len(),
+            ),
+        ));
+    }
+    let mut classes = BTreeMap::new();
+    for command in registered {
+        let class = classify_registered_tauri_route(&command).ok_or_else(|| {
+            ControlPlaneRegistryError::MissingRegistryDescriptor(format!(
+                "D3 admission class is missing for registered Tauri command '{command}'"
+            ))
+        })?;
+        classes.insert(command, class);
+    }
+    Ok(classes)
+});
+
+pub fn tauri_route_admission_class(command: &str) -> Option<TauriRouteAdmissionClass> {
+    TAURI_ROUTE_ADMISSION_CLASSES
+        .as_ref()
+        .ok()?
+        .get(command)
+        .copied()
+}
+
+fn classify_registered_tauri_route(command: &str) -> Option<TauriRouteAdmissionClass> {
+    use TauriRouteAdmissionClass as Class;
+    let class = if matches!(
+        command,
+        "agent_bridge_claim_v1"
+            | "agent_bridge_complete_v1"
+            | "agent_bridge_register_v1"
+            | "agent_bridge_execute_native_v1"
+            | "agent_authority_approve_pairing_v1"
+            | "agent_authority_authenticate_v1"
+            | "agent_authority_authorize_with_consent_v1"
+            | "agent_authority_begin_pairing_v1"
+            | "agent_authority_clear_kill_switch_v1"
+            | "agent_authority_grant_v1"
+            | "agent_authority_kill_switch_v1"
+            | "agent_authority_prepare_consent_v1"
+            | "agent_authority_promote_v1"
+            | "agent_authority_revoke_v1"
+            | "agent_authority_status_v1"
+    ) {
+        Class::AgentTransportMaintenance
+    } else if matches!(
+        command,
+        "commit_prepared_media_asset_relink"
+            | "commit_prepared_media_assets"
+            | "commit_prepared_video_file_layer"
+            | "commit_prepared_still_image_layer"
+            | "commit_prepared_local_media_layers"
+            | "commit_prepared_bootstrap_vj_show"
+            | "load_phase1_sample_project"
+            | "run_phase1_smoke"
+            | "set_blackout"
+            | "set_all_blackout"
+            | "set_video_blackout"
+            | "set_video_output_blackout"
+            | "take_over_standby"
+            | "load_effect_preset"
+            | "load_effect_preset_for_target"
+            | "load_sample_effect_preset"
+            | "load_sample_effect_bundle"
+            | "load_node_graph_preset_file"
+            | "save_node_graph"
+            | "remove_node_graph"
+            | "add_timeline_cue_event"
+            | "reconform_timeline_to_bpm"
+            | "set_group_fixture_limits"
+            | "set_video_cue_point"
+            | "set_video_output_mapping_field"
+            | "apply_builtin_video_isf_effect"
+            | "apply_video_output_mapping_preset"
+    ) {
+        Class::Retired
+    } else if matches!(
+        command,
+        "new_project"
+            | "new_project_control_plane_v1"
+            | "open_project_control_plane_v1"
+            | "restore_project_backup_control_plane_v1"
+            | "load_user_template"
+            | "load_project"
+            | "import_daslight_project"
+            | "import_daslight_project_with_result"
+            | "load_project_path"
+            | "load_project_backup"
+            | "load_startup_project"
+    ) {
+        Class::ProjectReplacement
+    } else if matches!(
+        command,
+        "clear_project_history" | "undo_project_transaction" | "redo_project_transaction"
+    ) {
+        Class::ProjectHistory
+    } else if matches!(
+        command,
+        // The role handlers apply Standby only: they disarm output and can
+        // never arm it, which needs the authenticated OutputControl path.
+        "safety_blackout_engage_v1" | "set_output_ownership_role" | "arm_output_ownership_role"
+    ) {
+        Class::SafetyMutation
+    } else if matches!(
+        command,
+        "enable_show_serial_dmx_safety_blackout_route_v1"
+            | "stop_show_serial_dmx_safety_blackout_route_v1"
+            | "enable_usb_dmx_universe_route_v1"
+            | "stop_usb_dmx_universe_route_v1"
+            | "enable_show_spout_outputs_v2"
+            | "reset_show_spout_outputs_v1"
+            | "send_dsf2026_artnet_acceptance_probe_v1"
+            | "acknowledge_dsf2026_artnet_acceptance_probe_in_doubt_v1"
+    ) {
+        Class::LocalPhysicalMutation
+    } else if matches!(
+        command,
+        "lock_project_operator_session"
+            | "unlock_project_operator_session"
+            | "adopt_project_publication_owner_v1"
+            | "resolve_missing_project_publication_v1"
+            | "get_project_publication_receipt_v1"
+            | "acknowledge_project_publication_receipt_v1"
+            | "abandon_project_publication_v1"
+            | "acknowledge_project_recovery_applied"
+            | "load_project_checkpoint"
+            | "begin_project_transaction"
+            | "commit_project_transaction"
+            | "cancel_project_transaction"
+            | "query_project_transaction"
+            | "adopt_project_transaction"
+            | "acknowledge_project_transaction"
+            | "register_project_transaction_owner"
+            | "start_media_asset_operation"
+            | "start_media_asset_availability_operation"
+            | "cancel_media_asset_operation"
+            | "cancel_native_thumbnail_request_v1"
+            | "get_media_asset_operation_terminal_result"
+            | "get_video_clip_slot_operation_terminal_result"
+            | "get_video_effect_catalog_operation_terminal_result"
+            | "get_timeline_advanced_operation_terminal_result"
+            | "get_timeline_follow_operation_terminal_result"
+            | "get_timeline_follow_runtime"
+            | "abort_timeline_follow"
+            | "abort_timeline_follow_runtime_v1"
+    ) {
+        Class::RecoveryMaintenance
+    } else if is_renderer_ticketed_project_mutation(command) {
+        Class::RendererTicketedProjectMutation
+    } else if is_backend_authoritative_project_mutation(command) {
+        Class::BackendAuthoritativeProjectMutation
+    } else if is_tauri_file_export_mutation(command) {
+        Class::FileExportMutation
+    } else if is_tauri_read_only_route(command) {
+        Class::ReadOnly
+    } else if is_tauri_runtime_mutation(command) {
+        Class::RuntimeMutation
+    } else {
+        return None;
+    };
+    Some(class)
+}
+
+fn is_tauri_file_export_mutation(command: &str) -> bool {
+    matches!(
+        command,
+        "install_application_update"
+            | "save_project_control_plane_v1"
+            | "save_project_as_control_plane_v1"
+            | "save_user_template_control_plane_v1"
+            | "create_project_backup_control_plane_v1"
+            | "delete_project_backup_control_plane_v1"
+            | "manage_project_backup_deletion_journal_v1"
+            | "acknowledge_project_file_control_plane_v1"
+            | "save_project_v1"
+            | "save_project_as_v1"
+            | "save_user_template_v1"
+            | "save_project_backup_v1"
+            | "import_video_output_bitmap_mask"
+            | "download_gdtf_from_url"
+            | "download_gdtf_from_share"
+            | "cache_gdtf_from_share"
+            | "save_custom_fixture_profile"
+            | "delete_project_backup"
+            | "export_diagnostic_package"
+            | "prepare_diagnostic_export_v1"
+            | "finish_diagnostic_export_v1"
+            | "save_engine_telemetry_report"
+            | "save_effect_preset"
+            | "save_fixture_preset"
+            | "save_midi_mappings"
+            | "save_osc_mappings"
+            | "save_node_graph_preset_file"
+            | "save_stage_map_preset_file"
+            | "save_video_output_mapping_preset_file"
+            // Writes a new derived clip beside its source; the project is
+            // changed only by the ordinary media import that follows.
+            | "render_media_asset_seamless_loop_v1"
+    )
+}
+
+fn is_tauri_read_only_route(command: &str) -> bool {
+    matches!(
+        command,
+        "capture_pane_window_placements"
+            | "check_application_update"
+            | "dmx_input_status"
+            | "get_application_update_configuration"
+            | "get_asio_output_capabilities"
+            | "get_asio_output_status"
+            | "get_builtin_video_isf_effect"
+            | "get_control_plane_canonical_registry"
+            | "get_control_plane_operation_registry"
+            | "get_control_plane_query_capabilities"
+            | "get_control_plane_query_schema_catalog"
+            | "get_debug_video_output_preview"
+            | "get_debug_video_output_test_pattern"
+            | "get_debug_video_preview"
+            | "get_engine_telemetry_report"
+            | "get_external_video_io_plans"
+            | "get_external_video_transport_status"
+            | "get_fixture_groups"
+            | "get_fixture_profile_health"
+            | "get_live_audio_input_capabilities"
+            | "get_live_video_monitor_frame"
+            | "get_live_video_output_health"
+            | "get_media_asset_preview_frame"
+            | "get_media_asset_thumbnail"
+            | "get_operator_policy"
+            | "get_operator_selection_context"
+            | "get_output_ownership_status"
+            | "get_pending_pane_window_close"
+            | "get_project_authority_bundle"
+            | "get_project_checkpoint"
+            | "get_project_checkpoint_bundle"
+            | "get_project_control_mappings"
+            | "get_project_history_status"
+            | "get_project_recovery_authority_status"
+            | "get_serial_dmx_machine_binding_status_v1"
+            | "get_show_clock_status"
+            | "get_show_serial_dmx_safety_blackout_route_status_v1"
+            | "get_usb_dmx_universes_v1"
+            | "get_snapshot"
+            | "get_snapshot_delta"
+            | "get_timeline_cue_audio_status"
+            | "get_video_clip_slot_runtime"
+            | "get_video_composition_plans"
+            | "get_video_layer_thumbnail"
+            | "get_video_layer_transition_runtime"
+            | "get_video_output_render_plans"
+            | "get_video_output_window_observation_v1"
+            | "get_video_output_window_statuses"
+            | "get_video_preview_diagnostics"
+            | "get_video_runtime_status"
+            | "get_dj_link_machine_status"
+            | "get_extensions_status"
+            | "get_visualizer_external_model_assets"
+            | "get_visualizer_model_asset_cache_summary"
+            | "get_visualizer_model_render_plans"
+            | "get_visualizer_render_payload"
+            | "get_visualizer_resolved_render_payload"
+            | "get_visualizer_scene"
+            | "get_vj_preview_transport"
+            | "inspect_media_asset_availability"
+            | "inspect_reserved_media_asset_availability"
+            | "list_audio_input_devices"
+            | "list_audio_output_devices"
+            | "list_dj_link_wired_candidates"
+            | "list_gdtf_fixture_cache"
+            | "list_ltc_input_devices_v1"
+            | "list_midi_inputs"
+            | "list_midi_outputs"
+            | "list_project_backups"
+            | "list_serial_ports"
+            | "list_verified_fixture_profiles"
+            | "list_video_camera_profiles"
+            | "list_ndi_sources_v1"
+            | "discover_syphon_sources"
+            | "list_video_display_monitors"
+            | "live_audio_input_backends"
+            | "live_audio_input_levels"
+            | "live_audio_input_status"
+            | "ltc_input_status_v1"
+            | "midi_feedback_status"
+            | "mtc_output_status_v1"
+            | "poll_control_plane_observation_events"
+            | "poll_project_authority_bundle"
+            | "preview_custom_fixture_profile"
+            | "probe_video_camera_profile"
+            | "query_control_plane_output_ownership"
+            | "query_control_plane_project_authority"
+            | "query_project_replacement_authority_v1"
+            | "query_project_file_authority_v1"
+            | "query_project_backup_authority_v1"
+            | "inspect_project_backup_control_plane_v1"
+            | "list_project_backups_control_plane_v1"
+            | "query_project_backup_delete_status_v1"
+            | "query_project_backup_deletion_journal_v1"
+            | "query_project_backup_deletion_management_status_v1"
+            | "query_project_file_status_v1"
+            | "query_control_plane_runtime_generations"
+            | "query_display_add_lease_authority_v1"
+            | "query_dsf2026_artnet_acceptance_probe_status_v1"
+            | "query_output_control_authority_v1"
+            | "allocate_output_control_request_id_v1"
+            | "query_output_lease_authority_v1"
+            | "query_video_authoring_lease_authority_v1"
+            | "query_timeline_follow_abort_authority_v1"
+            | "query_timeline_loop_runtime_authority_v1"
+            | "query_timeline_transport_authority_v1"
+            | "remote_access_urls"
+            | "remote_control_status"
+            | "search_gdtf_share"
+            | "select_gdtf_file"
+            | "select_media_relink_folder"
+            | "select_standby_sync_directory"
+            | "select_timeline_audio_clip_file"
+            | "select_video_isf_file"
+            | "select_video_source_file"
+            | "select_video_source_files"
+            | "standby_sync_status"
+            | "video_audio_monitor_status"
+            | "video_output_recording_status"
+    )
+}
+
+fn is_tauri_runtime_mutation(command: &str) -> bool {
+    matches!(
+        command,
+        "acquire_output_lease_v2"
+            | "add_display_output_v2"
+            | "add_external_output_v2"
+            | "configure_video_output_v2"
+            | "remove_video_output_v2"
+            | "add_local_media_layers"
+            | "add_still_image_layer"
+            | "add_video_file_layer"
+            | "analyze_timeline_audio_clip_path"
+            | "arm_dj_link_machine"
+            | "arm_output_control_v2"
+            | "arm_show_clock_output"
+            | "assign_video_output_composition_v2"
+            | "begin_media_asset_preview"
+            | "bootstrap_vj_show"
+            | "cancel_pane_window_close"
+            | "cancel_queued_video_clip_slot_authoritative"
+            | "clear_cue_live_modifier"
+            | "clear_fixture_flags"
+            | "clear_programmer"
+            | "clear_vj_preview"
+            | "close_open_video_output_windows"
+            | "close_pane_window"
+            | "close_video_output_window"
+            | "configure_takeover_recording_v1"
+            | "connect_midi_clock"
+            | "connect_midi_control"
+            | "connect_midi_feedback"
+            | "create_custom_fixture_profile"
+            | "disconnect_midi_clock"
+            | "disconnect_midi_control"
+            | "disconnect_midi_feedback"
+            | "disconnect_remote_client"
+            | "disarm_dj_link_machine"
+            | "discover_art_rdm_devices"
+            | "discover_usb_rdm_devices"
+            | "set_network_dmx_routes_v1"
+            | "enable_show_art_net_loopback_route_v1"
+            | "send_dsf2026_artnet_acceptance_probe_v1"
+            | "enable_output_control_v2"
+            | "end_media_asset_preview"
+            | "fade_video_layer_opacity"
+            | "finalize_prepared_media_asset_relink"
+            | "finalize_prepared_media_assets"
+            | "force_transfer_output_lease_v2"
+            | "hold_show_clock"
+            | "import_gdtf"
+            | "jump_video_cue_point"
+            | "jump_video_cue_point_relative"
+            | "launch_video_clip_slot_authoritative"
+            | "launch_video_layer_transition_bus_authoritative"
+            | "learn_dmx_control"
+            | "learn_midi_control"
+            | "learn_osc_control"
+            | "list_asio_output_drivers"
+            | "load_custom_fixture_profile"
+            | "load_gdtf_model_file"
+            | "load_gdtf_wheel_media"
+            | "load_midi_mappings"
+            | "load_osc_mappings"
+            | "load_stage_map_preset_file"
+            | "load_verified_fixture_profile"
+            | "open_pane_window"
+            | "open_video_output_window"
+            | "play_video_layer_audio_monitor"
+            | "prepare_local_media_assets"
+            | "prepare_media_asset_relink"
+            | "prepare_reserved_media_asset_relink"
+            | "prepare_reserved_media_assets"
+            | "pulse_video_layer_isf_event"
+            | "queue_video_clip_slot_authoritative"
+            | "recover_output_lease_v2"
+            // Local authoring admission only. Discovery remains R5/Unavailable
+            // until an external adapter and query schema are separately reviewed.
+            | "replace_video_authoring_lease_v1"
+            | "refresh_video_layer_metadata"
+            | "release_blackout_output_control_v2"
+            | "set_blackout_output_control_v2"
+            | "set_group_submaster_output_control_v2"
+            | "set_lighting_master_output_control_v2"
+            | "set_video_master_output_control_v2"
+            | "launch_video_clip_output_control_v2"
+            | "take_video_clip_output_control_v2"
+            | "release_cue"
+            | "release_video_layer_transition_bus_authoritative"
+            | "relink_media_asset"
+            | "relinquish_output_lease_v2"
+            | "renew_output_lease_v2"
+            | "rearm_show_clock"
+            | "request_dj_link_operator_return_to_dj_control"
+            | "reset_engine_telemetry"
+            | "reselect_asio_output_profile"
+            | "revalidate_asio_program_cue_output"
+            | "rotate_dj_link_token"
+            | "commit_timeline_loop_runtime_v1"
+            | "seek_direct_child_timeline"
+            | "seek_timeline"
+            | "seek_timeline_beat"
+            | "seek_video_clip_slot_authoritative"
+            | "seek_vj_preview"
+            | "select_serial_dmx_machine_binding_v1"
+            | "select_usb_dmx_universe_binding_v1"
+            | "clear_usb_dmx_universe_binding_v1"
+            | "select_normal_audio_output"
+            | "send_art_rdm_request"
+            | "send_dmx_routes_test_frame"
+            | "send_dmx_test_frame"
+            | "send_midi_feedback"
+            | "schedule_show_clock_action"
+            | "send_usb_rdm_request"
+            | "set_asio_output_solo"
+            | "set_asio_output_test"
+            | "set_explicit_wdm_cue_test"
+            | "set_audio_control_runtime"
+            | "set_auto_vj_armed"
+            | "set_auto_vj_hold"
+            | "set_cue_fade_paused"
+            | "set_cue_live_modifier"
+            | "set_direct_child_timeline_playing"
+            | "set_display_output_window_open_v2"
+            | "set_fixture_highlight"
+            | "set_fixture_park"
+            | "set_fixture_solo"
+            | "set_group_highlight"
+            | "set_group_park"
+            | "set_group_solo"
+            | "set_group_strobe"
+            | "set_group_submaster"
+            | "set_lighting_master"
+            | "set_machine_timeline_cue_audio_settings"
+            | "set_midi_feedback_auto"
+            | "set_extensions"
+            | "set_operator_feature_fader"
+            | "set_operator_selection_context"
+            | "set_playback_executor_level"
+            | "set_playback_master"
+            | "set_program_audio_handoff_config"
+            | "set_programmer_attribute"
+            | "set_programmer_fixture_attribute_batch"
+            | "set_programmer_group_attribute"
+            | "set_programmer_mode"
+            | "set_timeline_playing"
+            | "set_timeline_transport_playing_runtime_v1"
+            | "set_video_layer_audio_monitor_volume"
+            | "set_video_master_opacity"
+            | "set_vj_preview_effect"
+            | "set_vj_preview_playing"
+            | "set_vj_preview_speed"
+            | "stage_vj_preview_layer"
+            | "start_art_rdm_full_discovery"
+            | "start_asio_program_cue_output"
+            | "start_dmx_input"
+            | "start_live_audio_input"
+            | "start_ltc_input_v1"
+            | "start_mtc_output_v1"
+            | "start_osc_input"
+            | "start_remote_control"
+            | "start_show_clock"
+            | "start_standby_sync"
+            | "start_video_output_recording"
+            | "stop_close_asio_program_cue_output"
+            | "stop_dmx_input"
+            | "stop_live_audio_input"
+            | "stop_ltc_input_v1"
+            | "stop_mtc_output_v1"
+            | "stop_osc_input"
+            | "stop_remote_control"
+            | "stop_show_clock"
+            | "stop_standby_sync"
+            | "stop_video_layer_audio_monitor"
+            | "stop_video_output_recording"
+            | "sync_ableton_link_clock"
+            | "sync_external_video_transports"
+            | "sync_ltc_timecode"
+            | "sync_open_video_output_windows"
+            | "sync_video_output_window"
+            | "take_open_project_paths"
+            | "take_over_output_control_v2"
+            | "tap_bpm"
+            | "trigger_cue"
+            | "trigger_cue_list_next"
+            | "trigger_cue_list_previous"
+            | "trigger_next_cue"
+            | "trigger_playback_executor"
+            | "trigger_previous_cue"
+            | "use_fixture_profile"
+    )
+}
+
+fn is_backend_authoritative_project_mutation(command: &str) -> bool {
+    matches!(
+        command,
+        "commit_prepared_media_assets_authoritative"
+            | "commit_prepared_media_asset_relink_authoritative"
+            | "commit_prepared_video_file_layer_authoritative"
+            | "commit_prepared_still_image_layer_authoritative"
+            | "commit_prepared_local_media_layers_authoritative"
+            | "commit_prepared_bootstrap_vj_show_authoritative"
+            | "create_video_clip_slot_authoritative"
+            | "assign_video_clip_slot_asset_authoritative"
+            | "update_video_clip_slot_authoritative"
+            | "remove_video_clip_slot_authoritative"
+            | "reorder_video_clip_slots_authoritative"
+            | "duplicate_video_clip_slot_authoritative"
+            | "set_default_video_clip_slot_authoritative"
+            | "import_and_assign_video_clip_slots_authoritative"
+            | "apply_video_effect_catalog_authoritative"
+            | "apply_timeline_advanced_authoritative"
+            | "set_project_control_mappings"
+            | "set_video_layer_isf_effect"
+            | "add_video_layer_isf_effect"
+            | "add_builtin_video_isf_effect"
+            | "move_video_layer_isf_effect"
+            | "remove_video_layer_isf_effect"
+            | "set_video_layer_isf_effect_enabled"
+            | "reset_video_layer_isf_effect"
+            | "set_video_layer_isf_control"
+            | "set_effect_enabled"
+            | "create_scene_authoritative_v1"
+            | "create_cue_list"
+            | "rename_cue_list"
+            | "delete_cue_list"
+            | "reorder_cue_lists"
+    )
+}
+
+fn is_renderer_ticketed_project_mutation(command: &str) -> bool {
+    matches!(
+        command,
+        "analyze_audio_file"
+            | "set_bpm"
+            | "clear_timeline_audio"
+            | "add_timeline_audio_clip"
+            | "update_timeline_audio_clip"
+            | "remove_timeline_audio_clip"
+            | "set_cue_child_timeline_audio_clip_output_bus"
+            | "set_timeline_audio_clip_output_bus"
+            | "set_timeline_audio_master"
+            | "set_timeline_metronome"
+            | "patch_fixtures"
+            | "remove_fixture"
+            | "repair_fixture_profile"
+            | "set_fixture_patch"
+            | "set_fixture_patches"
+            | "set_fixture_limits"
+            | "set_fixture_groups"
+            | "create_fixture_group"
+            | "rename_fixture_group"
+            | "recolor_fixture_group"
+            | "delete_fixture_group"
+            | "undo_delete_fixture_group"
+            | "set_attribute"
+            | "stream_fixture_attribute_v1"
+            | "set_fixture_attribute_batch"
+            | "set_group_attribute"
+            | "commit_programmer"
+            | "set_fixture_transform"
+            | "set_fixture_transforms"
+            | "set_stage_map_config"
+            | "set_output_config"
+            | "set_dmx_outputs"
+            | "create_reference_palette"
+            | "update_reference_palette"
+            | "remove_reference_palette"
+            | "apply_reference_palette"
+            | "set_cue_palette_targets"
+            | "create_playback_executor"
+            | "update_playback_executor"
+            | "remove_playback_executor"
+            | "update_cue_from_current"
+            | "update_cue_from_current_batch"
+            | "set_cue_effect_targets"
+            | "add_cue_owned_effect"
+            | "set_cue_metadata"
+            | "set_cue_child_timeline"
+            | "set_cue_steps"
+            | "set_cue_color"
+            | "set_cue_live_modifier_defaults"
+            | "set_group_color"
+            | "move_cue"
+            | "move_cue_between_scene_banks_batch"
+            | "duplicate_cue"
+            | "remove_cue"
+            | "set_timeline_cue_event"
+            | "add_timeline_scene_block"
+            | "set_timeline_scene_block"
+            | "remove_timeline_scene_block"
+            | "snap_timeline_items"
+            | "remove_timeline_event"
+            | "add_timeline_layer"
+            | "update_timeline_layer"
+            | "remove_timeline_layer"
+            | "reorder_timeline_layers"
+            | "add_timeline_automation"
+            | "add_timeline_group_automation"
+            | "set_timeline_automation"
+            | "add_timeline_video_automation"
+            | "set_timeline_video_automation"
+            | "set_timeline_automation_enabled"
+            | "remove_timeline_automation"
+            | "add_video_input_layer"
+            | "add_video_generator_layer"
+            | "set_video_layer_generator"
+            | "duplicate_video_layer"
+            | "remove_video_layer"
+            | "set_video_layer_order"
+            | "set_video_layer_label"
+            | "set_video_layer_state"
+            | "launch_video_clip"
+            | "take_video_clip"
+            | "set_auto_vj_config"
+            | "set_video_ab_mix"
+            | "stop_video_clip"
+            | "add_video_cue_point"
+            | "remove_video_cue_point"
+            | "set_video_layer_blend_mode"
+            | "add_video_composition"
+            | "remove_video_composition"
+            | "set_video_composition_layers"
+            | "set_video_composition_timeline_layers"
+            | "add_video_output"
+            | "remove_video_output"
+            | "set_video_output_config"
+            | "set_video_output_enabled"
+            | "set_video_output_opacity"
+            | "fade_video_output_opacity"
+            | "set_video_output_mapping"
+            | "save_video_output_mapping_preset"
+            | "remove_video_output_mapping_preset"
+            | "load_video_output_mapping_preset_file"
+            | "add_lfo_effect"
+            | "add_position_wave_effect"
+            | "add_color_effect"
+            | "add_chaser_effect"
+            | "add_move_effect"
+            | "add_value_effect"
+            | "add_curve_effect"
+            | "add_mapping_effect"
+            | "add_color_mapping_effect"
+            | "update_lfo_effect"
+            | "update_position_wave_effect"
+            | "update_color_effect"
+            | "update_chaser_effect"
+            | "update_move_effect"
+            | "update_value_effect"
+            | "update_curve_effect"
+            | "update_mapping_effect"
+            | "update_color_mapping_effect"
+            | "set_node_graph_enabled"
+            | "set_effect_video_target_position"
+            | "move_effect"
+            | "duplicate_effect"
+            | "remove_effect"
+            | "load_fixture_preset"
+            | "load_fixture_preset_for_group"
+            | "load_fixture_preset_for_all_matching"
+            | "save_stage_map_preset"
+            | "apply_stage_map_preset"
+            | "remove_stage_map_preset"
+            | "import_stage_map_preset"
+            | "add_stage_object"
+            | "set_stage_object"
+            | "remove_stage_object"
+            | "set_touch_surface"
+            | "set_operator_policy"
+            | "clear_operator_policy"
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlPlaneRegistryError {
+    HandlerMarkerMissing,
+    MultipleHandlerMarkers,
+    HandlerClosingBracketMissing,
+    InvalidCommandName(String),
+    DuplicateCommandName(String),
+    InvalidFrontendInvokeManifest,
+    DuplicateFrontendInvokeCommand(String),
+    UnregisteredFrontendInvokeCommand(String),
+    InvalidKeyboardShortcutSourceManifest,
+    DuplicateKeyboardShortcutSource(String),
+    TooManyOperations(usize),
+    MissingRegistryDescriptor(String),
+    UnexpectedRegistryDescriptor(String),
+    DescriptorInvalid(String),
+    CanonicalRegistryInvalid(String),
+    MissingCanonicalSource(String),
+    UnexpectedCanonicalSource(String),
+    MissingWindowBinding,
+}
+
+impl fmt::Display for ControlPlaneRegistryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::HandlerMarkerMissing => {
+                formatter.write_str("Tauri generate_handler marker is missing")
+            }
+            Self::MultipleHandlerMarkers => {
+                formatter.write_str("exactly one production Tauri generate_handler is required")
+            }
+            Self::HandlerClosingBracketMissing => {
+                formatter.write_str("Tauri generate_handler closing bracket is missing")
+            }
+            Self::InvalidCommandName(name) => {
+                write!(formatter, "invalid Tauri command name: {name}")
+            }
+            Self::DuplicateCommandName(name) => {
+                write!(formatter, "duplicate Tauri command name: {name}")
+            }
+            Self::InvalidFrontendInvokeManifest => {
+                formatter.write_str("frontend invoke manifest is invalid or not byte-sorted")
+            }
+            Self::DuplicateFrontendInvokeCommand(name) => {
+                write!(formatter, "duplicate frontend invoke command: {name}")
+            }
+            Self::UnregisteredFrontendInvokeCommand(name) => {
+                write!(
+                    formatter,
+                    "frontend invoke command is not registered with Tauri: {name}"
+                )
+            }
+            Self::InvalidKeyboardShortcutSourceManifest => formatter.write_str(
+                "keyboard shortcut source manifest is malformed, non-canonical, or out of contract",
+            ),
+            Self::DuplicateKeyboardShortcutSource(name) => {
+                write!(formatter, "duplicate keyboard shortcut source: {name}")
+            }
+            Self::TooManyOperations(count) => write!(
+                formatter,
+                "operation registry exceeds its {MAX_REGISTERED_OPERATIONS} entry bound: {count}"
+            ),
+            Self::MissingRegistryDescriptor(name) => write!(
+                formatter,
+                "registered Tauri command has no descriptor: {name}"
+            ),
+            Self::UnexpectedRegistryDescriptor(name) => {
+                write!(formatter, "descriptor is not registered with Tauri: {name}")
+            }
+            Self::DescriptorInvalid(message) => {
+                write!(formatter, "invalid control-plane descriptor: {message}")
+            }
+            Self::CanonicalRegistryInvalid(message) => {
+                write!(
+                    formatter,
+                    "invalid canonical control-plane registry: {message}"
+                )
+            }
+            Self::MissingCanonicalSource(key) => {
+                write!(formatter, "canonical source inventory is missing: {key}")
+            }
+            Self::UnexpectedCanonicalSource(key) => {
+                write!(
+                    formatter,
+                    "canonical source inventory is not expected by v2: {key}"
+                )
+            }
+            Self::MissingWindowBinding => formatter
+                .write_str("control-plane discovery requires a window-bound Tauri invocation"),
+        }
+    }
+}
+
+impl std::error::Error for ControlPlaneRegistryError {}
+
+/// Returns the deterministic, bounded inventory visible to a local Tauri
+/// window.  The `window_label` argument makes the security boundary explicit
+/// without granting any external or headless adapter.
+pub fn registry_for_window(
+    window_label: &str,
+) -> Result<OperationRegistry, ControlPlaneRegistryError> {
+    if window_label.is_empty() {
+        return Err(ControlPlaneRegistryError::MissingWindowBinding);
+    }
+    registry()
+}
+
+/// Returns the version-2 canonical/source inventory for an injected local
+/// Tauri window. This is discovery metadata only; it creates no external
+/// adapter and carries no caller-owner argument.
+pub fn canonical_registry_for_window(
+    window_label: &str,
+) -> Result<CanonicalControlPlaneRegistry, ControlPlaneRegistryError> {
+    if window_label.is_empty() {
+        return Err(ControlPlaneRegistryError::MissingWindowBinding);
+    }
+    canonical_registry()
+}
+
+pub fn registry() -> Result<OperationRegistry, ControlPlaneRegistryError> {
+    VALIDATED_REGISTRY.clone()
+}
+
+pub fn canonical_registry() -> Result<CanonicalControlPlaneRegistry, ControlPlaneRegistryError> {
+    VALIDATED_CANONICAL_REGISTRY.clone()
+}
+
+fn build_registry() -> Result<OperationRegistry, ControlPlaneRegistryError> {
+    let command_names = registered_tauri_command_names_from_source(MAIN_RS_SOURCE)?;
+    let frontend_invoke_names = frontend_invoke_names_from_manifest(FRONTEND_INVOKE_MANIFEST)?;
+    for name in &frontend_invoke_names {
+        if command_names.binary_search(name).is_err() {
+            return Err(ControlPlaneRegistryError::UnregisteredFrontendInvokeCommand(name.clone()));
+        }
+    }
+    let engine_descriptors = control_plane_engine_command_descriptors();
+    let remote_descriptors = control_plane_remote_descriptors();
+    let midi_osc_dmx_descriptors = control_plane_midi_osc_dmx_descriptors();
+    let total_operations = command_names.len()
+        + engine_descriptors.len()
+        + remote_descriptors.len()
+        + midi_osc_dmx_descriptors.len()
+        + frontend_invoke_names.len();
+    if total_operations > MAX_REGISTERED_OPERATIONS {
+        return Err(ControlPlaneRegistryError::TooManyOperations(
+            total_operations,
+        ));
+    }
+    let mut operations = command_names
+        .iter()
+        .map(|name| descriptor_for_command(name))
+        .collect::<Vec<_>>();
+    operations.extend(engine_descriptors);
+    operations.extend(remote_descriptors);
+    operations.extend(midi_osc_dmx_descriptors);
+    operations.extend(
+        frontend_invoke_names
+            .iter()
+            .map(|name| unavailable_frontend_invoke_descriptor(name)),
+    );
+    operations.sort_by(|left, right| {
+        (left.source_family, &left.source_id).cmp(&(right.source_family, &right.source_id))
+    });
+    let registry = OperationRegistry {
+        schema: SchemaIdentity::registry(),
+        operations,
+    };
+    registry
+        .validate()
+        .map_err(|error| ControlPlaneRegistryError::DescriptorInvalid(error.to_string()))?;
+    verify_registry_exact_set(&command_names, &registry)?;
+    Ok(registry)
+}
+
+/// Builds v2 solely from the already validated exact v1 source inventory.
+/// In particular, the v1 descriptor's source risk is deliberately not read as
+/// canonical authority: only the explicit reviewed query table below creates
+/// a canonical operation.
+fn build_canonical_registry() -> Result<CanonicalControlPlaneRegistry, ControlPlaneRegistryError> {
+    let legacy = registry()?;
+    let keyboard_shortcut_sources =
+        keyboard_shortcut_source_ids_from_manifest(KEYBOARD_SHORTCUT_SOURCE_MANIFEST)?;
+    let mut canonical_operations = legacy
+        .operations
+        .iter()
+        .filter(|descriptor| descriptor.source_family == OperationSourceFamily::TauriCommand)
+        .filter_map(canonical_descriptor_for_source)
+        .collect::<Vec<_>>();
+    canonical_operations.sort_by(|left, right| left.operation_id.cmp(&right.operation_id));
+
+    let mut source_inventory = legacy
+        .operations
+        .iter()
+        .map(canonical_source_inventory_descriptor)
+        .collect::<Vec<_>>();
+    source_inventory.extend(keyboard_shortcut_sources.iter().map(|(family, source_id)| {
+        keyboard_shortcut_source_inventory_descriptor(*family, source_id)
+    }));
+    source_inventory.sort_by(|left, right| left.source_key.cmp(&right.source_key));
+
+    let mut canonical = CanonicalControlPlaneRegistry {
+        schema: CanonicalControlPlaneRegistry::schema_identity(),
+        canonical_operations,
+        source_inventory,
+    };
+    canonical
+        .populate_derived_adapters()
+        .map_err(canonical_registry_error)?;
+    verify_canonical_registry_exact_sources(&legacy, &canonical)?;
+    Ok(canonical)
+}
+
+fn canonical_source_inventory_descriptor(
+    descriptor: &OperationDescriptor,
+) -> SourceInventoryDescriptor {
+    let source_family = CanonicalSourceFamily::from(descriptor.source_family);
+    let source_key = SourceKey::new(source_family, descriptor.source_id.clone());
+    let disposition = match source_family {
+        CanonicalSourceFamily::TauriCommand => {
+            if let Some(reviewed) = reviewed_canonical_operation(&descriptor.source_id) {
+                SourceDisposition::Operation {
+                    canonical_operation_id: reviewed.operation_id().to_string(),
+                    projection: TypedSchemaProjection::Exact,
+                }
+            } else {
+                SourceDisposition::Unclassified {
+                    reason: unclassified_reason(source_family).to_string(),
+                }
+            }
+        }
+        CanonicalSourceFamily::FrontendInvoke => SourceDisposition::AliasOfSource {
+            target: SourceKey::new(
+                CanonicalSourceFamily::TauriCommand,
+                descriptor.source_id.clone(),
+            ),
+        },
+        CanonicalSourceFamily::EngineCommand
+            if descriptor.source_id == "set_effect_enabled_published" =>
+        {
+            SourceDisposition::InternalStepOf {
+                target: SourceKey::new(CanonicalSourceFamily::TauriCommand, "set_effect_enabled"),
+            }
+        }
+        CanonicalSourceFamily::EngineCommand
+            if descriptor.source_id == "set_timeline_playing_published" =>
+        {
+            SourceDisposition::InternalStepOf {
+                target: SourceKey::new(
+                    CanonicalSourceFamily::TauriCommand,
+                    "set_timeline_transport_playing_runtime_v1",
+                ),
+            }
+        }
+        CanonicalSourceFamily::EngineCommand if descriptor.source_id == "abort_timeline_follow" => {
+            SourceDisposition::InternalStepOf {
+                target: SourceKey::new(
+                    CanonicalSourceFamily::TauriCommand,
+                    "abort_timeline_follow_runtime_v1",
+                ),
+            }
+        }
+        CanonicalSourceFamily::EngineCommand
+            if descriptor.source_id == "safety_blackout_engage_published" =>
+        {
+            SourceDisposition::InternalStepOf {
+                target: SourceKey::new(
+                    CanonicalSourceFamily::TauriCommand,
+                    "safety_blackout_engage_v1",
+                ),
+            }
+        }
+        _ => SourceDisposition::Unclassified {
+            reason: effect_enabled_unclassified_reason(descriptor)
+                .unwrap_or_else(|| unclassified_reason(source_family))
+                .to_string(),
+        },
+    };
+    SourceInventoryDescriptor {
+        schema: SourceInventoryDescriptor::schema_identity(),
+        binding_id: source_key.binding_id(),
+        source_key,
+        role: SourceRole::for_family(source_family),
+        raw_request_schema: descriptor.request_schema.clone(),
+        raw_response_schema: descriptor.response_schema.clone(),
+        disposition,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeyboardShortcutSourceManifest {
+    schema_version: u16,
+    keyboard_app: Vec<String>,
+    keyboard_project_file: Vec<String>,
+}
+
+fn keyboard_shortcut_source_ids_from_manifest(
+    source: &str,
+) -> Result<Vec<(CanonicalSourceFamily, String)>, ControlPlaneRegistryError> {
+    let manifest = serde_json::from_str::<KeyboardShortcutSourceManifest>(source)
+        .map_err(|_| ControlPlaneRegistryError::InvalidKeyboardShortcutSourceManifest)?;
+    if manifest.schema_version != KEYBOARD_SHORTCUT_SOURCE_MANIFEST_SCHEMA_VERSION {
+        return Err(ControlPlaneRegistryError::InvalidKeyboardShortcutSourceManifest);
+    }
+    let canonical_bytes = serde_json::to_string_pretty(&manifest)
+        .map_err(|_| ControlPlaneRegistryError::InvalidKeyboardShortcutSourceManifest)?;
+    if source != format!("{canonical_bytes}\n") {
+        return Err(ControlPlaneRegistryError::InvalidKeyboardShortcutSourceManifest);
+    }
+
+    let mut sources = Vec::with_capacity(
+        KEYBOARD_APP_SHORTCUT_SOURCE_COUNT + KEYBOARD_PROJECT_FILE_SHORTCUT_SOURCE_COUNT,
+    );
+    append_keyboard_shortcut_source_ids(
+        CanonicalSourceFamily::KeyboardApp,
+        &manifest.keyboard_app,
+        KEYBOARD_APP_SHORTCUT_SOURCE_COUNT,
+        &mut sources,
+    )?;
+    append_keyboard_shortcut_source_ids(
+        CanonicalSourceFamily::KeyboardProjectFile,
+        &manifest.keyboard_project_file,
+        KEYBOARD_PROJECT_FILE_SHORTCUT_SOURCE_COUNT,
+        &mut sources,
+    )?;
+    Ok(sources)
+}
+
+fn append_keyboard_shortcut_source_ids(
+    family: CanonicalSourceFamily,
+    source_ids: &[String],
+    expected_count: usize,
+    sources: &mut Vec<(CanonicalSourceFamily, String)>,
+) -> Result<(), ControlPlaneRegistryError> {
+    if source_ids.len() != expected_count {
+        return Err(ControlPlaneRegistryError::InvalidKeyboardShortcutSourceManifest);
+    }
+    let mut distinct = BTreeSet::new();
+    for source_id in source_ids {
+        let source_key = SourceKey::new(family, source_id.clone());
+        if source_key.validate().is_err() {
+            return Err(ControlPlaneRegistryError::InvalidKeyboardShortcutSourceManifest);
+        }
+        if !distinct.insert(source_id.as_str()) {
+            return Err(ControlPlaneRegistryError::DuplicateKeyboardShortcutSource(
+                source_key.binding_id(),
+            ));
+        }
+        sources.push((family, source_id.clone()));
+    }
+    if source_ids
+        .windows(2)
+        .any(|pair| pair[0].as_str() >= pair[1].as_str())
+    {
+        return Err(ControlPlaneRegistryError::InvalidKeyboardShortcutSourceManifest);
+    }
+    Ok(())
+}
+
+fn keyboard_shortcut_source_inventory_descriptor(
+    family: CanonicalSourceFamily,
+    source_id: &str,
+) -> SourceInventoryDescriptor {
+    let source_key = SourceKey::new(family, source_id);
+    let family_name = match family {
+        CanonicalSourceFamily::KeyboardApp => "keyboard_app",
+        CanonicalSourceFamily::KeyboardProjectFile => "keyboard_project_file",
+        _ => unreachable!("only keyboard source families use this descriptor builder"),
+    };
+    let raw_schema = |direction| SchemaIdentity {
+        name: format!("syndocal.inventory.{family_name}.{source_id}.{direction}"),
+        version: KEYBOARD_SHORTCUT_SOURCE_MANIFEST_SCHEMA_VERSION,
+    };
+    // Shortcut sources intentionally have neither a canonical operation nor
+    // an adapter. Some current shortcuts mutate project/runtime state, so
+    // presentation-only would be both inaccurate and unsafe.
+    SourceInventoryDescriptor {
+        schema: SourceInventoryDescriptor::schema_identity(),
+        binding_id: source_key.binding_id(),
+        source_key,
+        role: SourceRole::for_family(family),
+        raw_request_schema: raw_schema("request"),
+        raw_response_schema: raw_schema("response"),
+        disposition: if family == CanonicalSourceFamily::KeyboardApp
+            && source_id == "toggle_timeline_playback_v1"
+        {
+            SourceDisposition::StructuralRoute {
+                target: SourceKey::new(
+                    CanonicalSourceFamily::TauriCommand,
+                    "set_timeline_transport_playing_runtime_v1",
+                ),
+            }
+        } else {
+            SourceDisposition::Unclassified {
+                reason: unclassified_reason(family).to_string(),
+            }
+        },
+    }
+}
+
+fn unclassified_reason(family: CanonicalSourceFamily) -> &'static str {
+    match family {
+        CanonicalSourceFamily::TauriCommand => "unreviewed tauri command",
+        CanonicalSourceFamily::EngineCommand => "unreviewed engine command",
+        CanonicalSourceFamily::RemoteInputEvent
+        | CanonicalSourceFamily::RemoteClientRequest
+        | CanonicalSourceFamily::RemoteWireOperation => "unreviewed remote ingress",
+        CanonicalSourceFamily::MidiControlMessage
+        | CanonicalSourceFamily::MidiControlAction
+        | CanonicalSourceFamily::MidiClockEvent
+        | CanonicalSourceFamily::MidiControlEvent => "unreviewed midi ingress",
+        CanonicalSourceFamily::OscControlAction | CanonicalSourceFamily::OscInputEvent => {
+            "unreviewed osc ingress"
+        }
+        CanonicalSourceFamily::DmxInputProtocol | CanonicalSourceFamily::DmxInputEvent => {
+            "unreviewed dmx ingress"
+        }
+        CanonicalSourceFamily::FrontendInvoke => "unreviewed frontend invocation",
+        CanonicalSourceFamily::KeyboardApp => "unreviewed keyboard app shortcut",
+        CanonicalSourceFamily::KeyboardProjectFile => "unreviewed keyboard project-file shortcut",
+    }
+}
+
+fn canonical_registry_error(error: CanonicalRegistryValidationError) -> ControlPlaneRegistryError {
+    ControlPlaneRegistryError::CanonicalRegistryInvalid(error.to_string())
+}
+
+pub fn verify_canonical_registry_exact_sources(
+    legacy: &OperationRegistry,
+    canonical: &CanonicalControlPlaneRegistry,
+) -> Result<(), ControlPlaneRegistryError> {
+    let mut expected = legacy
+        .operations
+        .iter()
+        .map(|descriptor| {
+            SourceKey::new(
+                CanonicalSourceFamily::from(descriptor.source_family),
+                descriptor.source_id.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    expected.extend(
+        keyboard_shortcut_source_ids_from_manifest(KEYBOARD_SHORTCUT_SOURCE_MANIFEST)?
+            .into_iter()
+            .map(|(family, source_id)| SourceKey::new(family, source_id)),
+    );
+    let actual = canonical
+        .source_inventory
+        .iter()
+        .map(|source| source.source_key.clone())
+        .collect::<BTreeSet<_>>();
+    if let Some(missing) = expected.difference(&actual).next() {
+        return Err(ControlPlaneRegistryError::MissingCanonicalSource(
+            missing.binding_id(),
+        ));
+    }
+    if let Some(unexpected) = actual.difference(&expected).next() {
+        return Err(ControlPlaneRegistryError::UnexpectedCanonicalSource(
+            unexpected.binding_id(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReviewedQueryOperation {
+    operation_id: &'static str,
+    class: OperationClass,
+    domain_capability: OperationCapability,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ReviewedCanonicalOperation {
+    Query(ReviewedQueryOperation),
+    NewProject,
+    SaveProjectFile,
+    SaveProjectAsFile,
+    SaveUserTemplateFile,
+    SaveProjectBackupFile,
+    DeleteProjectBackupFile,
+    ManageProjectBackupDeletionJournal,
+    AcknowledgeProjectFile,
+    OpenProject,
+    RestoreProjectBackup,
+    SetEffectEnabled,
+    SetTimelineTransportPlaying,
+    CommitTimelineLoopRuntime,
+    AbortTimelineFollow,
+    EngageSafetyBlackout,
+    ReleaseBlackout,
+    SetBlackout,
+    SetLightingMaster,
+    SetGroupSubmaster,
+    SetVideoMaster,
+    TakeVideoClip,
+    LaunchVideoClip,
+    ArmOutputOwnership,
+    TakeOverStandby,
+    AddDisplayOutput,
+    AddExternalOutput,
+    ConfigureVideoOutput,
+    RemoveVideoOutput,
+    SetDisplayWindowOpen,
+    AssignVideoOutputComposition,
+    EnableShowArtNetLoopbackRoute,
+    SetNetworkDmxRoutes,
+    EnableShowSerialDmxSafetyBlackoutRoute,
+    StopShowSerialDmxSafetyBlackoutRoute,
+    EnableUsbDmxUniverseRoute,
+    StopUsbDmxUniverseRoute,
+    EnableShowSpoutOutputs,
+    ResetShowSpoutOutputs,
+    SendDsf2026ArtNetAcceptanceProbe,
+    AcknowledgeDsf2026ArtNetAcceptanceProbeInDoubt,
+    EnableOutput,
+    AcquireOutputLease,
+    RenewOutputLease,
+    RecoverOutputLease,
+    RelinquishOutputLease,
+    ForceTransferOutputLease,
+    ReorderCueLists,
+    RenameCueList,
+    DeleteCueList,
+    CreateSceneAuthoritativeV1,
+}
+
+impl ReviewedCanonicalOperation {
+    fn operation_id(self) -> &'static str {
+        match self {
+            Self::Query(query) => query.operation_id,
+            Self::NewProject => PROJECT_NEW_OPERATION_ID,
+            Self::SaveProjectFile => "syndocal.project.save.v1",
+            Self::SaveProjectAsFile => "syndocal.project.save_as.v1",
+            Self::SaveUserTemplateFile => "syndocal.project.template.save.v1",
+            Self::SaveProjectBackupFile => "syndocal.project.backup.create.v1",
+            Self::DeleteProjectBackupFile => protocol::control_plane_file::BACKUP_DELETE_ID,
+            Self::ManageProjectBackupDeletionJournal => protocol::control_plane_backup_management::MANAGE_ID,
+            Self::AcknowledgeProjectFile => "syndocal.project.file.acknowledge.v1",
+            Self::OpenProject => PROJECT_OPEN_OPERATION_ID,
+            Self::RestoreProjectBackup => PROJECT_BACKUP_RESTORE_OPERATION_ID,
+            Self::SetEffectEnabled => SET_EFFECT_ENABLED_OPERATION_ID,
+            Self::SetTimelineTransportPlaying => TIMELINE_TRANSPORT_SET_PLAYING_OPERATION_ID,
+            Self::CommitTimelineLoopRuntime => TIMELINE_LOOP_RUNTIME_OPERATION_ID,
+            Self::AbortTimelineFollow => TIMELINE_FOLLOW_ABORT_OPERATION_ID,
+            Self::EngageSafetyBlackout => SAFETY_BLACKOUT_ENGAGE_OPERATION_ID,
+            Self::ReleaseBlackout => OUTPUT_BLACKOUT_RELEASE_OPERATION_ID,
+            Self::SetBlackout => OUTPUT_BLACKOUT_SET_OPERATION_ID,
+            Self::SetLightingMaster => OUTPUT_LIGHTING_MASTER_SET_OPERATION_ID,
+            Self::SetGroupSubmaster => OUTPUT_GROUP_SUBMASTER_SET_OPERATION_ID,
+            Self::SetVideoMaster => OUTPUT_VIDEO_MASTER_SET_OPERATION_ID,
+            Self::TakeVideoClip => OUTPUT_VIDEO_CLIP_TAKE_OPERATION_ID,
+            Self::LaunchVideoClip => OUTPUT_VIDEO_CLIP_LAUNCH_OPERATION_ID,
+            Self::ArmOutputOwnership => OUTPUT_OWNERSHIP_ARM_OPERATION_ID,
+            Self::TakeOverStandby => OUTPUT_STANDBY_TAKEOVER_OPERATION_ID,
+            Self::AddDisplayOutput => OUTPUT_DISPLAY_ADD_OPERATION_ID,
+            Self::AddExternalOutput => OUTPUT_EXTERNAL_ADD_OPERATION_ID,
+            Self::ConfigureVideoOutput => OUTPUT_VIDEO_CONFIGURE_OPERATION_ID,
+            Self::RemoveVideoOutput => OUTPUT_VIDEO_REMOVE_OPERATION_ID,
+            Self::SetDisplayWindowOpen => OUTPUT_DISPLAY_WINDOW_SET_OPEN_OPERATION_ID,
+            Self::AssignVideoOutputComposition => OUTPUT_VIDEO_COMPOSITION_ASSIGN_OPERATION_ID,
+            Self::SetNetworkDmxRoutes => OUTPUT_NETWORK_DMX_ROUTES_SET_OPERATION_ID,
+            Self::EnableShowArtNetLoopbackRoute => {
+                OUTPUT_SHOW_ARTNET_LOOPBACK_ROUTE_ENABLE_OPERATION_ID
+            }
+            Self::EnableShowSerialDmxSafetyBlackoutRoute => {
+                OUTPUT_SHOW_SERIAL_DMX_SAFETY_BLACKOUT_ROUTE_ENABLE_OPERATION_ID
+            }
+            Self::StopShowSerialDmxSafetyBlackoutRoute => {
+                OUTPUT_SHOW_SERIAL_DMX_SAFETY_BLACKOUT_ROUTE_STOP_OPERATION_ID
+            }
+            Self::EnableUsbDmxUniverseRoute => OUTPUT_USB_DMX_UNIVERSE_ROUTE_ENABLE_OPERATION_ID,
+            Self::StopUsbDmxUniverseRoute => OUTPUT_USB_DMX_UNIVERSE_ROUTE_STOP_OPERATION_ID,
+            Self::EnableShowSpoutOutputs => OUTPUT_SHOW_SPOUT_OUTPUTS_ENABLE_OPERATION_ID,
+            Self::ResetShowSpoutOutputs => OUTPUT_SHOW_SPOUT_OUTPUTS_RESET_OPERATION_ID,
+            Self::SendDsf2026ArtNetAcceptanceProbe => {
+                OUTPUT_DSF2026_ARTNET_ACCEPTANCE_PROBE_OPERATION_ID
+            }
+            Self::AcknowledgeDsf2026ArtNetAcceptanceProbeInDoubt => {
+                OUTPUT_DSF2026_ARTNET_ACCEPTANCE_PROBE_RECONCILE_OPERATION_ID
+            }
+            Self::EnableOutput => OUTPUT_ENABLE_OPERATION_ID,
+            Self::AcquireOutputLease => OUTPUT_LEASE_ACQUIRE_OPERATION_ID,
+            Self::RenewOutputLease => OUTPUT_LEASE_RENEW_OPERATION_ID,
+            Self::RecoverOutputLease => OUTPUT_LEASE_RECOVER_OPERATION_ID,
+            Self::RelinquishOutputLease => OUTPUT_LEASE_RELINQUISH_OPERATION_ID,
+            Self::ForceTransferOutputLease => OUTPUT_LEASE_FORCE_TRANSFER_OPERATION_ID,
+            Self::ReorderCueLists => CUE_LIST_REORDER_OPERATION_ID,
+            Self::RenameCueList => CUE_LIST_RENAME_OPERATION_ID,
+            Self::DeleteCueList => CUE_LIST_DELETE_OPERATION_ID,
+            Self::CreateSceneAuthoritativeV1 => SCENE_CREATE_AUTHORITATIVE_V1_OPERATION_ID,
+        }
+    }
+}
+
+fn reviewed_canonical_operation(command: &str) -> Option<ReviewedCanonicalOperation> {
+    if let Some(query) = reviewed_query_operation(command) {
+        return Some(ReviewedCanonicalOperation::Query(query));
+    }
+    match command {
+        "save_project_control_plane_v1" => Some(ReviewedCanonicalOperation::SaveProjectFile),
+        "save_project_as_control_plane_v1" => Some(ReviewedCanonicalOperation::SaveProjectAsFile),
+        "save_user_template_control_plane_v1" => Some(ReviewedCanonicalOperation::SaveUserTemplateFile),
+        "create_project_backup_control_plane_v1" => Some(ReviewedCanonicalOperation::SaveProjectBackupFile),
+        "delete_project_backup_control_plane_v1" => Some(ReviewedCanonicalOperation::DeleteProjectBackupFile),
+        "manage_project_backup_deletion_journal_v1" => Some(ReviewedCanonicalOperation::ManageProjectBackupDeletionJournal),
+        "acknowledge_project_file_control_plane_v1" => Some(ReviewedCanonicalOperation::AcknowledgeProjectFile),
+        "new_project_control_plane_v1" => Some(ReviewedCanonicalOperation::NewProject),
+        "open_project_control_plane_v1" => Some(ReviewedCanonicalOperation::OpenProject),
+        "restore_project_backup_control_plane_v1" => Some(ReviewedCanonicalOperation::RestoreProjectBackup),
+        "set_effect_enabled" => Some(ReviewedCanonicalOperation::SetEffectEnabled),
+        "set_timeline_transport_playing_runtime_v1" => {
+            Some(ReviewedCanonicalOperation::SetTimelineTransportPlaying)
+        }
+        "commit_timeline_loop_runtime_v1" => {
+            Some(ReviewedCanonicalOperation::CommitTimelineLoopRuntime)
+        }
+        "abort_timeline_follow_runtime_v1" => Some(ReviewedCanonicalOperation::AbortTimelineFollow),
+        "safety_blackout_engage_v1" => Some(ReviewedCanonicalOperation::EngageSafetyBlackout),
+        "release_blackout_output_control_v2" => Some(ReviewedCanonicalOperation::ReleaseBlackout),
+        "set_blackout_output_control_v2" => Some(ReviewedCanonicalOperation::SetBlackout),
+        "set_lighting_master_output_control_v2" => {
+            Some(ReviewedCanonicalOperation::SetLightingMaster)
+        }
+        "set_group_submaster_output_control_v2" => {
+            Some(ReviewedCanonicalOperation::SetGroupSubmaster)
+        }
+        "set_video_master_output_control_v2" => {
+            Some(ReviewedCanonicalOperation::SetVideoMaster)
+        }
+        "take_video_clip_output_control_v2" => {
+            Some(ReviewedCanonicalOperation::TakeVideoClip)
+        }
+        "launch_video_clip_output_control_v2" => {
+            Some(ReviewedCanonicalOperation::LaunchVideoClip)
+        }
+        "arm_output_control_v2" => Some(ReviewedCanonicalOperation::ArmOutputOwnership),
+        "take_over_output_control_v2" => Some(ReviewedCanonicalOperation::TakeOverStandby),
+        "add_display_output_v2" => Some(ReviewedCanonicalOperation::AddDisplayOutput),
+        "add_external_output_v2" => Some(ReviewedCanonicalOperation::AddExternalOutput),
+        "configure_video_output_v2" => Some(ReviewedCanonicalOperation::ConfigureVideoOutput),
+        "remove_video_output_v2" => Some(ReviewedCanonicalOperation::RemoveVideoOutput),
+        "set_display_output_window_open_v2" => {
+            Some(ReviewedCanonicalOperation::SetDisplayWindowOpen)
+        }
+        "assign_video_output_composition_v2" => {
+            Some(ReviewedCanonicalOperation::AssignVideoOutputComposition)
+        }
+        "set_network_dmx_routes_v1" => Some(ReviewedCanonicalOperation::SetNetworkDmxRoutes),
+        "enable_show_art_net_loopback_route_v1" => {
+            Some(ReviewedCanonicalOperation::EnableShowArtNetLoopbackRoute)
+        }
+        "enable_show_serial_dmx_safety_blackout_route_v1" => {
+            Some(ReviewedCanonicalOperation::EnableShowSerialDmxSafetyBlackoutRoute)
+        }
+        "stop_show_serial_dmx_safety_blackout_route_v1" => {
+            Some(ReviewedCanonicalOperation::StopShowSerialDmxSafetyBlackoutRoute)
+        }
+        "enable_usb_dmx_universe_route_v1" => {
+            Some(ReviewedCanonicalOperation::EnableUsbDmxUniverseRoute)
+        }
+        "stop_usb_dmx_universe_route_v1" => {
+            Some(ReviewedCanonicalOperation::StopUsbDmxUniverseRoute)
+        }
+        "enable_show_spout_outputs_v2" => Some(ReviewedCanonicalOperation::EnableShowSpoutOutputs),
+        "reset_show_spout_outputs_v1" => Some(ReviewedCanonicalOperation::ResetShowSpoutOutputs),
+        "send_dsf2026_artnet_acceptance_probe_v1" => {
+            Some(ReviewedCanonicalOperation::SendDsf2026ArtNetAcceptanceProbe)
+        }
+        "acknowledge_dsf2026_artnet_acceptance_probe_in_doubt_v1" => {
+            Some(ReviewedCanonicalOperation::AcknowledgeDsf2026ArtNetAcceptanceProbeInDoubt)
+        }
+        "enable_output_control_v2" => Some(ReviewedCanonicalOperation::EnableOutput),
+        "acquire_output_lease_v2" => Some(ReviewedCanonicalOperation::AcquireOutputLease),
+        "renew_output_lease_v2" => Some(ReviewedCanonicalOperation::RenewOutputLease),
+        "recover_output_lease_v2" => Some(ReviewedCanonicalOperation::RecoverOutputLease),
+        "relinquish_output_lease_v2" => Some(ReviewedCanonicalOperation::RelinquishOutputLease),
+        "force_transfer_output_lease_v2" => {
+            Some(ReviewedCanonicalOperation::ForceTransferOutputLease)
+        }
+        "reorder_cue_lists" => Some(ReviewedCanonicalOperation::ReorderCueLists),
+        "rename_cue_list" => Some(ReviewedCanonicalOperation::RenameCueList),
+        "delete_cue_list" => Some(ReviewedCanonicalOperation::DeleteCueList),
+        "create_scene_authoritative_v1" => {
+            Some(ReviewedCanonicalOperation::CreateSceneAuthoritativeV1)
+        }
+        _ => None,
+    }
+}
+
+fn canonical_descriptor_for_source(
+    descriptor: &OperationDescriptor,
+) -> Option<CanonicalOperationDescriptor> {
+    let reviewed = reviewed_canonical_operation(&descriptor.source_id)?;
+    let (class, capabilities, idempotency, adapter_policy, receipt_policy) = match reviewed {
+        ReviewedCanonicalOperation::SaveProjectFile |
+        ReviewedCanonicalOperation::SaveProjectAsFile |
+        ReviewedCanonicalOperation::SaveUserTemplateFile |
+        ReviewedCanonicalOperation::SaveProjectBackupFile | ReviewedCanonicalOperation::DeleteProjectBackupFile | ReviewedCanonicalOperation::ManageProjectBackupDeletionJournal | ReviewedCanonicalOperation::AcknowledgeProjectFile => (
+            OperationClass::Mutation, vec![OperationCapability::LocalWindowBound, OperationCapability::AuthoritativeProjectMutation],
+            OperationIdempotency::Mutating, AdapterPolicy::LocalWindowProjectPublication, ReceiptPolicy::ExactTerminalReceipt,
+        ),
+        ReviewedCanonicalOperation::NewProject | ReviewedCanonicalOperation::OpenProject | ReviewedCanonicalOperation::RestoreProjectBackup => (
+            OperationClass::Mutation,
+            vec![OperationCapability::LocalWindowBound, OperationCapability::AuthoritativeProjectMutation],
+            OperationIdempotency::Mutating,
+            AdapterPolicy::LocalWindowProjectReplacement,
+            ReceiptPolicy::ExactTerminalReceipt,
+        ),
+        ReviewedCanonicalOperation::Query(query) => (
+            query.class,
+            vec![
+                OperationCapability::ReadOnly,
+                OperationCapability::LocalWindowBound,
+                OperationCapability::AllowedDuringFullLock,
+                query.domain_capability,
+            ],
+            OperationIdempotency::ReadOnly,
+            AdapterPolicy::LocalWindowReadOnly,
+            ReceiptPolicy::FailClosed,
+        ),
+        ReviewedCanonicalOperation::SetEffectEnabled => (
+            OperationClass::Mutation,
+            vec![
+                OperationCapability::LocalWindowBound,
+                OperationCapability::AuthoritativeProjectMutation,
+            ],
+            OperationIdempotency::Mutating,
+            AdapterPolicy::LocalWindowAuthoritativeMutation,
+            ReceiptPolicy::ExactTerminalReceipt,
+        ),
+        ReviewedCanonicalOperation::ReorderCueLists => (
+            OperationClass::Mutation,
+            vec![
+                OperationCapability::LocalWindowBound,
+                OperationCapability::AuthoritativeProjectMutation,
+            ],
+            OperationIdempotency::Mutating,
+            AdapterPolicy::LocalWindowAuthoritativeMutation,
+            ReceiptPolicy::ExactTerminalReceipt,
+        ),
+        ReviewedCanonicalOperation::RenameCueList => (
+            OperationClass::Mutation,
+            vec![
+                OperationCapability::LocalWindowBound,
+                OperationCapability::AuthoritativeProjectMutation,
+            ],
+            OperationIdempotency::Mutating,
+            AdapterPolicy::LocalWindowAuthoritativeMutation,
+            ReceiptPolicy::ExactTerminalReceipt,
+        ),
+        ReviewedCanonicalOperation::DeleteCueList => (
+            OperationClass::Mutation,
+            vec![
+                OperationCapability::LocalWindowBound,
+                OperationCapability::AuthoritativeProjectMutation,
+            ],
+            OperationIdempotency::Mutating,
+            AdapterPolicy::LocalWindowAuthoritativeMutation,
+            ReceiptPolicy::ExactTerminalReceipt,
+        ),
+        ReviewedCanonicalOperation::CreateSceneAuthoritativeV1 => (
+            OperationClass::Mutation,
+            vec![
+                OperationCapability::LocalWindowBound,
+                OperationCapability::AuthoritativeProjectMutation,
+            ],
+            OperationIdempotency::Mutating,
+            AdapterPolicy::LocalWindowAuthoritativeMutation,
+            ReceiptPolicy::ExactTerminalReceipt,
+        ),
+        ReviewedCanonicalOperation::SetTimelineTransportPlaying
+        | ReviewedCanonicalOperation::CommitTimelineLoopRuntime => (
+            OperationClass::Mutation,
+            vec![
+                OperationCapability::LocalWindowBound,
+                OperationCapability::AuthoritativeRuntimeMutation,
+            ],
+            OperationIdempotency::Mutating,
+            AdapterPolicy::LocalWindowAuthoritativeRuntimeMutation,
+            ReceiptPolicy::ExactTerminalReceipt,
+        ),
+        ReviewedCanonicalOperation::AbortTimelineFollow => (
+            OperationClass::Mutation,
+            vec![
+                OperationCapability::LocalWindowBound,
+                OperationCapability::AuthoritativeRuntimeMutation,
+                OperationCapability::AllowedDuringFullLock,
+            ],
+            OperationIdempotency::Mutating,
+            AdapterPolicy::LocalWindowRuntimeSafetyMutation,
+            ReceiptPolicy::ExactTerminalReceipt,
+        ),
+        ReviewedCanonicalOperation::EngageSafetyBlackout => (
+            OperationClass::Mutation,
+            vec![
+                OperationCapability::LocalWindowBound,
+                OperationCapability::SafetyBlackoutEngage,
+                OperationCapability::AllowedDuringFullLock,
+            ],
+            OperationIdempotency::Mutating,
+            AdapterPolicy::LocalWindowEmergencySafetyMutation,
+            ReceiptPolicy::ExactTerminalReceipt,
+        ),
+        ReviewedCanonicalOperation::ArmOutputOwnership
+        | ReviewedCanonicalOperation::TakeOverStandby
+        | ReviewedCanonicalOperation::AssignVideoOutputComposition
+        | ReviewedCanonicalOperation::EnableShowArtNetLoopbackRoute
+        | ReviewedCanonicalOperation::SetNetworkDmxRoutes
+        | ReviewedCanonicalOperation::EnableShowSerialDmxSafetyBlackoutRoute
+        | ReviewedCanonicalOperation::StopShowSerialDmxSafetyBlackoutRoute
+        | ReviewedCanonicalOperation::EnableUsbDmxUniverseRoute
+        | ReviewedCanonicalOperation::StopUsbDmxUniverseRoute
+        | ReviewedCanonicalOperation::SendDsf2026ArtNetAcceptanceProbe
+        | ReviewedCanonicalOperation::AcknowledgeDsf2026ArtNetAcceptanceProbeInDoubt
+        | ReviewedCanonicalOperation::EnableShowSpoutOutputs
+        | ReviewedCanonicalOperation::ResetShowSpoutOutputs
+        | ReviewedCanonicalOperation::ForceTransferOutputLease => (
+            OperationClass::Mutation,
+            vec![
+                OperationCapability::LocalWindowBound,
+                OperationCapability::OutputControl,
+            ],
+            OperationIdempotency::Mutating,
+            AdapterPolicy::LocalWindowDangerousOutputControl,
+            ReceiptPolicy::ExactTerminalReceipt,
+        ),
+        ReviewedCanonicalOperation::ReleaseBlackout
+        | ReviewedCanonicalOperation::SetDisplayWindowOpen
+        | ReviewedCanonicalOperation::SetBlackout
+        | ReviewedCanonicalOperation::SetLightingMaster
+        | ReviewedCanonicalOperation::SetGroupSubmaster
+        | ReviewedCanonicalOperation::SetVideoMaster
+        | ReviewedCanonicalOperation::LaunchVideoClip
+        | ReviewedCanonicalOperation::TakeVideoClip => (
+            OperationClass::Mutation,
+            vec![
+                OperationCapability::LocalWindowBound,
+                OperationCapability::OutputControl,
+            ],
+            OperationIdempotency::Mutating,
+            AdapterPolicy::LocalWindowOutputControl,
+            ReceiptPolicy::ExactTerminalReceipt,
+        ),
+        ReviewedCanonicalOperation::EnableOutput
+        | ReviewedCanonicalOperation::AddDisplayOutput
+        | ReviewedCanonicalOperation::AddExternalOutput
+        | ReviewedCanonicalOperation::ConfigureVideoOutput
+        | ReviewedCanonicalOperation::RemoveVideoOutput
+        | ReviewedCanonicalOperation::AcquireOutputLease
+        | ReviewedCanonicalOperation::RenewOutputLease
+        | ReviewedCanonicalOperation::RecoverOutputLease
+        | ReviewedCanonicalOperation::RelinquishOutputLease => (
+            OperationClass::Mutation,
+            vec![
+                OperationCapability::LocalWindowBound,
+                OperationCapability::OutputControl,
+            ],
+            OperationIdempotency::Mutating,
+            AdapterPolicy::LocalWindowOutputControl,
+            ReceiptPolicy::ExactTerminalReceipt,
+        ),
+    };
+    Some(CanonicalOperationDescriptor {
+        schema: CanonicalOperationDescriptor::schema_identity(),
+        operation_id: reviewed.operation_id().to_string(),
+        class,
+        risk: if matches!(reviewed, ReviewedCanonicalOperation::NewProject | ReviewedCanonicalOperation::OpenProject | ReviewedCanonicalOperation::RestoreProjectBackup | ReviewedCanonicalOperation::SaveProjectFile | ReviewedCanonicalOperation::SaveProjectAsFile | ReviewedCanonicalOperation::SaveUserTemplateFile | ReviewedCanonicalOperation::SaveProjectBackupFile | ReviewedCanonicalOperation::DeleteProjectBackupFile | ReviewedCanonicalOperation::ManageProjectBackupDeletionJournal | ReviewedCanonicalOperation::AcknowledgeProjectFile) {
+            OperationRisk::R5
+        } else if matches!(reviewed, ReviewedCanonicalOperation::EngageSafetyBlackout) {
+            OperationRisk::S0
+        } else if matches!(
+            reviewed,
+            ReviewedCanonicalOperation::ReleaseBlackout
+                | ReviewedCanonicalOperation::ArmOutputOwnership
+                | ReviewedCanonicalOperation::TakeOverStandby
+                | ReviewedCanonicalOperation::AddDisplayOutput
+                | ReviewedCanonicalOperation::AddExternalOutput
+                | ReviewedCanonicalOperation::ConfigureVideoOutput
+                | ReviewedCanonicalOperation::RemoveVideoOutput
+                | ReviewedCanonicalOperation::AssignVideoOutputComposition
+                | ReviewedCanonicalOperation::SetDisplayWindowOpen
+                | ReviewedCanonicalOperation::SetBlackout
+                | ReviewedCanonicalOperation::SetLightingMaster
+                | ReviewedCanonicalOperation::SetGroupSubmaster
+                | ReviewedCanonicalOperation::SetVideoMaster
+                | ReviewedCanonicalOperation::LaunchVideoClip
+                | ReviewedCanonicalOperation::TakeVideoClip
+                | ReviewedCanonicalOperation::EnableShowArtNetLoopbackRoute
+                | ReviewedCanonicalOperation::SetNetworkDmxRoutes
+                | ReviewedCanonicalOperation::EnableShowSerialDmxSafetyBlackoutRoute
+                | ReviewedCanonicalOperation::StopShowSerialDmxSafetyBlackoutRoute
+                | ReviewedCanonicalOperation::EnableUsbDmxUniverseRoute
+                | ReviewedCanonicalOperation::StopUsbDmxUniverseRoute
+                | ReviewedCanonicalOperation::SendDsf2026ArtNetAcceptanceProbe
+                | ReviewedCanonicalOperation::AcknowledgeDsf2026ArtNetAcceptanceProbeInDoubt
+                | ReviewedCanonicalOperation::EnableShowSpoutOutputs
+                | ReviewedCanonicalOperation::ResetShowSpoutOutputs
+                | ReviewedCanonicalOperation::EnableOutput
+                | ReviewedCanonicalOperation::AcquireOutputLease
+                | ReviewedCanonicalOperation::RenewOutputLease
+                | ReviewedCanonicalOperation::RecoverOutputLease
+                | ReviewedCanonicalOperation::RelinquishOutputLease
+                | ReviewedCanonicalOperation::ForceTransferOutputLease
+        ) {
+            OperationRisk::R4
+        } else if matches!(reviewed,ReviewedCanonicalOperation::SetEffectEnabled | ReviewedCanonicalOperation::ReorderCueLists
+            | ReviewedCanonicalOperation::RenameCueList | ReviewedCanonicalOperation::DeleteCueList | ReviewedCanonicalOperation::CreateSceneAuthoritativeV1) {
+            OperationRisk::R3
+        } else if matches!(reviewed,ReviewedCanonicalOperation::SetTimelineTransportPlaying) {
+            OperationRisk::R2
+        } else if matches!(reviewed,ReviewedCanonicalOperation::CommitTimelineLoopRuntime | ReviewedCanonicalOperation::AbortTimelineFollow) {
+            OperationRisk::R1
+        } else {
+            OperationRisk::R0
+        },
+        capabilities,
+        request_schema: descriptor.request_schema.clone(),
+        response_schema: descriptor.response_schema.clone(),
+        idempotency,
+        audit: if matches!(
+            reviewed,
+            ReviewedCanonicalOperation::SetEffectEnabled | ReviewedCanonicalOperation::ReorderCueLists
+                | ReviewedCanonicalOperation::RenameCueList | ReviewedCanonicalOperation::DeleteCueList
+                | ReviewedCanonicalOperation::CreateSceneAuthoritativeV1 | ReviewedCanonicalOperation::SetTimelineTransportPlaying
+                | ReviewedCanonicalOperation::EngageSafetyBlackout
+                | ReviewedCanonicalOperation::ReleaseBlackout
+                | ReviewedCanonicalOperation::ArmOutputOwnership
+                | ReviewedCanonicalOperation::TakeOverStandby
+                | ReviewedCanonicalOperation::AddDisplayOutput
+                | ReviewedCanonicalOperation::AddExternalOutput
+                | ReviewedCanonicalOperation::ConfigureVideoOutput
+                | ReviewedCanonicalOperation::RemoveVideoOutput
+                | ReviewedCanonicalOperation::AssignVideoOutputComposition
+                | ReviewedCanonicalOperation::SetDisplayWindowOpen
+                | ReviewedCanonicalOperation::SetBlackout
+                | ReviewedCanonicalOperation::SetLightingMaster
+                | ReviewedCanonicalOperation::SetGroupSubmaster
+                | ReviewedCanonicalOperation::SetVideoMaster
+                | ReviewedCanonicalOperation::LaunchVideoClip
+                | ReviewedCanonicalOperation::TakeVideoClip
+                | ReviewedCanonicalOperation::EnableShowArtNetLoopbackRoute
+                | ReviewedCanonicalOperation::SetNetworkDmxRoutes
+                | ReviewedCanonicalOperation::EnableShowSerialDmxSafetyBlackoutRoute
+                | ReviewedCanonicalOperation::StopShowSerialDmxSafetyBlackoutRoute
+                | ReviewedCanonicalOperation::EnableUsbDmxUniverseRoute
+                | ReviewedCanonicalOperation::StopUsbDmxUniverseRoute
+                | ReviewedCanonicalOperation::SendDsf2026ArtNetAcceptanceProbe
+                | ReviewedCanonicalOperation::AcknowledgeDsf2026ArtNetAcceptanceProbeInDoubt
+                | ReviewedCanonicalOperation::EnableShowSpoutOutputs
+                | ReviewedCanonicalOperation::ResetShowSpoutOutputs
+                | ReviewedCanonicalOperation::EnableOutput
+                | ReviewedCanonicalOperation::AcquireOutputLease
+                | ReviewedCanonicalOperation::RenewOutputLease
+                | ReviewedCanonicalOperation::RecoverOutputLease
+                | ReviewedCanonicalOperation::RelinquishOutputLease
+                | ReviewedCanonicalOperation::ForceTransferOutputLease
+                | ReviewedCanonicalOperation::NewProject
+                | ReviewedCanonicalOperation::SaveProjectFile
+                | ReviewedCanonicalOperation::SaveProjectAsFile
+                | ReviewedCanonicalOperation::SaveUserTemplateFile
+                | ReviewedCanonicalOperation::SaveProjectBackupFile | ReviewedCanonicalOperation::DeleteProjectBackupFile | ReviewedCanonicalOperation::ManageProjectBackupDeletionJournal | ReviewedCanonicalOperation::AcknowledgeProjectFile
+                | ReviewedCanonicalOperation::OpenProject
+                | ReviewedCanonicalOperation::RestoreProjectBackup
+        ) {
+            OperationAuditRequirement::Immutable
+        } else {
+            OperationAuditRequirement::NotApplicable
+        },
+        adapter_policy,
+        receipt_policy,
+        rate_policy: if matches!(
+            reviewed,
+            ReviewedCanonicalOperation::SetTimelineTransportPlaying
+                | ReviewedCanonicalOperation::CommitTimelineLoopRuntime
+                | ReviewedCanonicalOperation::AbortTimelineFollow
+                | ReviewedCanonicalOperation::EngageSafetyBlackout
+                | ReviewedCanonicalOperation::ReleaseBlackout
+                | ReviewedCanonicalOperation::ArmOutputOwnership
+                | ReviewedCanonicalOperation::TakeOverStandby
+                | ReviewedCanonicalOperation::AddDisplayOutput
+                | ReviewedCanonicalOperation::AddExternalOutput
+                | ReviewedCanonicalOperation::ConfigureVideoOutput
+                | ReviewedCanonicalOperation::RemoveVideoOutput
+                | ReviewedCanonicalOperation::AssignVideoOutputComposition
+                | ReviewedCanonicalOperation::SetDisplayWindowOpen
+                | ReviewedCanonicalOperation::SetBlackout
+                | ReviewedCanonicalOperation::SetLightingMaster
+                | ReviewedCanonicalOperation::SetGroupSubmaster
+                | ReviewedCanonicalOperation::SetVideoMaster
+                | ReviewedCanonicalOperation::LaunchVideoClip
+                | ReviewedCanonicalOperation::TakeVideoClip
+                | ReviewedCanonicalOperation::EnableShowArtNetLoopbackRoute
+                | ReviewedCanonicalOperation::SetNetworkDmxRoutes
+                | ReviewedCanonicalOperation::EnableShowSerialDmxSafetyBlackoutRoute
+                | ReviewedCanonicalOperation::StopShowSerialDmxSafetyBlackoutRoute
+                | ReviewedCanonicalOperation::EnableUsbDmxUniverseRoute
+                | ReviewedCanonicalOperation::StopUsbDmxUniverseRoute
+                | ReviewedCanonicalOperation::SendDsf2026ArtNetAcceptanceProbe
+                | ReviewedCanonicalOperation::AcknowledgeDsf2026ArtNetAcceptanceProbeInDoubt
+                | ReviewedCanonicalOperation::EnableShowSpoutOutputs
+                | ReviewedCanonicalOperation::ResetShowSpoutOutputs
+                | ReviewedCanonicalOperation::EnableOutput
+                | ReviewedCanonicalOperation::AcquireOutputLease
+                | ReviewedCanonicalOperation::RenewOutputLease
+                | ReviewedCanonicalOperation::RecoverOutputLease
+                | ReviewedCanonicalOperation::RelinquishOutputLease
+                | ReviewedCanonicalOperation::ForceTransferOutputLease
+                | ReviewedCanonicalOperation::NewProject
+                | ReviewedCanonicalOperation::SaveProjectFile
+                | ReviewedCanonicalOperation::SaveProjectAsFile
+                | ReviewedCanonicalOperation::SaveUserTemplateFile
+                | ReviewedCanonicalOperation::SaveProjectBackupFile | ReviewedCanonicalOperation::DeleteProjectBackupFile | ReviewedCanonicalOperation::ManageProjectBackupDeletionJournal | ReviewedCanonicalOperation::AcknowledgeProjectFile
+                | ReviewedCanonicalOperation::OpenProject
+                | ReviewedCanonicalOperation::RestoreProjectBackup
+        ) {
+            RatePolicy::TokenBucket4PerSecondBurst8
+        } else {
+            RatePolicy::FailClosed
+        },
+        payload_policy: PayloadPolicy::FailClosed,
+        consent_policy: if matches!(reviewed, ReviewedCanonicalOperation::EngageSafetyBlackout) {
+            ConsentPolicy::NotRequiredForSafetyOnly
+        } else if matches!(
+            reviewed,
+            ReviewedCanonicalOperation::EnableOutput
+                | ReviewedCanonicalOperation::AddDisplayOutput
+                | ReviewedCanonicalOperation::AddExternalOutput
+                | ReviewedCanonicalOperation::ConfigureVideoOutput
+                | ReviewedCanonicalOperation::RemoveVideoOutput
+                | ReviewedCanonicalOperation::ReleaseBlackout
+                | ReviewedCanonicalOperation::SetDisplayWindowOpen
+                | ReviewedCanonicalOperation::SetBlackout
+                | ReviewedCanonicalOperation::SetLightingMaster
+                | ReviewedCanonicalOperation::SetGroupSubmaster
+                | ReviewedCanonicalOperation::SetVideoMaster
+                | ReviewedCanonicalOperation::LaunchVideoClip
+                | ReviewedCanonicalOperation::TakeVideoClip
+                | ReviewedCanonicalOperation::AcquireOutputLease
+                | ReviewedCanonicalOperation::RenewOutputLease
+                | ReviewedCanonicalOperation::RecoverOutputLease
+                | ReviewedCanonicalOperation::RelinquishOutputLease
+        ) {
+            ConsentPolicy::LocalExplicitAction
+        } else if matches!(
+            reviewed,
+            ReviewedCanonicalOperation::ArmOutputOwnership
+                | ReviewedCanonicalOperation::TakeOverStandby
+                | ReviewedCanonicalOperation::AssignVideoOutputComposition
+                | ReviewedCanonicalOperation::EnableShowArtNetLoopbackRoute
+                | ReviewedCanonicalOperation::SetNetworkDmxRoutes
+                | ReviewedCanonicalOperation::EnableShowSerialDmxSafetyBlackoutRoute
+                | ReviewedCanonicalOperation::StopShowSerialDmxSafetyBlackoutRoute
+                | ReviewedCanonicalOperation::EnableUsbDmxUniverseRoute
+                | ReviewedCanonicalOperation::StopUsbDmxUniverseRoute
+                | ReviewedCanonicalOperation::SendDsf2026ArtNetAcceptanceProbe
+                | ReviewedCanonicalOperation::AcknowledgeDsf2026ArtNetAcceptanceProbeInDoubt
+                | ReviewedCanonicalOperation::EnableShowSpoutOutputs
+                | ReviewedCanonicalOperation::ResetShowSpoutOutputs
+                | ReviewedCanonicalOperation::ForceTransferOutputLease
+                | ReviewedCanonicalOperation::NewProject
+                | ReviewedCanonicalOperation::SaveProjectFile
+                | ReviewedCanonicalOperation::SaveProjectAsFile
+                | ReviewedCanonicalOperation::SaveUserTemplateFile
+                | ReviewedCanonicalOperation::SaveProjectBackupFile | ReviewedCanonicalOperation::DeleteProjectBackupFile | ReviewedCanonicalOperation::ManageProjectBackupDeletionJournal | ReviewedCanonicalOperation::AcknowledgeProjectFile
+                | ReviewedCanonicalOperation::OpenProject
+                | ReviewedCanonicalOperation::RestoreProjectBackup
+        ) {
+            ConsentPolicy::NativeDangerConfirmation
+        } else {
+            ConsentPolicy::FailClosed
+        },
+        derived_adapters: Vec::new(),
+    })
+}
+
+fn reviewed_query_operation(command: &str) -> Option<ReviewedQueryOperation> {
+    let (operation_id, class, domain_capability) = match command {
+        "inspect_project_backup_control_plane_v1" => ("syndocal.query.project.backup.inspect.v1", OperationClass::ProjectAuthority, OperationCapability::ProjectAuthorityRead),
+        "list_project_backups_control_plane_v1" => ("syndocal.query.project.backup.list.v1", OperationClass::ProjectAuthority, OperationCapability::ProjectAuthorityRead),
+        "query_project_backup_delete_status_v1" => (protocol::control_plane_file::BACKUP_DELETE_STATUS_ID, OperationClass::ProjectAuthority, OperationCapability::ProjectAuthorityRead),
+        "query_project_backup_deletion_journal_v1" => (protocol::control_plane_backup_management::QUERY_ID, OperationClass::ProjectAuthority, OperationCapability::ProjectAuthorityRead),
+        "query_project_backup_deletion_management_status_v1" => (protocol::control_plane_backup_management::STATUS_ID, OperationClass::ProjectAuthority, OperationCapability::ProjectAuthorityRead),
+        "query_project_backup_authority_v1" => ("syndocal.query.project.backup.authority.v1", OperationClass::ProjectAuthority, OperationCapability::ProjectAuthorityRead),
+        "query_project_file_authority_v1" => ("syndocal.query.project.file.authority.v1", OperationClass::ProjectAuthority, OperationCapability::ProjectAuthorityRead),
+        "query_project_file_status_v1" => ("syndocal.query.project.file.status.v1", OperationClass::ProjectAuthority, OperationCapability::ProjectAuthorityRead),
+        "query_project_replacement_authority_v1" => (
+            PROJECT_REPLACEMENT_AUTHORITY_OPERATION_ID,
+            OperationClass::ProjectAuthority,
+            OperationCapability::ProjectAuthorityRead,
+        ),
+        "get_control_plane_operation_registry" => (
+            "syndocal.query.control_plane.registry.v1",
+            OperationClass::Discovery,
+            OperationCapability::RegistryDiscovery,
+        ),
+        "get_control_plane_canonical_registry" => (
+            "syndocal.query.control_plane.canonical_registry.v3",
+            OperationClass::Discovery,
+            OperationCapability::RegistryDiscovery,
+        ),
+        "get_control_plane_query_schema_catalog" => (
+            "syndocal.query.control_plane.schemas.v1",
+            OperationClass::Discovery,
+            OperationCapability::RegistryDiscovery,
+        ),
+        "get_control_plane_query_capabilities" => (
+            "syndocal.query.control_plane.capabilities.v1",
+            OperationClass::Discovery,
+            OperationCapability::RegistryDiscovery,
+        ),
+        "query_control_plane_project_authority" => (
+            "syndocal.query.project.authority.v1",
+            OperationClass::ProjectAuthority,
+            OperationCapability::ProjectAuthorityRead,
+        ),
+        "query_control_plane_runtime_generations" => (
+            "syndocal.query.runtime.generations.v1",
+            OperationClass::RuntimeObservation,
+            OperationCapability::RuntimeRead,
+        ),
+        "query_timeline_transport_authority_v1" => (
+            TIMELINE_TRANSPORT_AUTHORITY_QUERY_OPERATION_ID,
+            OperationClass::RuntimeObservation,
+            OperationCapability::RuntimeRead,
+        ),
+        "query_timeline_loop_runtime_authority_v1" => (
+            TIMELINE_LOOP_RUNTIME_AUTHORITY_QUERY_OPERATION_ID,
+            OperationClass::RuntimeObservation,
+            OperationCapability::RuntimeRead,
+        ),
+        "query_timeline_follow_abort_authority_v1" => (
+            TIMELINE_FOLLOW_ABORT_AUTHORITY_QUERY_OPERATION_ID,
+            OperationClass::RuntimeObservation,
+            OperationCapability::RuntimeRead,
+        ),
+        "allocate_output_control_request_id_v1" => (
+            "syndocal.query.output.control.request_identity.v1",
+            OperationClass::RuntimeObservation,
+            OperationCapability::RuntimeRead,
+        ),
+        "query_output_control_authority_v1" => (
+            OUTPUT_CONTROL_AUTHORITY_QUERY_OPERATION_ID,
+            OperationClass::RuntimeObservation,
+            OperationCapability::RuntimeRead,
+        ),
+        "query_output_lease_authority_v1" => (
+            OUTPUT_LEASE_AUTHORITY_QUERY_OPERATION_ID,
+            OperationClass::RuntimeObservation,
+            OperationCapability::RuntimeRead,
+        ),
+        "query_dsf2026_artnet_acceptance_probe_status_v1" => (
+            OUTPUT_DSF2026_ARTNET_ACCEPTANCE_PROBE_STATUS_QUERY_OPERATION_ID,
+            OperationClass::RuntimeObservation,
+            OperationCapability::RuntimeRead,
+        ),
+        "query_display_add_lease_authority_v1" => (
+            OUTPUT_DISPLAY_ADD_AUTHORITY_QUERY_OPERATION_ID,
+            OperationClass::RuntimeObservation,
+            OperationCapability::RuntimeRead,
+        ),
+        "query_control_plane_output_ownership" => (
+            "syndocal.query.output.ownership.v1",
+            OperationClass::OutputOwnership,
+            OperationCapability::OutputOwnershipRead,
+        ),
+        "list_video_display_monitors" => (
+            "syndocal.query.video.display_monitors.v1",
+            OperationClass::RuntimeObservation,
+            OperationCapability::RuntimeRead,
+        ),
+        "list_video_camera_profiles" => (
+            "syndocal.query.video.camera_profiles.v1",
+            OperationClass::RuntimeObservation,
+            OperationCapability::RuntimeRead,
+        ),
+        "discover_syphon_sources" => (
+            "syndocal.query.video.syphon_sources.v1",
+            OperationClass::RuntimeObservation,
+            OperationCapability::RuntimeRead,
+        ),
+        "list_ndi_sources_v1" => (
+            "syndocal.query.video.ndi_sources.v1",
+            OperationClass::RuntimeObservation,
+            OperationCapability::RuntimeRead,
+        ),
+        "probe_video_camera_profile" => (
+            "syndocal.query.video.camera_profile_probe.v1",
+            OperationClass::RuntimeObservation,
+            OperationCapability::RuntimeRead,
+        ),
+        "get_video_output_window_observation_v1" => (
+            "syndocal.query.video.output_window_observation.v1",
+            OperationClass::RuntimeObservation,
+            OperationCapability::RuntimeRead,
+        ),
+        "poll_control_plane_observation_events" => (
+            "syndocal.query.events.observations.v1",
+            OperationClass::RuntimeObservation,
+            OperationCapability::RuntimeRead,
+        ),
+        _ => return None,
+    };
+    Some(ReviewedQueryOperation {
+        operation_id,
+        class,
+        domain_capability,
+    })
+}
+
+fn descriptor_for_command(operation_id: &str) -> OperationDescriptor {
+    if let Some(reviewed) = reviewed_query_operation(operation_id) {
+        return OperationDescriptor {
+            schema: SchemaIdentity::descriptor(),
+            operation_id: reviewed.operation_id.to_string(),
+            source_family: OperationSourceFamily::TauriCommand,
+            source_id: operation_id.to_string(),
+            class: reviewed.class,
+            risk: OperationRisk::R0,
+            capabilities: vec![
+                OperationCapability::ReadOnly,
+                OperationCapability::LocalWindowBound,
+                // Registry discovery remains observable during Full Lock and has
+                // no mutation capability.
+                OperationCapability::AllowedDuringFullLock,
+                reviewed.domain_capability,
+            ],
+            availability: OperationAvailability::LocalWindowOnly,
+            idempotency: OperationIdempotency::ReadOnly,
+            audit: OperationAuditRequirement::NotApplicable,
+            request_schema: command_schema(reviewed.operation_id, "request"),
+            response_schema: command_schema(reviewed.operation_id, "response"),
+        };
+    }
+    if matches!(
+        operation_id,
+        "add_display_output_v2"
+            | "add_external_output_v2"
+            | "configure_video_output_v2"
+            | "remove_video_output_v2"
+            | "new_project_control_plane_v1"
+            | "open_project_control_plane_v1"
+            | "restore_project_backup_control_plane_v1"
+            | "save_project_control_plane_v1"
+            | "save_project_as_control_plane_v1"
+            | "save_user_template_control_plane_v1"
+            | "create_project_backup_control_plane_v1"
+            | "acknowledge_project_file_control_plane_v1"
+            | "delete_project_backup_control_plane_v1"
+            | "manage_project_backup_deletion_journal_v1"
+            | "assign_video_output_composition_v2"
+            | "set_lighting_master_output_control_v2"
+            | "set_group_submaster_output_control_v2"
+            | "set_video_master_output_control_v2"
+            | "launch_video_clip_output_control_v2"
+            | "take_video_clip_output_control_v2"
+            | "set_network_dmx_routes_v1"
+            | "enable_show_art_net_loopback_route_v1"
+            | "enable_show_serial_dmx_safety_blackout_route_v1"
+            | "stop_show_serial_dmx_safety_blackout_route_v1"
+            | "enable_usb_dmx_universe_route_v1"
+            | "stop_usb_dmx_universe_route_v1"
+            | "enable_show_spout_outputs_v2"
+            | "reset_show_spout_outputs_v1"
+            | "send_dsf2026_artnet_acceptance_probe_v1"
+            | "acknowledge_dsf2026_artnet_acceptance_probe_in_doubt_v1"
+            | "set_display_output_window_open_v2"
+            | "enable_output_control_v2"
+            | "acquire_output_lease_v2"
+            | "renew_output_lease_v2"
+            | "recover_output_lease_v2"
+            | "relinquish_output_lease_v2"
+            | "force_transfer_output_lease_v2"
+            | "reorder_cue_lists"
+            | "rename_cue_list"
+            | "delete_cue_list"
+            | "create_scene_authoritative_v1"
+    ) {
+        let source_id = operation_id;
+        let reviewed = reviewed_canonical_operation(source_id)
+            .expect("reviewed canonical command must have a descriptor mapping");
+        return unavailable_descriptor_for_semantic_operation(source_id, reviewed.operation_id());
+    }
+    if operation_id == "set_effect_enabled" {
+        // v1 has no safe executable-authoritative mutation descriptor. Keep
+        // its raw inventory row fail-closed/R5 while preserving the precise
+        // v2 schema identity needed for the reviewed direct projection.
+        return unavailable_descriptor_for_semantic_operation(
+            operation_id,
+            SET_EFFECT_ENABLED_OPERATION_ID,
+        );
+    }
+    if operation_id == "set_timeline_transport_playing_runtime_v1" {
+        // v1 remains an inventory-only view. The v2 direct source is the
+        // reviewed runtime mutation; its local rate/receipt policy is not
+        // retroactively advertised by the legacy registry.
+        return unavailable_descriptor_for_semantic_operation(
+            operation_id,
+            TIMELINE_TRANSPORT_SET_PLAYING_OPERATION_ID,
+        );
+    }
+    if operation_id == "commit_timeline_loop_runtime_v1" {
+        return unavailable_descriptor_for_semantic_operation(
+            operation_id,
+            TIMELINE_LOOP_RUNTIME_OPERATION_ID,
+        );
+    }
+    if operation_id == "abort_timeline_follow_runtime_v1" {
+        return unavailable_descriptor_for_semantic_operation(
+            operation_id,
+            TIMELINE_FOLLOW_ABORT_OPERATION_ID,
+        );
+    }
+    if operation_id == "safety_blackout_engage_v1" {
+        return unavailable_descriptor_for_semantic_operation(
+            operation_id,
+            SAFETY_BLACKOUT_ENGAGE_OPERATION_ID,
+        );
+    }
+    if operation_id == "set_blackout_output_control_v2" {
+        return unavailable_descriptor_for_semantic_operation(
+            operation_id,
+            OUTPUT_BLACKOUT_SET_OPERATION_ID,
+        );
+    }
+    if operation_id == "release_blackout_output_control_v2" {
+        return unavailable_descriptor_for_semantic_operation(
+            operation_id,
+            OUTPUT_BLACKOUT_RELEASE_OPERATION_ID,
+        );
+    }
+    if operation_id == "arm_output_control_v2" {
+        return unavailable_descriptor_for_semantic_operation(
+            operation_id,
+            OUTPUT_OWNERSHIP_ARM_OPERATION_ID,
+        );
+    }
+    if operation_id == "take_over_output_control_v2" {
+        return unavailable_descriptor_for_semantic_operation(
+            operation_id,
+            OUTPUT_STANDBY_TAKEOVER_OPERATION_ID,
+        );
+    }
+    unavailable_descriptor(operation_id)
+}
+
+fn unavailable_descriptor(operation_id: &str) -> OperationDescriptor {
+    let semantic_operation_id = format!("syndocal.inventory.tauri.{operation_id}.v1");
+    unavailable_descriptor_for_semantic_operation(operation_id, &semantic_operation_id)
+}
+
+fn unavailable_descriptor_for_semantic_operation(
+    source_id: &str,
+    semantic_operation_id: &str,
+) -> OperationDescriptor {
+    OperationDescriptor {
+        schema: SchemaIdentity::descriptor(),
+        operation_id: semantic_operation_id.to_string(),
+        source_family: OperationSourceFamily::TauriCommand,
+        source_id: source_id.to_string(),
+        class: OperationClass::Mutation,
+        risk: OperationRisk::R5,
+        capabilities: vec![OperationCapability::LocalWindowBound],
+        availability: OperationAvailability::Unavailable,
+        idempotency: OperationIdempotency::Mutating,
+        audit: OperationAuditRequirement::RequiredBeforeExternalExecution,
+        request_schema: command_schema(semantic_operation_id, "request"),
+        response_schema: command_schema(semantic_operation_id, "response"),
+    }
+}
+
+fn effect_enabled_unclassified_reason(descriptor: &OperationDescriptor) -> Option<&'static str> {
+    match (descriptor.source_family, descriptor.source_id.as_str()) {
+        (OperationSourceFamily::EngineCommand, "set_effect_enabled") => {
+            Some("legacy effect-enabled engine ingress lacks a versioned authored fence")
+        }
+        (OperationSourceFamily::RemoteInputEvent, "set_effect_enabled")
+        | (OperationSourceFamily::RemoteWireOperation, "setEffectEnabled") => {
+            Some("legacy remote effect-enabled ingress is fail-closed pending versioned migration")
+        }
+        (OperationSourceFamily::MidiControlAction, "effect_enabled")
+        | (OperationSourceFamily::MidiControlEvent, "set_effect_enabled") => {
+            Some("legacy midi effect-enabled ingress is fail-closed pending versioned migration")
+        }
+        (OperationSourceFamily::OscControlAction, "effect_enabled")
+        | (OperationSourceFamily::OscInputEvent, "set_effect_enabled") => {
+            Some("legacy osc effect-enabled ingress is fail-closed pending versioned migration")
+        }
+        (OperationSourceFamily::EngineCommand, "set_timeline_playing") => {
+            Some("legacy timeline set-playing engine ingress lacks a versioned runtime identity")
+        }
+        (OperationSourceFamily::RemoteInputEvent, "set_timeline_playing")
+        | (OperationSourceFamily::RemoteWireOperation, "setTimelinePlaying") => Some(
+            "legacy remote timeline set-playing ingress is fail-closed pending versioned migration",
+        ),
+        (OperationSourceFamily::MidiControlAction, "timeline_play")
+        | (OperationSourceFamily::MidiControlEvent, "set_timeline_playing") => Some(
+            "legacy midi timeline set-playing ingress is fail-closed pending versioned migration",
+        ),
+        (OperationSourceFamily::OscControlAction, "timeline_play")
+        | (OperationSourceFamily::OscInputEvent, "set_timeline_playing") => Some(
+            "legacy osc timeline set-playing ingress is fail-closed pending versioned migration",
+        ),
+        _ => None,
+    }
+}
+
+fn unavailable_frontend_invoke_descriptor(source_id: &str) -> OperationDescriptor {
+    let operation_id = format!("syndocal.inventory.frontend.invoke.{source_id}.v1");
+    OperationDescriptor {
+        schema: SchemaIdentity::descriptor(),
+        operation_id: operation_id.clone(),
+        source_family: OperationSourceFamily::FrontendInvoke,
+        source_id: source_id.to_string(),
+        class: OperationClass::Mutation,
+        risk: OperationRisk::R5,
+        capabilities: vec![OperationCapability::InternalInventory],
+        availability: OperationAvailability::Unavailable,
+        idempotency: OperationIdempotency::Mutating,
+        audit: OperationAuditRequirement::RequiredBeforeExternalExecution,
+        request_schema: command_schema(&operation_id, "request"),
+        response_schema: command_schema(&operation_id, "response"),
+    }
+}
+
+fn frontend_invoke_names_from_manifest(
+    source: &str,
+) -> Result<Vec<String>, ControlPlaneRegistryError> {
+    let names = serde_json::from_str::<Vec<String>>(source)
+        .map_err(|_| ControlPlaneRegistryError::InvalidFrontendInvokeManifest)?;
+    let mut prior: Option<&str> = None;
+    for name in &names {
+        if !is_lower_snake_case(name) {
+            return Err(ControlPlaneRegistryError::InvalidFrontendInvokeManifest);
+        }
+        if let Some(prior) = prior {
+            if name == prior {
+                return Err(ControlPlaneRegistryError::DuplicateFrontendInvokeCommand(
+                    name.clone(),
+                ));
+            }
+            if name.as_str() < prior {
+                return Err(ControlPlaneRegistryError::InvalidFrontendInvokeManifest);
+            }
+        }
+        prior = Some(name);
+    }
+    Ok(names)
+}
+
+fn command_schema(operation_id: &str, direction: &str) -> SchemaIdentity {
+    SchemaIdentity {
+        name: format!("{operation_id}.{direction}"),
+        version: if matches!(
+            operation_id,
+            OUTPUT_BLACKOUT_RELEASE_OPERATION_ID
+                | OUTPUT_BLACKOUT_SET_OPERATION_ID
+                | OUTPUT_OWNERSHIP_ARM_OPERATION_ID
+                | OUTPUT_STANDBY_TAKEOVER_OPERATION_ID
+                | OUTPUT_DISPLAY_ADD_OPERATION_ID
+                | OUTPUT_EXTERNAL_ADD_OPERATION_ID
+                | OUTPUT_VIDEO_CONFIGURE_OPERATION_ID
+                | OUTPUT_VIDEO_REMOVE_OPERATION_ID
+                | OUTPUT_DISPLAY_WINDOW_SET_OPEN_OPERATION_ID
+                | OUTPUT_VIDEO_COMPOSITION_ASSIGN_OPERATION_ID
+                | OUTPUT_LIGHTING_MASTER_SET_OPERATION_ID
+                | OUTPUT_GROUP_SUBMASTER_SET_OPERATION_ID
+                | OUTPUT_VIDEO_MASTER_SET_OPERATION_ID
+                | OUTPUT_VIDEO_CLIP_LAUNCH_OPERATION_ID
+                | OUTPUT_VIDEO_CLIP_TAKE_OPERATION_ID
+                | OUTPUT_SHOW_ARTNET_LOOPBACK_ROUTE_ENABLE_OPERATION_ID
+                | OUTPUT_NETWORK_DMX_ROUTES_SET_OPERATION_ID
+                | OUTPUT_SHOW_SERIAL_DMX_SAFETY_BLACKOUT_ROUTE_ENABLE_OPERATION_ID
+                | OUTPUT_SHOW_SERIAL_DMX_SAFETY_BLACKOUT_ROUTE_STOP_OPERATION_ID
+                | OUTPUT_USB_DMX_UNIVERSE_ROUTE_ENABLE_OPERATION_ID
+                | OUTPUT_USB_DMX_UNIVERSE_ROUTE_STOP_OPERATION_ID
+                | OUTPUT_SHOW_SPOUT_OUTPUTS_ENABLE_OPERATION_ID
+                | OUTPUT_SHOW_SPOUT_OUTPUTS_RESET_OPERATION_ID
+                | OUTPUT_DSF2026_ARTNET_ACCEPTANCE_PROBE_OPERATION_ID
+                | OUTPUT_DSF2026_ARTNET_ACCEPTANCE_PROBE_RECONCILE_OPERATION_ID
+                | OUTPUT_ENABLE_OPERATION_ID
+                | OUTPUT_LEASE_ACQUIRE_OPERATION_ID
+                | OUTPUT_LEASE_RENEW_OPERATION_ID
+                | OUTPUT_LEASE_RECOVER_OPERATION_ID
+                | OUTPUT_LEASE_RELINQUISH_OPERATION_ID
+                | OUTPUT_LEASE_FORCE_TRANSFER_OPERATION_ID
+        ) {
+            OUTPUT_CONTROL_COMMAND_SCHEMA_VERSION
+        } else {
+            CONTROL_PLANE_SCHEMA_VERSION
+        },
+    }
+}
+
+/// Parse the single production `generate_handler!` declaration.  This is a
+/// compile-time embedded source snapshot, so release inventory never depends
+/// on disk I/O.  It is deliberately strict: comments, qualified paths, and
+/// duplicate names cause startup discovery to fail instead of inventing an
+/// ambiguous operation identity.
+pub fn registered_tauri_command_names_from_source(
+    source: &str,
+) -> Result<Vec<String>, ControlPlaneRegistryError> {
+    const MARKER: &str = "tauri::generate_handler![";
+    const WINDOWS_X64_ASIO_CFG: &str =
+        "#[cfg(all(target_os = \"windows\", target_arch = \"x86_64\", feature = \"asio\"))]";
+    if source.match_indices(MARKER).count() > 1 {
+        return Err(ControlPlaneRegistryError::MultipleHandlerMarkers);
+    }
+    let marker_offset = source
+        .find(MARKER)
+        .ok_or(ControlPlaneRegistryError::HandlerMarkerMissing)?;
+    let body_start = marker_offset + MARKER.len();
+    let remainder = &source[body_start..];
+    let body_end = remainder
+        .find("](invoke)")
+        .or_else(|| remainder.find("],\r\n"))
+        .or_else(|| remainder.find("],\n"))
+        .or_else(|| remainder.find("];"))
+        .or_else(|| remainder.find("]) "))
+        .or_else(|| remainder.find("])\r\n"))
+        .or_else(|| remainder.find("])\n"))
+        .or_else(|| remainder.find("])"))
+        .or_else(|| remainder.find("\n]"))
+        .ok_or(ControlPlaneRegistryError::HandlerClosingBracketMissing)?;
+    let mut distinct = BTreeSet::new();
+    let mut names = Vec::new();
+    let mut pending_windows_x64_asio_cfg = false;
+    for raw_line in remainder[..body_end].lines() {
+        let name = raw_line.trim().trim_end_matches(',').trim();
+        if name.is_empty() {
+            continue;
+        }
+        if name == WINDOWS_X64_ASIO_CFG {
+            if pending_windows_x64_asio_cfg {
+                return Err(ControlPlaneRegistryError::InvalidCommandName(
+                    name.to_string(),
+                ));
+            }
+            pending_windows_x64_asio_cfg = true;
+            continue;
+        }
+        if !is_lower_snake_case(name) {
+            return Err(ControlPlaneRegistryError::InvalidCommandName(
+                name.to_string(),
+            ));
+        }
+        if !distinct.insert(name.to_string()) {
+            return Err(ControlPlaneRegistryError::DuplicateCommandName(
+                name.to_string(),
+            ));
+        }
+        names.push(name.to_string());
+        pending_windows_x64_asio_cfg = false;
+    }
+    if pending_windows_x64_asio_cfg {
+        return Err(ControlPlaneRegistryError::InvalidCommandName(
+            WINDOWS_X64_ASIO_CFG.to_string(),
+        ));
+    }
+    if names.is_empty() {
+        return Err(ControlPlaneRegistryError::HandlerMarkerMissing);
+    }
+    names.sort();
+    Ok(names)
+}
+
+pub fn verify_registry_exact_set(
+    command_names: &[String],
+    registry: &OperationRegistry,
+) -> Result<(), ControlPlaneRegistryError> {
+    let command_names = command_names.iter().collect::<BTreeSet<_>>();
+    let descriptor_source_ids = registry
+        .operations
+        .iter()
+        .filter(|descriptor| descriptor.source_family == OperationSourceFamily::TauriCommand)
+        .map(|descriptor| &descriptor.source_id)
+        .collect::<BTreeSet<_>>();
+    if let Some(missing) = command_names.difference(&descriptor_source_ids).next() {
+        return Err(ControlPlaneRegistryError::MissingRegistryDescriptor(
+            (*missing).to_string(),
+        ));
+    }
+    if let Some(unexpected) = descriptor_source_ids.difference(&command_names).next() {
+        return Err(ControlPlaneRegistryError::UnexpectedRegistryDescriptor(
+            (*unexpected).to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_lower_snake_case(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    first.is_ascii_lowercase()
+        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn video_authoring_routes_are_local_admission_only() {
+        for (command, class) in [
+            ("query_video_authoring_lease_authority_v1", TauriRouteAdmissionClass::ReadOnly),
+            ("replace_video_authoring_lease_v1", TauriRouteAdmissionClass::RuntimeMutation),
+        ] {
+            assert_eq!(tauri_route_admission_class(command), Some(class));
+            let descriptor = descriptor_for_command(command);
+            assert_eq!(descriptor.risk, OperationRisk::R5);
+            assert_eq!(descriptor.availability, OperationAvailability::Unavailable);
+            assert!(reviewed_canonical_operation(command).is_none());
+        }
+    }
+
+    #[test]
+    fn tauri_route_admission_table_is_exact_and_fail_closed() {
+        let names = registered_tauri_command_names_from_source(MAIN_RS_SOURCE).unwrap();
+        let fingerprint = format!("{:x}", Sha256::digest(names.join("\n").as_bytes()));
+        assert_eq!(names.len(), FROZEN_TAURI_ROUTE_ADMISSION_COUNT);
+        assert_eq!(fingerprint, FROZEN_TAURI_ROUTE_ADMISSION_SHA256);
+        let classes = TAURI_ROUTE_ADMISSION_CLASSES
+            .as_ref()
+            .unwrap_or_else(|error| panic!("D3 admission inventory must validate: {error}"));
+        assert_eq!(classes.len(), names.len());
+        assert_eq!(
+            classes.keys().cloned().collect::<BTreeSet<_>>(),
+            names.iter().cloned().collect::<BTreeSet<_>>()
+        );
+        for (route, expected) in [
+            (
+                "add_video_generator_layer",
+                TauriRouteAdmissionClass::RendererTicketedProjectMutation,
+            ),
+            (
+                "set_video_layer_generator",
+                TauriRouteAdmissionClass::RendererTicketedProjectMutation,
+            ),
+            ("get_snapshot", TauriRouteAdmissionClass::ReadOnly),
+            ("get_live_video_output_health", TauriRouteAdmissionClass::ReadOnly),
+            (
+                "cancel_native_thumbnail_request_v1",
+                TauriRouteAdmissionClass::RecoveryMaintenance,
+            ),
+            (
+                "get_video_layer_thumbnail",
+                TauriRouteAdmissionClass::ReadOnly,
+            ),
+            (
+                "get_media_asset_thumbnail",
+                TauriRouteAdmissionClass::ReadOnly,
+            ),
+            (
+                "resolve_missing_project_publication_v1",
+                TauriRouteAdmissionClass::RecoveryMaintenance,
+            ),
+            (
+                "register_project_transaction_owner",
+                TauriRouteAdmissionClass::RecoveryMaintenance,
+            ),
+            (
+                "query_timeline_loop_runtime_authority_v1",
+                TauriRouteAdmissionClass::ReadOnly,
+            ),
+            (
+                "commit_timeline_loop_runtime_v1",
+                TauriRouteAdmissionClass::RuntimeMutation,
+            ),
+            (
+                "open_pane_window",
+                TauriRouteAdmissionClass::RuntimeMutation,
+            ),
+            (
+                "close_pane_window",
+                TauriRouteAdmissionClass::RuntimeMutation,
+            ),
+            (
+                "capture_pane_window_placements",
+                TauriRouteAdmissionClass::ReadOnly,
+            ),
+            (
+                "get_pending_pane_window_close",
+                TauriRouteAdmissionClass::ReadOnly,
+            ),
+            (
+                "cancel_pane_window_close",
+                TauriRouteAdmissionClass::RuntimeMutation,
+            ),
+            (
+                "get_dj_link_machine_status",
+                TauriRouteAdmissionClass::ReadOnly,
+            ),
+            (
+                "list_dj_link_wired_candidates",
+                TauriRouteAdmissionClass::ReadOnly,
+            ),
+            (
+                "arm_dj_link_machine",
+                TauriRouteAdmissionClass::RuntimeMutation,
+            ),
+            (
+                "disarm_dj_link_machine",
+                TauriRouteAdmissionClass::RuntimeMutation,
+            ),
+            ("get_extensions_status", TauriRouteAdmissionClass::ReadOnly),
+            ("set_extensions", TauriRouteAdmissionClass::RuntimeMutation),
+            ("get_asio_output_status", TauriRouteAdmissionClass::ReadOnly),
+            (
+                "get_asio_output_capabilities",
+                TauriRouteAdmissionClass::ReadOnly,
+            ),
+            (
+                "list_asio_output_drivers",
+                TauriRouteAdmissionClass::RuntimeMutation,
+            ),
+            (
+                "reselect_asio_output_profile",
+                TauriRouteAdmissionClass::RuntimeMutation,
+            ),
+            (
+                "revalidate_asio_program_cue_output",
+                TauriRouteAdmissionClass::RuntimeMutation,
+            ),
+            (
+                "start_asio_program_cue_output",
+                TauriRouteAdmissionClass::RuntimeMutation,
+            ),
+            (
+                "stop_close_asio_program_cue_output",
+                TauriRouteAdmissionClass::RuntimeMutation,
+            ),
+            (
+                "set_asio_output_test",
+                TauriRouteAdmissionClass::RuntimeMutation,
+            ),
+            (
+                "set_asio_output_solo",
+                TauriRouteAdmissionClass::RuntimeMutation,
+            ),
+            (
+                "set_explicit_wdm_cue_test",
+                TauriRouteAdmissionClass::RuntimeMutation,
+            ),
+            (
+                "select_normal_audio_output",
+                TauriRouteAdmissionClass::RuntimeMutation,
+            ),
+            (
+                "enable_show_serial_dmx_safety_blackout_route_v1",
+                TauriRouteAdmissionClass::LocalPhysicalMutation,
+            ),
+            (
+                "stop_show_serial_dmx_safety_blackout_route_v1",
+                TauriRouteAdmissionClass::LocalPhysicalMutation,
+            ),
+            (
+                "enable_usb_dmx_universe_route_v1",
+                TauriRouteAdmissionClass::LocalPhysicalMutation,
+            ),
+            (
+                "stop_usb_dmx_universe_route_v1",
+                TauriRouteAdmissionClass::LocalPhysicalMutation,
+            ),
+            (
+                "enable_show_spout_outputs_v2",
+                TauriRouteAdmissionClass::LocalPhysicalMutation,
+            ),
+            (
+                "reset_show_spout_outputs_v1",
+                TauriRouteAdmissionClass::LocalPhysicalMutation,
+            ),
+            (
+                "send_dsf2026_artnet_acceptance_probe_v1",
+                TauriRouteAdmissionClass::LocalPhysicalMutation,
+            ),
+            (
+                "acknowledge_dsf2026_artnet_acceptance_probe_in_doubt_v1",
+                TauriRouteAdmissionClass::LocalPhysicalMutation,
+            ),
+            (
+                "set_timeline_audio_clip_output_bus",
+                TauriRouteAdmissionClass::RendererTicketedProjectMutation,
+            ),
+            (
+                "set_video_composition_timeline_layers",
+                TauriRouteAdmissionClass::RendererTicketedProjectMutation,
+            ),
+            (
+                "set_cue_child_timeline_audio_clip_output_bus",
+                TauriRouteAdmissionClass::RendererTicketedProjectMutation,
+            ),
+            // D3/P0: the authoritative Bank create/rename routes carry the
+            // exact E/R/H/owner authority receipt args themselves, so they
+            // must classify as backend-authoritative project mutations and
+            // never require a renderer transaction ticket to reach their
+            // handlers.
+            (
+                "create_cue_list",
+                TauriRouteAdmissionClass::BackendAuthoritativeProjectMutation,
+            ),
+            (
+                "rename_cue_list",
+                TauriRouteAdmissionClass::BackendAuthoritativeProjectMutation,
+            ),
+            (
+                "create_scene_authoritative_v1",
+                TauriRouteAdmissionClass::BackendAuthoritativeProjectMutation,
+            ),
+            (
+                "agent_bridge_execute_native_v1",
+                TauriRouteAdmissionClass::AgentTransportMaintenance,
+            ),
+        ] {
+            assert_eq!(classes.get(route).copied(), Some(expected), "{route}");
+            assert_eq!(
+                tauri_route_admission_class(route),
+                Some(expected),
+                "{route}"
+            );
+        }
+        // Clean break: the retired direct Bank mutation routes are gone from
+        // both the production handler inventory and this admission table.
+        assert!(classes.get("set_cue_list").is_none());
+        assert_eq!(tauri_route_admission_class("set_cue_list"), None);
+        assert!(classes.get("remove_cue_list").is_none());
+        assert_eq!(tauri_route_admission_class("remove_cue_list"), None);
+        assert!(classes.get("mark_asio_output_transport_revision").is_none());
+        assert_eq!(
+            tauri_route_admission_class("mark_asio_output_transport_revision"),
+            None
+        );
+        assert!(classes.get("set_timeline_loop_enabled").is_none());
+        assert_eq!(
+            tauri_route_admission_class("set_timeline_loop_enabled"),
+            None
+        );
+        assert!(classes.get("scale_timeline_loop").is_none());
+        assert_eq!(tauri_route_admission_class("scale_timeline_loop"), None);
+        let mut counts = std::collections::BTreeMap::new();
+        for name in &names {
+            let class = tauri_route_admission_class(name)
+                .unwrap_or_else(|| panic!("registered route is unclassified: {name}"));
+            *counts.entry(class).or_insert(0usize) += 1;
+        }
+        assert_eq!(names.len(), FROZEN_TAURI_ROUTE_ADMISSION_COUNT);
+        assert_eq!(
+            counts[&TauriRouteAdmissionClass::RendererTicketedProjectMutation],
+            137
+        );
+        assert_eq!(
+            counts[&TauriRouteAdmissionClass::BackendAuthoritativeProjectMutation],
+            31
+        );
+        assert_eq!(counts[&TauriRouteAdmissionClass::ReadOnly], 119);
+        assert_eq!(
+            tauri_route_admission_class("discover_syphon_sources"),
+            Some(TauriRouteAdmissionClass::ReadOnly)
+        );
+        assert_eq!(counts[&TauriRouteAdmissionClass::ProjectReplacement], 11);
+        assert_eq!(counts[&TauriRouteAdmissionClass::ProjectHistory], 3);
+        assert_eq!(counts[&TauriRouteAdmissionClass::LocalPhysicalMutation], 8);
+        assert_eq!(counts[&TauriRouteAdmissionClass::RuntimeMutation], 183);
+        assert_eq!(counts[&TauriRouteAdmissionClass::FileExportMutation], 30);
+        assert_eq!(counts[&TauriRouteAdmissionClass::SafetyMutation], 3);
+        assert_eq!(counts[&TauriRouteAdmissionClass::RecoveryMaintenance], 28);
+        assert_eq!(counts[&TauriRouteAdmissionClass::Retired], 27);
+        // The machine-role selector's Standby (disarm) must stay reachable;
+        // both handlers refuse any role but Standby before a transition.
+        for command in ["set_output_ownership_role", "arm_output_ownership_role"] {
+            assert_eq!(
+                tauri_route_admission_class(command),
+                Some(TauriRouteAdmissionClass::SafetyMutation),
+                "{command}"
+            );
+        }
+        assert_eq!(
+            counts[&TauriRouteAdmissionClass::AgentTransportMaintenance],
+            15
+        );
+        assert_eq!(tauri_route_admission_class("patch_fixture"), None);
+        assert_eq!(
+            tauri_route_admission_class("future_unreviewed_mutation"),
+            None
+        );
+    }
+
+    #[test]
+    fn compiled_handler_and_registry_have_the_exact_same_set() {
+        let names = registered_tauri_command_names_from_source(MAIN_RS_SOURCE).unwrap();
+        let registry = registry().unwrap();
+        const R0_ALLOWLIST: [&str; 31] = [
+            "syndocal.query.output.control.request_identity.v1",
+            "syndocal.query.control_plane.registry.v1",
+            "syndocal.query.control_plane.canonical_registry.v3",
+            "syndocal.query.control_plane.capabilities.v1",
+            "syndocal.query.control_plane.schemas.v1",
+            "syndocal.query.events.observations.v1",
+            "syndocal.query.output.ownership.v1",
+            "syndocal.query.project.authority.v1",
+            "syndocal.query.runtime.generations.v1",
+            "syndocal.query.video.display_monitors.v1",
+            "syndocal.query.video.camera_profiles.v1",
+            "syndocal.query.video.ndi_sources.v1",
+            "syndocal.query.video.syphon_sources.v1",
+            "syndocal.query.video.camera_profile_probe.v1",
+            "syndocal.query.video.output_window_observation.v1",
+            OUTPUT_CONTROL_AUTHORITY_QUERY_OPERATION_ID,
+            OUTPUT_LEASE_AUTHORITY_QUERY_OPERATION_ID,
+            OUTPUT_DISPLAY_ADD_AUTHORITY_QUERY_OPERATION_ID,
+            OUTPUT_DSF2026_ARTNET_ACCEPTANCE_PROBE_STATUS_QUERY_OPERATION_ID,
+            TIMELINE_FOLLOW_ABORT_AUTHORITY_QUERY_OPERATION_ID,
+            TIMELINE_LOOP_RUNTIME_AUTHORITY_QUERY_OPERATION_ID,
+            TIMELINE_TRANSPORT_AUTHORITY_QUERY_OPERATION_ID,
+            PROJECT_REPLACEMENT_AUTHORITY_OPERATION_ID,
+            "syndocal.query.project.file.authority.v1",
+            "syndocal.query.project.file.status.v1",
+            "syndocal.query.project.backup.authority.v1",
+            "syndocal.query.project.backup.inspect.v1",
+            "syndocal.query.project.backup.list.v1",
+            protocol::control_plane_file::BACKUP_DELETE_STATUS_ID,
+            protocol::control_plane_backup_management::QUERY_ID,
+            protocol::control_plane_backup_management::STATUS_ID,
+        ];
+        assert_eq!(names.len(), FROZEN_TAURI_ROUTE_ADMISSION_COUNT);
+        // Exact current-source delta: the frozen USB route contributes two
+        // engine commands; the strict Show Spout Reset adds its separately
+        // named atomic engine command. Its five Tauri routes and the local
+        // Spout reset account for the six manifest entries below.
+        // RequestPlaybackLayerSnapshot (DEC-PLAYBACK-LAYER-001) adds one
+        // read-only Engine source.
+        const ENGINE_COMMAND_COUNT: usize = 287;
+        const REMOTE_INPUT_EVENT_COUNT: usize = 51;
+        const REMOTE_CLIENT_REQUEST_COUNT: usize = 7;
+        const REMOTE_WIRE_OPERATION_COUNT: usize = 58;
+        const REMOTE_OPERATION_COUNT: usize =
+            REMOTE_INPUT_EVENT_COUNT + REMOTE_CLIENT_REQUEST_COUNT + REMOTE_WIRE_OPERATION_COUNT;
+        // BeatDivision, the eight Perform actions and the renderer-routed
+        // event each add one inventoried MIDI source.
+        const MIDI_CONTROL_MESSAGE_COUNT: usize = 8;
+        const MIDI_CONTROL_ACTION_COUNT: usize = 65;
+        const MIDI_CLOCK_EVENT_COUNT: usize = 6;
+        const MIDI_CONTROL_EVENT_COUNT: usize = 49;
+        // The eight shared Perform actions and renderer event add nine OSC sources.
+        const OSC_CONTROL_ACTION_COUNT: usize = 60;
+        const OSC_INPUT_EVENT_COUNT: usize = 48;
+        const DMX_INPUT_PROTOCOL_COUNT: usize = 2;
+        const DMX_INPUT_EVENT_COUNT: usize = 2;
+        const MIDI_OSC_DMX_OPERATION_COUNT: usize = MIDI_CONTROL_MESSAGE_COUNT
+            + MIDI_CONTROL_ACTION_COUNT
+            + MIDI_CLOCK_EVENT_COUNT
+            + MIDI_CONTROL_EVENT_COUNT
+            + OSC_CONTROL_ACTION_COUNT
+            + OSC_INPUT_EVENT_COUNT
+            + DMX_INPUT_PROTOCOL_COUNT
+            + DMX_INPUT_EVENT_COUNT;
+        // Generator create/update each add one Tauri and one frontend source;
+        // Preview effect audition and the read-only built-in effect description
+        // add two more of each. Native output cadence health adds one read-only
+        // Tauri source and one frontend invocation source; the read-only Media
+        // Health folder listing (`select_media_relink_folder`) adds one more of each.
+        const FRONTEND_INVOKE_COUNT: usize = 515;
+        assert_eq!(MIDI_OSC_DMX_OPERATION_COUNT, 240);
+        assert_eq!(
+            registry.operations.len(),
+            FROZEN_TAURI_ROUTE_ADMISSION_COUNT
+                + ENGINE_COMMAND_COUNT
+                + REMOTE_OPERATION_COUNT
+                + MIDI_OSC_DMX_OPERATION_COUNT
+                + FRONTEND_INVOKE_COUNT
+        );
+        assert_eq!(registry.operations.len(), 1753);
+        verify_registry_exact_set(&names, &registry).unwrap();
+        let r0 = registry
+            .operations
+            .iter()
+            .filter(|descriptor| descriptor.risk == OperationRisk::R0)
+            .collect::<Vec<_>>();
+        assert_eq!(r0.len(), R0_ALLOWLIST.len());
+        assert_eq!(
+            registry.operations.len() - r0.len(),
+            (FROZEN_TAURI_ROUTE_ADMISSION_COUNT - R0_ALLOWLIST.len())
+                + ENGINE_COMMAND_COUNT
+                + REMOTE_OPERATION_COUNT
+                + MIDI_OSC_DMX_OPERATION_COUNT
+                + FRONTEND_INVOKE_COUNT
+        );
+        assert_eq!(
+            r0.iter()
+                .map(|descriptor| descriptor.operation_id.as_str())
+                .collect::<BTreeSet<_>>(),
+            R0_ALLOWLIST.into_iter().collect::<BTreeSet<_>>()
+        );
+        for descriptor in &r0 {
+            assert_eq!(
+                descriptor.source_family,
+                OperationSourceFamily::TauriCommand
+            );
+            assert_eq!(descriptor.risk, OperationRisk::R0);
+            assert_eq!(
+                descriptor.availability,
+                OperationAvailability::LocalWindowOnly
+            );
+            assert_eq!(descriptor.idempotency, OperationIdempotency::ReadOnly);
+            assert_eq!(descriptor.audit, OperationAuditRequirement::NotApplicable);
+            assert!(descriptor
+                .capabilities
+                .contains(&OperationCapability::AllowedDuringFullLock));
+        }
+        let tauri_unavailable = registry.operations.iter().filter(|descriptor| {
+            descriptor.source_family == OperationSourceFamily::TauriCommand
+                && !R0_ALLOWLIST.contains(&descriptor.operation_id.as_str())
+        });
+        assert_eq!(
+            tauri_unavailable.clone().count(),
+            FROZEN_TAURI_ROUTE_ADMISSION_COUNT - R0_ALLOWLIST.len()
+        );
+        for descriptor in tauri_unavailable {
+            assert_eq!(
+                descriptor.risk,
+                OperationRisk::R5,
+                "{}",
+                descriptor.operation_id
+            );
+            assert_eq!(
+                descriptor.availability,
+                OperationAvailability::Unavailable,
+                "{}",
+                descriptor.operation_id
+            );
+            assert_eq!(
+                descriptor.idempotency,
+                OperationIdempotency::Mutating,
+                "{}",
+                descriptor.operation_id
+            );
+            assert_eq!(
+                descriptor.audit,
+                OperationAuditRequirement::RequiredBeforeExternalExecution,
+                "{}",
+                descriptor.operation_id
+            );
+            assert_eq!(
+                descriptor.capabilities,
+                vec![OperationCapability::LocalWindowBound],
+                "{}",
+                descriptor.operation_id
+            );
+        }
+        for (source_id, semantic_operation_id) in [
+            (
+                "release_blackout_output_control_v2",
+                OUTPUT_BLACKOUT_RELEASE_OPERATION_ID,
+            ),
+            (
+                "set_blackout_output_control_v2",
+                OUTPUT_BLACKOUT_SET_OPERATION_ID,
+            ),
+            (
+                "set_lighting_master_output_control_v2",
+                OUTPUT_LIGHTING_MASTER_SET_OPERATION_ID,
+            ),
+            (
+                "set_group_submaster_output_control_v2",
+                OUTPUT_GROUP_SUBMASTER_SET_OPERATION_ID,
+            ),
+            (
+                "set_video_master_output_control_v2",
+                OUTPUT_VIDEO_MASTER_SET_OPERATION_ID,
+            ),
+            (
+                "take_video_clip_output_control_v2",
+                OUTPUT_VIDEO_CLIP_TAKE_OPERATION_ID,
+            ),
+            (
+                "launch_video_clip_output_control_v2",
+                OUTPUT_VIDEO_CLIP_LAUNCH_OPERATION_ID,
+            ),
+            ("arm_output_control_v2", OUTPUT_OWNERSHIP_ARM_OPERATION_ID),
+            ("set_network_dmx_routes_v1", OUTPUT_NETWORK_DMX_ROUTES_SET_OPERATION_ID),
+            (
+                "enable_show_art_net_loopback_route_v1",
+                OUTPUT_SHOW_ARTNET_LOOPBACK_ROUTE_ENABLE_OPERATION_ID,
+            ),
+            (
+                "enable_show_serial_dmx_safety_blackout_route_v1",
+                OUTPUT_SHOW_SERIAL_DMX_SAFETY_BLACKOUT_ROUTE_ENABLE_OPERATION_ID,
+            ),
+            (
+                "stop_show_serial_dmx_safety_blackout_route_v1",
+                OUTPUT_SHOW_SERIAL_DMX_SAFETY_BLACKOUT_ROUTE_STOP_OPERATION_ID,
+            ),
+            (
+                "enable_usb_dmx_universe_route_v1",
+                OUTPUT_USB_DMX_UNIVERSE_ROUTE_ENABLE_OPERATION_ID,
+            ),
+            (
+                "stop_usb_dmx_universe_route_v1",
+                OUTPUT_USB_DMX_UNIVERSE_ROUTE_STOP_OPERATION_ID,
+            ),
+            (
+                "enable_show_spout_outputs_v2",
+                OUTPUT_SHOW_SPOUT_OUTPUTS_ENABLE_OPERATION_ID,
+            ),
+            (
+                "reset_show_spout_outputs_v1",
+                OUTPUT_SHOW_SPOUT_OUTPUTS_RESET_OPERATION_ID,
+            ),
+            (
+                "send_dsf2026_artnet_acceptance_probe_v1",
+                OUTPUT_DSF2026_ARTNET_ACCEPTANCE_PROBE_OPERATION_ID,
+            ),
+            (
+                "acknowledge_dsf2026_artnet_acceptance_probe_in_doubt_v1",
+                OUTPUT_DSF2026_ARTNET_ACCEPTANCE_PROBE_RECONCILE_OPERATION_ID,
+            ),
+            ("enable_output_control_v2", OUTPUT_ENABLE_OPERATION_ID),
+            (
+                "take_over_output_control_v2",
+                OUTPUT_STANDBY_TAKEOVER_OPERATION_ID,
+            ),
+            ("add_display_output_v2", OUTPUT_DISPLAY_ADD_OPERATION_ID),
+            ("add_external_output_v2", OUTPUT_EXTERNAL_ADD_OPERATION_ID),
+            ("configure_video_output_v2", OUTPUT_VIDEO_CONFIGURE_OPERATION_ID),
+            ("remove_video_output_v2", OUTPUT_VIDEO_REMOVE_OPERATION_ID),
+            (
+                "assign_video_output_composition_v2",
+                OUTPUT_VIDEO_COMPOSITION_ASSIGN_OPERATION_ID,
+            ),
+        ] {
+            let descriptor = registry
+                .operations
+                .iter()
+                .find(|descriptor| {
+                    descriptor.source_family == OperationSourceFamily::TauriCommand
+                        && descriptor.source_id == source_id
+                })
+                .unwrap_or_else(|| panic!("missing OutputControl command descriptor {source_id}"));
+            assert_eq!(descriptor.operation_id, semantic_operation_id);
+            assert_eq!(descriptor.risk, OperationRisk::R5);
+            assert_eq!(descriptor.availability, OperationAvailability::Unavailable);
+            assert_eq!(descriptor.idempotency, OperationIdempotency::Mutating);
+        }
+        {
+            let (source_id, semantic_operation_id) = (
+                "query_output_control_authority_v1",
+                OUTPUT_CONTROL_AUTHORITY_QUERY_OPERATION_ID,
+            );
+            let descriptor = registry
+                .operations
+                .iter()
+                .find(|descriptor| {
+                    descriptor.source_family == OperationSourceFamily::TauriCommand
+                        && descriptor.source_id == source_id
+                })
+                .unwrap_or_else(|| panic!("missing OutputControl query descriptor {source_id}"));
+            assert_eq!(descriptor.operation_id, semantic_operation_id);
+            assert_eq!(descriptor.risk, OperationRisk::R0);
+            assert_eq!(
+                descriptor.availability,
+                OperationAvailability::LocalWindowOnly
+            );
+            assert_eq!(descriptor.idempotency, OperationIdempotency::ReadOnly);
+        }
+        let engine_unavailable = registry
+            .operations
+            .iter()
+            .filter(|descriptor| descriptor.source_family == OperationSourceFamily::EngineCommand)
+            .collect::<Vec<_>>();
+        assert_eq!(engine_unavailable.len(), ENGINE_COMMAND_COUNT);
+        for source_id in [
+            "enable_show_serial_dmx_safety_blackout_route",
+            "stop_show_serial_dmx_safety_blackout_route",
+        ] {
+            assert!(
+                engine_unavailable
+                    .iter()
+                    .any(|descriptor| descriptor.source_id == source_id),
+                "frozen USB-DMX engine command must remain inventoried: {source_id}"
+            );
+        }
+        for descriptor in engine_unavailable {
+            assert_eq!(descriptor.risk, OperationRisk::R5);
+            assert_eq!(descriptor.availability, OperationAvailability::Unavailable);
+            assert_eq!(descriptor.idempotency, OperationIdempotency::Mutating);
+            assert_eq!(
+                descriptor.audit,
+                OperationAuditRequirement::RequiredBeforeExternalExecution
+            );
+            assert_eq!(
+                descriptor.capabilities,
+                vec![OperationCapability::InternalInventory]
+            );
+        }
+        let remote_unavailable = registry
+            .operations
+            .iter()
+            .filter(|descriptor| {
+                matches!(
+                    descriptor.source_family,
+                    OperationSourceFamily::RemoteInputEvent
+                        | OperationSourceFamily::RemoteClientRequest
+                        | OperationSourceFamily::RemoteWireOperation
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(remote_unavailable.len(), REMOTE_OPERATION_COUNT);
+        assert_eq!(
+            remote_unavailable
+                .iter()
+                .filter(|descriptor| {
+                    descriptor.source_family == OperationSourceFamily::RemoteInputEvent
+                })
+                .count(),
+            REMOTE_INPUT_EVENT_COUNT
+        );
+        assert_eq!(
+            remote_unavailable
+                .iter()
+                .filter(|descriptor| {
+                    descriptor.source_family == OperationSourceFamily::RemoteClientRequest
+                })
+                .count(),
+            REMOTE_CLIENT_REQUEST_COUNT
+        );
+        assert_eq!(
+            remote_unavailable
+                .iter()
+                .filter(|descriptor| {
+                    descriptor.source_family == OperationSourceFamily::RemoteWireOperation
+                })
+                .count(),
+            REMOTE_WIRE_OPERATION_COUNT
+        );
+        for descriptor in remote_unavailable {
+            assert_eq!(descriptor.risk, OperationRisk::R5);
+            assert_eq!(descriptor.availability, OperationAvailability::Unavailable);
+            assert_eq!(descriptor.idempotency, OperationIdempotency::Mutating);
+            assert_eq!(
+                descriptor.audit,
+                OperationAuditRequirement::RequiredBeforeExternalExecution
+            );
+            assert_eq!(
+                descriptor.capabilities,
+                vec![OperationCapability::InternalInventory]
+            );
+        }
+        let midi_osc_dmx_families = [
+            (
+                OperationSourceFamily::MidiControlMessage,
+                MIDI_CONTROL_MESSAGE_COUNT,
+            ),
+            (
+                OperationSourceFamily::MidiControlAction,
+                MIDI_CONTROL_ACTION_COUNT,
+            ),
+            (
+                OperationSourceFamily::MidiClockEvent,
+                MIDI_CLOCK_EVENT_COUNT,
+            ),
+            (
+                OperationSourceFamily::MidiControlEvent,
+                MIDI_CONTROL_EVENT_COUNT,
+            ),
+            (
+                OperationSourceFamily::OscControlAction,
+                OSC_CONTROL_ACTION_COUNT,
+            ),
+            (OperationSourceFamily::OscInputEvent, OSC_INPUT_EVENT_COUNT),
+            (
+                OperationSourceFamily::DmxInputProtocol,
+                DMX_INPUT_PROTOCOL_COUNT,
+            ),
+            (OperationSourceFamily::DmxInputEvent, DMX_INPUT_EVENT_COUNT),
+        ];
+        let midi_osc_dmx_unavailable = registry
+            .operations
+            .iter()
+            .filter(|descriptor| {
+                midi_osc_dmx_families
+                    .iter()
+                    .any(|(family, _)| descriptor.source_family == *family)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(midi_osc_dmx_unavailable.len(), MIDI_OSC_DMX_OPERATION_COUNT);
+        for (family, expected_count) in midi_osc_dmx_families {
+            assert_eq!(
+                midi_osc_dmx_unavailable
+                    .iter()
+                    .filter(|descriptor| descriptor.source_family == family)
+                    .count(),
+                expected_count,
+                "{family:?}"
+            );
+        }
+        for descriptor in midi_osc_dmx_unavailable {
+            assert_eq!(descriptor.class, OperationClass::Mutation);
+            assert_eq!(descriptor.risk, OperationRisk::R5);
+            assert_eq!(descriptor.availability, OperationAvailability::Unavailable);
+            assert_eq!(descriptor.idempotency, OperationIdempotency::Mutating);
+            assert_eq!(
+                descriptor.audit,
+                OperationAuditRequirement::RequiredBeforeExternalExecution
+            );
+            assert_eq!(
+                descriptor.capabilities,
+                vec![OperationCapability::InternalInventory]
+            );
+        }
+        let frontend_manifest =
+            frontend_invoke_names_from_manifest(FRONTEND_INVOKE_MANIFEST).unwrap();
+        assert_eq!(frontend_manifest.len(), FRONTEND_INVOKE_COUNT);
+        for command in ["add_video_generator_layer", "set_video_layer_generator"] {
+            assert!(names.iter().any(|name| name == command));
+            assert!(frontend_manifest.iter().any(|name| name == command));
+            assert_eq!(
+                tauri_route_admission_class(command),
+                Some(TauriRouteAdmissionClass::RendererTicketedProjectMutation)
+            );
+        }
+        let frontend_unavailable = registry
+            .operations
+            .iter()
+            .filter(|descriptor| descriptor.source_family == OperationSourceFamily::FrontendInvoke)
+            .collect::<Vec<_>>();
+        assert_eq!(frontend_unavailable.len(), FRONTEND_INVOKE_COUNT);
+        assert_eq!(
+            frontend_unavailable
+                .iter()
+                .map(|descriptor| descriptor.source_id.as_str())
+                .collect::<BTreeSet<_>>(),
+            frontend_manifest
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>()
+        );
+        for descriptor in frontend_unavailable {
+            assert_eq!(descriptor.class, OperationClass::Mutation);
+            assert_eq!(descriptor.risk, OperationRisk::R5);
+            assert_eq!(descriptor.availability, OperationAvailability::Unavailable);
+            assert_eq!(descriptor.idempotency, OperationIdempotency::Mutating);
+            assert_eq!(
+                descriptor.audit,
+                OperationAuditRequirement::RequiredBeforeExternalExecution
+            );
+            assert_eq!(
+                descriptor.capabilities,
+                vec![OperationCapability::InternalInventory]
+            );
+            assert_eq!(
+                descriptor.operation_id,
+                format!(
+                    "syndocal.inventory.frontend.invoke.{}.v1",
+                    descriptor.source_id
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_registry_derives_the_exact_current_source_inventory() {
+        let legacy = registry().unwrap();
+        let canonical = canonical_registry().unwrap();
+        canonical.validate().unwrap();
+        verify_canonical_registry_exact_sources(&legacy, &canonical).unwrap();
+
+        const TAURI_COUNT: usize = FROZEN_TAURI_ROUTE_ADMISSION_COUNT;
+        // 277 prior engine sources plus the distinct atomic
+        // `ResetShowSpoutOutputsExactPublished` source.
+        const ENGINE_COUNT: usize = 287;
+        const REMOTE_COUNT: usize = 116;
+        const MIDI_OSC_DMX_COUNT: usize = 240;
+        const FRONTEND_COUNT: usize = 515;
+        const LEGACY_SOURCE_TOTAL: usize =
+            TAURI_COUNT + ENGINE_COUNT + REMOTE_COUNT + MIDI_OSC_DMX_COUNT + FRONTEND_COUNT;
+        const KEYBOARD_APP_COUNT: usize = 30;
+        const KEYBOARD_PROJECT_FILE_COUNT: usize = 3;
+        const SOURCE_TOTAL: usize =
+            LEGACY_SOURCE_TOTAL + KEYBOARD_APP_COUNT + KEYBOARD_PROJECT_FILE_COUNT;
+        assert_eq!(LEGACY_SOURCE_TOTAL, 1753);
+        assert_eq!(SOURCE_TOTAL, 1786);
+        assert_eq!(canonical.source_inventory.len(), SOURCE_TOTAL);
+        assert_eq!(canonical.canonical_operations.len(), 81);
+
+        let output_control_operations = canonical
+            .canonical_operations
+            .iter()
+            .filter(|operation| {
+                matches!(
+                    operation.operation_id.as_str(),
+                    OUTPUT_BLACKOUT_RELEASE_OPERATION_ID
+                        | OUTPUT_BLACKOUT_SET_OPERATION_ID
+                        | OUTPUT_LIGHTING_MASTER_SET_OPERATION_ID
+                        | OUTPUT_GROUP_SUBMASTER_SET_OPERATION_ID
+                        | OUTPUT_VIDEO_MASTER_SET_OPERATION_ID
+                        | OUTPUT_VIDEO_CLIP_LAUNCH_OPERATION_ID
+                        | OUTPUT_VIDEO_CLIP_TAKE_OPERATION_ID
+                        | OUTPUT_OWNERSHIP_ARM_OPERATION_ID
+                        | OUTPUT_STANDBY_TAKEOVER_OPERATION_ID
+                        | OUTPUT_DISPLAY_ADD_OPERATION_ID
+                        | OUTPUT_EXTERNAL_ADD_OPERATION_ID
+                        | OUTPUT_VIDEO_CONFIGURE_OPERATION_ID
+                        | OUTPUT_VIDEO_REMOVE_OPERATION_ID
+                        | OUTPUT_DISPLAY_WINDOW_SET_OPEN_OPERATION_ID
+                        | OUTPUT_VIDEO_COMPOSITION_ASSIGN_OPERATION_ID
+                        | OUTPUT_SHOW_ARTNET_LOOPBACK_ROUTE_ENABLE_OPERATION_ID
+                        | OUTPUT_NETWORK_DMX_ROUTES_SET_OPERATION_ID
+                        | OUTPUT_SHOW_SERIAL_DMX_SAFETY_BLACKOUT_ROUTE_ENABLE_OPERATION_ID
+                        | OUTPUT_SHOW_SERIAL_DMX_SAFETY_BLACKOUT_ROUTE_STOP_OPERATION_ID
+                        | OUTPUT_USB_DMX_UNIVERSE_ROUTE_ENABLE_OPERATION_ID
+                        | OUTPUT_USB_DMX_UNIVERSE_ROUTE_STOP_OPERATION_ID
+                        | OUTPUT_SHOW_SPOUT_OUTPUTS_ENABLE_OPERATION_ID
+                        | OUTPUT_SHOW_SPOUT_OUTPUTS_RESET_OPERATION_ID
+                        | OUTPUT_DSF2026_ARTNET_ACCEPTANCE_PROBE_OPERATION_ID
+                        | OUTPUT_DSF2026_ARTNET_ACCEPTANCE_PROBE_RECONCILE_OPERATION_ID
+                        | OUTPUT_ENABLE_OPERATION_ID
+                        | OUTPUT_LEASE_ACQUIRE_OPERATION_ID
+                        | OUTPUT_LEASE_RENEW_OPERATION_ID
+                        | OUTPUT_LEASE_RECOVER_OPERATION_ID
+                        | OUTPUT_LEASE_RELINQUISH_OPERATION_ID
+                        | OUTPUT_LEASE_FORCE_TRANSFER_OPERATION_ID
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(output_control_operations.len(), 31);
+        for (source_id, operation_id) in [
+            (
+                "release_blackout_output_control_v2",
+                OUTPUT_BLACKOUT_RELEASE_OPERATION_ID,
+            ),
+            (
+                "set_blackout_output_control_v2",
+                OUTPUT_BLACKOUT_SET_OPERATION_ID,
+            ),
+            (
+                "set_lighting_master_output_control_v2",
+                OUTPUT_LIGHTING_MASTER_SET_OPERATION_ID,
+            ),
+            (
+                "set_group_submaster_output_control_v2",
+                OUTPUT_GROUP_SUBMASTER_SET_OPERATION_ID,
+            ),
+            (
+                "set_video_master_output_control_v2",
+                OUTPUT_VIDEO_MASTER_SET_OPERATION_ID,
+            ),
+            (
+                "take_video_clip_output_control_v2",
+                OUTPUT_VIDEO_CLIP_TAKE_OPERATION_ID,
+            ),
+            (
+                "launch_video_clip_output_control_v2",
+                OUTPUT_VIDEO_CLIP_LAUNCH_OPERATION_ID,
+            ),
+            ("arm_output_control_v2", OUTPUT_OWNERSHIP_ARM_OPERATION_ID),
+            ("set_network_dmx_routes_v1", OUTPUT_NETWORK_DMX_ROUTES_SET_OPERATION_ID),
+            (
+                "enable_show_art_net_loopback_route_v1",
+                OUTPUT_SHOW_ARTNET_LOOPBACK_ROUTE_ENABLE_OPERATION_ID,
+            ),
+            (
+                "enable_show_serial_dmx_safety_blackout_route_v1",
+                OUTPUT_SHOW_SERIAL_DMX_SAFETY_BLACKOUT_ROUTE_ENABLE_OPERATION_ID,
+            ),
+            (
+                "stop_show_serial_dmx_safety_blackout_route_v1",
+                OUTPUT_SHOW_SERIAL_DMX_SAFETY_BLACKOUT_ROUTE_STOP_OPERATION_ID,
+            ),
+            (
+                "enable_usb_dmx_universe_route_v1",
+                OUTPUT_USB_DMX_UNIVERSE_ROUTE_ENABLE_OPERATION_ID,
+            ),
+            (
+                "stop_usb_dmx_universe_route_v1",
+                OUTPUT_USB_DMX_UNIVERSE_ROUTE_STOP_OPERATION_ID,
+            ),
+            (
+                "enable_show_spout_outputs_v2",
+                OUTPUT_SHOW_SPOUT_OUTPUTS_ENABLE_OPERATION_ID,
+            ),
+            (
+                "reset_show_spout_outputs_v1",
+                OUTPUT_SHOW_SPOUT_OUTPUTS_RESET_OPERATION_ID,
+            ),
+            (
+                "send_dsf2026_artnet_acceptance_probe_v1",
+                OUTPUT_DSF2026_ARTNET_ACCEPTANCE_PROBE_OPERATION_ID,
+            ),
+            (
+                "acknowledge_dsf2026_artnet_acceptance_probe_in_doubt_v1",
+                OUTPUT_DSF2026_ARTNET_ACCEPTANCE_PROBE_RECONCILE_OPERATION_ID,
+            ),
+            ("enable_output_control_v2", OUTPUT_ENABLE_OPERATION_ID),
+            (
+                "take_over_output_control_v2",
+                OUTPUT_STANDBY_TAKEOVER_OPERATION_ID,
+            ),
+            ("add_display_output_v2", OUTPUT_DISPLAY_ADD_OPERATION_ID),
+            ("add_external_output_v2", OUTPUT_EXTERNAL_ADD_OPERATION_ID),
+            ("configure_video_output_v2", OUTPUT_VIDEO_CONFIGURE_OPERATION_ID),
+            ("remove_video_output_v2", OUTPUT_VIDEO_REMOVE_OPERATION_ID),
+            (
+                "set_display_output_window_open_v2",
+                OUTPUT_DISPLAY_WINDOW_SET_OPEN_OPERATION_ID,
+            ),
+            (
+                "assign_video_output_composition_v2",
+                OUTPUT_VIDEO_COMPOSITION_ASSIGN_OPERATION_ID,
+            ),
+            ("acquire_output_lease_v2", OUTPUT_LEASE_ACQUIRE_OPERATION_ID),
+            ("renew_output_lease_v2", OUTPUT_LEASE_RENEW_OPERATION_ID),
+            ("recover_output_lease_v2", OUTPUT_LEASE_RECOVER_OPERATION_ID),
+            (
+                "relinquish_output_lease_v2",
+                OUTPUT_LEASE_RELINQUISH_OPERATION_ID,
+            ),
+            (
+                "force_transfer_output_lease_v2",
+                OUTPUT_LEASE_FORCE_TRANSFER_OPERATION_ID,
+            ),
+        ] {
+            let operation = output_control_operations
+                .iter()
+                .find(|operation| operation.operation_id == operation_id)
+                .unwrap_or_else(|| {
+                    panic!("missing canonical OutputControl operation {operation_id}")
+                });
+            assert_eq!(operation.risk, OperationRisk::R4);
+            assert_eq!(operation.class, OperationClass::Mutation);
+            assert_eq!(operation.audit, OperationAuditRequirement::Immutable);
+            assert_eq!(
+                operation.adapter_policy,
+                if matches!(
+                    operation_id,
+                    OUTPUT_ENABLE_OPERATION_ID
+                        | OUTPUT_DISPLAY_ADD_OPERATION_ID
+                        | OUTPUT_EXTERNAL_ADD_OPERATION_ID
+                        | OUTPUT_VIDEO_CONFIGURE_OPERATION_ID
+                        | OUTPUT_VIDEO_REMOVE_OPERATION_ID
+                        | OUTPUT_BLACKOUT_RELEASE_OPERATION_ID
+                        | OUTPUT_BLACKOUT_SET_OPERATION_ID
+                        | OUTPUT_DISPLAY_WINDOW_SET_OPEN_OPERATION_ID
+                        | OUTPUT_LIGHTING_MASTER_SET_OPERATION_ID
+                        | OUTPUT_GROUP_SUBMASTER_SET_OPERATION_ID
+                        | OUTPUT_VIDEO_MASTER_SET_OPERATION_ID
+                        | OUTPUT_VIDEO_CLIP_LAUNCH_OPERATION_ID
+                        | OUTPUT_VIDEO_CLIP_TAKE_OPERATION_ID
+                        | OUTPUT_LEASE_ACQUIRE_OPERATION_ID
+                        | OUTPUT_LEASE_RENEW_OPERATION_ID
+                        | OUTPUT_LEASE_RECOVER_OPERATION_ID
+                        | OUTPUT_LEASE_RELINQUISH_OPERATION_ID
+                ) {
+                    AdapterPolicy::LocalWindowOutputControl
+                } else {
+                    AdapterPolicy::LocalWindowDangerousOutputControl
+                }
+            );
+            assert_eq!(
+                operation.receipt_policy,
+                ReceiptPolicy::ExactTerminalReceipt
+            );
+            assert_eq!(
+                operation.request_schema.version,
+                OUTPUT_CONTROL_COMMAND_SCHEMA_VERSION
+            );
+            assert_eq!(
+                operation.response_schema.version,
+                OUTPUT_CONTROL_COMMAND_SCHEMA_VERSION
+            );
+            assert_eq!(
+                operation.consent_policy,
+                if matches!(
+                    operation_id,
+                    OUTPUT_ENABLE_OPERATION_ID
+                        | OUTPUT_DISPLAY_ADD_OPERATION_ID
+                        | OUTPUT_EXTERNAL_ADD_OPERATION_ID
+                        | OUTPUT_VIDEO_CONFIGURE_OPERATION_ID
+                        | OUTPUT_VIDEO_REMOVE_OPERATION_ID
+                        | OUTPUT_BLACKOUT_RELEASE_OPERATION_ID
+                        | OUTPUT_BLACKOUT_SET_OPERATION_ID
+                        | OUTPUT_DISPLAY_WINDOW_SET_OPEN_OPERATION_ID
+                        | OUTPUT_LIGHTING_MASTER_SET_OPERATION_ID
+                        | OUTPUT_GROUP_SUBMASTER_SET_OPERATION_ID
+                        | OUTPUT_VIDEO_MASTER_SET_OPERATION_ID
+                        | OUTPUT_VIDEO_CLIP_LAUNCH_OPERATION_ID
+                        | OUTPUT_VIDEO_CLIP_TAKE_OPERATION_ID
+                        | OUTPUT_LEASE_ACQUIRE_OPERATION_ID
+                        | OUTPUT_LEASE_RENEW_OPERATION_ID
+                        | OUTPUT_LEASE_RECOVER_OPERATION_ID
+                        | OUTPUT_LEASE_RELINQUISH_OPERATION_ID
+                ) {
+                    ConsentPolicy::LocalExplicitAction
+                } else {
+                    ConsentPolicy::NativeDangerConfirmation
+                }
+            );
+            assert_eq!(
+                operation.capabilities,
+                vec![
+                    OperationCapability::LocalWindowBound,
+                    OperationCapability::OutputControl,
+                ]
+            );
+            let direct = canonical
+                .source_inventory
+                .iter()
+                .find(|source| {
+                    source.source_key.family == CanonicalSourceFamily::TauriCommand
+                        && source.source_key.source_id == source_id
+                })
+                .unwrap_or_else(|| panic!("missing direct OutputControl source {source_id}"));
+            assert!(matches!(
+                &direct.disposition,
+                SourceDisposition::Operation {
+                    canonical_operation_id,
+                    projection: TypedSchemaProjection::Exact,
+                } if canonical_operation_id == operation_id
+            ));
+            let alias = canonical
+                .source_inventory
+                .iter()
+                .find(|source| {
+                    source.source_key.family == CanonicalSourceFamily::FrontendInvoke
+                        && source.source_key.source_id == source_id
+                })
+                .unwrap_or_else(|| panic!("missing frontend OutputControl alias {source_id}"));
+            assert!(matches!(
+                &alias.disposition,
+                SourceDisposition::AliasOfSource { target }
+                    if *target == direct.source_key
+            ));
+            assert_eq!(
+                canonical
+                    .canonical_operation_for_source(&alias.source_key)
+                    .unwrap()
+                    .map(|operation| operation.operation_id.as_str()),
+                Some(operation_id)
+            );
+        }
+        {
+            let (source_id, operation_id) = (
+                "query_output_control_authority_v1",
+                OUTPUT_CONTROL_AUTHORITY_QUERY_OPERATION_ID,
+            );
+            let source = canonical
+                .source_inventory
+                .iter()
+                .find(|source| {
+                    source.source_key.family == CanonicalSourceFamily::TauriCommand
+                        && source.source_key.source_id == source_id
+                })
+                .unwrap_or_else(|| panic!("missing OutputControl query source {source_id}"));
+            assert_eq!(
+                canonical
+                    .canonical_operation_for_source(&source.source_key)
+                    .unwrap()
+                    .map(|operation| operation.operation_id.as_str()),
+                Some(operation_id)
+            );
+        }
+
+        let canonical_query_source = canonical
+            .source_inventory
+            .iter()
+            .find(|source| {
+                source.source_key.family == CanonicalSourceFamily::TauriCommand
+                    && source.source_key.source_id == "get_control_plane_canonical_registry"
+            })
+            .expect("canonical registry query source must remain inventoried");
+        let canonical_query_operation_id = "syndocal.query.control_plane.canonical_registry.v3";
+        assert_eq!(
+            canonical_query_source.raw_request_schema,
+            command_schema(canonical_query_operation_id, "request")
+        );
+        assert_eq!(
+            canonical_query_source.raw_response_schema,
+            command_schema(canonical_query_operation_id, "response")
+        );
+        let canonical_query_operation = canonical
+            .canonical_operation_for_source(&canonical_query_source.source_key)
+            .unwrap()
+            .expect("canonical registry query must resolve to a canonical operation");
+        assert_eq!(
+            canonical_query_operation.request_schema,
+            canonical_query_source.raw_request_schema
+        );
+        assert_eq!(
+            canonical_query_operation.response_schema,
+            canonical_query_source.raw_response_schema
+        );
+
+        let count_family = |family| {
+            canonical
+                .source_inventory
+                .iter()
+                .filter(|source| source.source_key.family == family)
+                .count()
+        };
+        assert_eq!(
+            count_family(CanonicalSourceFamily::TauriCommand),
+            TAURI_COUNT
+        );
+        assert_eq!(
+            count_family(CanonicalSourceFamily::EngineCommand),
+            ENGINE_COUNT
+        );
+        assert_eq!(
+            count_family(CanonicalSourceFamily::RemoteInputEvent)
+                + count_family(CanonicalSourceFamily::RemoteClientRequest)
+                + count_family(CanonicalSourceFamily::RemoteWireOperation),
+            REMOTE_COUNT
+        );
+        assert_eq!(
+            count_family(CanonicalSourceFamily::MidiControlMessage)
+                + count_family(CanonicalSourceFamily::MidiControlAction)
+                + count_family(CanonicalSourceFamily::MidiClockEvent)
+                + count_family(CanonicalSourceFamily::MidiControlEvent)
+                + count_family(CanonicalSourceFamily::OscControlAction)
+                + count_family(CanonicalSourceFamily::OscInputEvent)
+                + count_family(CanonicalSourceFamily::DmxInputProtocol)
+                + count_family(CanonicalSourceFamily::DmxInputEvent),
+            MIDI_OSC_DMX_COUNT
+        );
+        assert_eq!(
+            count_family(CanonicalSourceFamily::FrontendInvoke),
+            FRONTEND_COUNT
+        );
+        assert_eq!(
+            count_family(CanonicalSourceFamily::KeyboardApp),
+            KEYBOARD_APP_COUNT
+        );
+        assert_eq!(
+            count_family(CanonicalSourceFamily::KeyboardProjectFile),
+            KEYBOARD_PROJECT_FILE_COUNT
+        );
+
+        let expected_keyboard_sources =
+            keyboard_shortcut_source_ids_from_manifest(KEYBOARD_SHORTCUT_SOURCE_MANIFEST)
+                .unwrap()
+                .into_iter()
+                .map(|(family, source_id)| SourceKey::new(family, source_id))
+                .collect::<BTreeSet<_>>();
+        let actual_keyboard_sources = canonical
+            .source_inventory
+            .iter()
+            .filter(|source| {
+                matches!(
+                    source.source_key.family,
+                    CanonicalSourceFamily::KeyboardApp | CanonicalSourceFamily::KeyboardProjectFile
+                )
+            })
+            .map(|source| source.source_key.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual_keyboard_sources, expected_keyboard_sources);
+
+        let direct = canonical
+            .source_inventory
+            .iter()
+            .filter(|source| matches!(&source.disposition, SourceDisposition::Operation { .. }))
+            .collect::<Vec<_>>();
+        let aliases = canonical
+            .source_inventory
+            .iter()
+            .filter(|source| matches!(&source.disposition, SourceDisposition::AliasOfSource { .. }))
+            .collect::<Vec<_>>();
+        let unclassified = canonical
+            .source_inventory
+            .iter()
+            .filter(|source| matches!(&source.disposition, SourceDisposition::Unclassified { .. }))
+            .collect::<Vec<_>>();
+        let support_phases = canonical
+            .source_inventory
+            .iter()
+            .filter(|source| matches!(&source.disposition, SourceDisposition::SupportPhase { .. }))
+            .collect::<Vec<_>>();
+        let internal_steps = canonical
+            .source_inventory
+            .iter()
+            .filter(|source| {
+                matches!(
+                    &source.disposition,
+                    SourceDisposition::InternalStepOf { .. }
+                )
+            })
+            .collect::<Vec<_>>();
+        let structural_routes = canonical
+            .source_inventory
+            .iter()
+            .filter(|source| {
+                matches!(
+                    &source.disposition,
+                    SourceDisposition::StructuralRoute { .. }
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(direct.len(), 81);
+        assert_eq!(aliases.len(), FRONTEND_COUNT);
+        assert_eq!(internal_steps.len(), 4);
+        assert_eq!(structural_routes.len(), 1);
+        // The additional atomic Show Spout Reset engine source is deliberately
+        // retained as an unclassified engine source; its local Tauri route is
+        // the canonical Reset operation.
+        // The missing-publication recovery route is local maintenance, not a
+        // separately reviewed canonical operation.
+        // Current native/consent lifecycle sources remain local. The lease
+        // authority query is now reviewed; frontend sources remain aliases.
+        // RequestSnapshotPublication is an internal read barrier and remains
+        // unavailable as a canonical external operation.
+        // Two local renderer routes and the atomic engine source remain unavailable externally.
+        // get/set extensions and Engine/MIDI toggle sources stay local; their
+        // two frontend sources remain aliases rather than new external operations.
+        // MIDI PitchBend and RelativeControlChange are input message shapes,
+        // not external operations; they stay unclassified like the other four.
+        // configure_takeover_recording_v1 (its folder dialog), the three MTC
+        // output routes and the four LTC input routes are local runtime
+        // routes, not external canonical operations.
+        // Generator create/update are also local renderer project routes;
+        // their two frontend aliases do not create external operations.
+        // RequestPlaybackLayerSnapshot is the Standby generation's internal
+        // playback-layer read, not an external operation.
+        // Output-health adds one local native read; its frontend source is
+        // already included in the aliases above.
+        // The Media Health folder listing (`select_media_relink_folder`) is one
+        // more local, read-only native route; its frontend source is an alias.
+        // The Perform MIDI/OSC actions, the beat-division message and their
+        // renderer-routed events are inventoried sources, not classified
+        // external operations. Five group MIDI and five shared OSC/DMX actions
+        // add ten more local, unclassified sources.
+        // The two authoring authority routes are local-only; their frontend
+        // sources are aliases, and do not create external canonical operations.
+        assert_eq!(unclassified.len(), 1185);
+        assert_eq!(support_phases.len(), 0);
+        assert_eq!(
+            direct.len()
+                + aliases.len()
+                + internal_steps.len()
+                + structural_routes.len()
+                + unclassified.len()
+                + support_phases.len(),
+            SOURCE_TOTAL
+        );
+
+        for (family, expected_count, role, reason) in [(
+            CanonicalSourceFamily::KeyboardProjectFile,
+            KEYBOARD_PROJECT_FILE_COUNT,
+            SourceRole::KeyboardProjectFileShortcut,
+            "unreviewed keyboard project-file shortcut",
+        )] {
+            let sources = canonical
+                .source_inventory
+                .iter()
+                .filter(|source| source.source_key.family == family)
+                .collect::<Vec<_>>();
+            assert_eq!(sources.len(), expected_count);
+            for source in sources {
+                assert_eq!(source.role, role);
+                assert!(source.source_key.source_id.ends_with("_v1"));
+                assert!(matches!(
+                    &source.disposition,
+                    SourceDisposition::Unclassified { reason: actual } if actual == reason
+                ));
+                assert!(canonical
+                    .canonical_operation_for_source(&source.source_key)
+                    .unwrap()
+                    .is_none());
+            }
+        }
+        let timeline_shortcut = structural_routes[0];
+        assert_eq!(
+            timeline_shortcut.source_key.family,
+            CanonicalSourceFamily::KeyboardApp
+        );
+        assert_eq!(
+            timeline_shortcut.source_key.source_id,
+            "toggle_timeline_playback_v1"
+        );
+        assert!(matches!(
+            &timeline_shortcut.disposition,
+            SourceDisposition::StructuralRoute { target }
+                if *target == SourceKey::new(
+                    CanonicalSourceFamily::TauriCommand,
+                    "set_timeline_transport_playing_runtime_v1"
+                )
+        ));
+        assert!(canonical
+            .canonical_operation_for_source(&timeline_shortcut.source_key)
+            .unwrap()
+            .is_some());
+
+        for source in &direct {
+            assert_eq!(
+                source.source_key.family,
+                CanonicalSourceFamily::TauriCommand
+            );
+            assert_eq!(source.role, SourceRole::LocalWindowCommand);
+            assert!(canonical
+                .canonical_operation_for_source(&source.source_key)
+                .unwrap()
+                .is_some());
+        }
+        for source in &aliases {
+            assert_eq!(
+                source.source_key.family,
+                CanonicalSourceFamily::FrontendInvoke
+            );
+            assert_eq!(source.role, SourceRole::FrontendInvocation);
+            let SourceDisposition::AliasOfSource { target } = &source.disposition else {
+                unreachable!("filtered aliases must retain their disposition");
+            };
+            assert_eq!(target.family, CanonicalSourceFamily::TauriCommand);
+            assert_eq!(target.source_id, source.source_key.source_id);
+            assert_eq!(
+                canonical
+                    .canonical_operation_for_source(&source.source_key)
+                    .unwrap()
+                    .map(|operation| operation.operation_id.as_str()),
+                canonical
+                    .canonical_operation_for_source(target)
+                    .unwrap()
+                    .map(|operation| operation.operation_id.as_str())
+            );
+        }
+        let effect_enabled_direct = direct
+            .iter()
+            .find(|source| source.source_key.source_id == "set_effect_enabled")
+            .expect("set_effect_enabled must be the ninth direct canonical source");
+        assert_eq!(
+            canonical
+                .canonical_operation_for_source(&effect_enabled_direct.source_key)
+                .unwrap()
+                .map(|operation| operation.operation_id.as_str()),
+            Some(SET_EFFECT_ENABLED_OPERATION_ID)
+        );
+        let effect_enabled_alias = aliases
+            .iter()
+            .find(|source| source.source_key.source_id == "set_effect_enabled")
+            .expect("frontend set_effect_enabled must retain its alias row");
+        assert_eq!(
+            canonical
+                .canonical_operation_for_source(&effect_enabled_alias.source_key)
+                .unwrap()
+                .map(|operation| operation.operation_id.as_str()),
+            Some(SET_EFFECT_ENABLED_OPERATION_ID)
+        );
+        let cue_list_rename_direct = direct
+            .iter()
+            .find(|source| source.source_key.source_id == "rename_cue_list")
+            .expect("rename_cue_list must be a direct canonical project-mutation source");
+        assert_eq!(
+            canonical
+                .canonical_operation_for_source(&cue_list_rename_direct.source_key)
+                .unwrap()
+                .map(|operation| operation.operation_id.as_str()),
+            Some(CUE_LIST_RENAME_OPERATION_ID)
+        );
+        let cue_list_rename_alias = aliases
+            .iter()
+            .find(|source| source.source_key.source_id == "rename_cue_list")
+            .expect("frontend rename_cue_list must retain its canonical alias row");
+        assert_eq!(
+            canonical
+                .canonical_operation_for_source(&cue_list_rename_alias.source_key)
+                .unwrap()
+                .map(|operation| operation.operation_id.as_str()),
+            Some(CUE_LIST_RENAME_OPERATION_ID)
+        );
+        let timeline_authority_direct = direct
+            .iter()
+            .find(|source| source.source_key.source_id == "query_timeline_transport_authority_v1")
+            .expect("runtime Timeline authority must be a direct canonical query source");
+        assert_eq!(
+            canonical
+                .canonical_operation_for_source(&timeline_authority_direct.source_key)
+                .unwrap()
+                .map(|operation| operation.operation_id.as_str()),
+            Some(TIMELINE_TRANSPORT_AUTHORITY_QUERY_OPERATION_ID)
+        );
+        assert_eq!(
+            timeline_authority_direct.raw_request_schema.name.as_str(),
+            "syndocal.query.runtime.timeline.transport.authority.v1.request"
+        );
+        assert_eq!(
+            timeline_authority_direct.raw_response_schema.name.as_str(),
+            "syndocal.query.runtime.timeline.transport.authority.v1.response"
+        );
+        let timeline_authority_alias = aliases
+            .iter()
+            .find(|source| source.source_key.source_id == "query_timeline_transport_authority_v1")
+            .expect("frontend runtime Timeline authority must retain its alias row");
+        assert_eq!(
+            canonical
+                .canonical_operation_for_source(&timeline_authority_alias.source_key)
+                .unwrap()
+                .map(|operation| operation.operation_id.as_str()),
+            Some(TIMELINE_TRANSPORT_AUTHORITY_QUERY_OPERATION_ID)
+        );
+        let timeline_transport_direct = direct
+            .iter()
+            .find(|source| {
+                source.source_key.source_id == "set_timeline_transport_playing_runtime_v1"
+            })
+            .expect("runtime Timeline transport must be a direct canonical source");
+        assert_eq!(
+            canonical
+                .canonical_operation_for_source(&timeline_transport_direct.source_key)
+                .unwrap()
+                .map(|operation| operation.operation_id.as_str()),
+            Some(TIMELINE_TRANSPORT_SET_PLAYING_OPERATION_ID)
+        );
+        let timeline_transport_alias = aliases
+            .iter()
+            .find(|source| {
+                source.source_key.source_id == "set_timeline_transport_playing_runtime_v1"
+            })
+            .expect("frontend runtime Timeline transport must retain its alias row");
+        assert_eq!(
+            canonical
+                .canonical_operation_for_source(&timeline_transport_alias.source_key)
+                .unwrap()
+                .map(|operation| operation.operation_id.as_str()),
+            Some(TIMELINE_TRANSPORT_SET_PLAYING_OPERATION_ID)
+        );
+        for (source_id, operation_id) in [
+            (
+                "query_timeline_loop_runtime_authority_v1",
+                TIMELINE_LOOP_RUNTIME_AUTHORITY_QUERY_OPERATION_ID,
+            ),
+            (
+                "commit_timeline_loop_runtime_v1",
+                TIMELINE_LOOP_RUNTIME_OPERATION_ID,
+            ),
+        ] {
+            let direct_source = direct
+                .iter()
+                .find(|source| source.source_key.source_id == source_id)
+                .unwrap_or_else(|| panic!("{source_id} must be a direct canonical source"));
+            assert_eq!(
+                canonical
+                    .canonical_operation_for_source(&direct_source.source_key)
+                    .unwrap()
+                    .map(|operation| operation.operation_id.as_str()),
+                Some(operation_id)
+            );
+            let alias_source = aliases
+                .iter()
+                .find(|source| source.source_key.source_id == source_id)
+                .unwrap_or_else(|| {
+                    panic!("frontend {source_id} must retain its canonical alias row")
+                });
+            assert_eq!(
+                canonical
+                    .canonical_operation_for_source(&alias_source.source_key)
+                    .unwrap()
+                    .map(|operation| operation.operation_id.as_str()),
+                Some(operation_id)
+            );
+        }
+        let follow_abort_authority_direct = direct
+            .iter()
+            .find(|source| {
+                source.source_key.source_id == "query_timeline_follow_abort_authority_v1"
+            })
+            .expect("Follow Abort authority must be a direct canonical query source");
+        assert_eq!(
+            canonical
+                .canonical_operation_for_source(&follow_abort_authority_direct.source_key)
+                .unwrap()
+                .map(|operation| operation.operation_id.as_str()),
+            Some(TIMELINE_FOLLOW_ABORT_AUTHORITY_QUERY_OPERATION_ID)
+        );
+        let follow_abort_direct = direct
+            .iter()
+            .find(|source| source.source_key.source_id == "abort_timeline_follow_runtime_v1")
+            .expect("Follow Abort must be a direct canonical runtime-safety source");
+        assert_eq!(
+            canonical
+                .canonical_operation_for_source(&follow_abort_direct.source_key)
+                .unwrap()
+                .map(|operation| operation.operation_id.as_str()),
+            Some(TIMELINE_FOLLOW_ABORT_OPERATION_ID)
+        );
+        let follow_abort_alias = aliases
+            .iter()
+            .find(|source| source.source_key.source_id == "abort_timeline_follow_runtime_v1")
+            .expect("frontend Follow Abort must retain its canonical alias row");
+        assert_eq!(
+            canonical
+                .canonical_operation_for_source(&follow_abort_alias.source_key)
+                .unwrap()
+                .map(|operation| operation.operation_id.as_str()),
+            Some(TIMELINE_FOLLOW_ABORT_OPERATION_ID)
+        );
+        let safety_blackout_direct = direct
+            .iter()
+            .find(|source| source.source_key.source_id == "safety_blackout_engage_v1")
+            .expect("S0 safety blackout must be a direct canonical source");
+        assert_eq!(
+            canonical
+                .canonical_operation_for_source(&safety_blackout_direct.source_key)
+                .unwrap()
+                .map(|operation| operation.operation_id.as_str()),
+            Some(SAFETY_BLACKOUT_ENGAGE_OPERATION_ID)
+        );
+        let safety_blackout_alias = aliases
+            .iter()
+            .find(|source| source.source_key.source_id == "safety_blackout_engage_v1")
+            .expect("frontend S0 safety blackout must retain its canonical alias row");
+        assert_eq!(
+            canonical
+                .canonical_operation_for_source(&safety_blackout_alias.source_key)
+                .unwrap()
+                .map(|operation| operation.operation_id.as_str()),
+            Some(SAFETY_BLACKOUT_ENGAGE_OPERATION_ID)
+        );
+        for (source_id, target_id) in [
+            ("set_effect_enabled_published", "set_effect_enabled"),
+            (
+                "set_timeline_playing_published",
+                "set_timeline_transport_playing_runtime_v1",
+            ),
+            ("abort_timeline_follow", "abort_timeline_follow_runtime_v1"),
+            (
+                "safety_blackout_engage_published",
+                "safety_blackout_engage_v1",
+            ),
+        ] {
+            let published_step = internal_steps
+                .iter()
+                .find(|source| source.source_key.source_id == source_id)
+                .unwrap_or_else(|| panic!("missing internal step {source_id}"));
+            assert_eq!(
+                published_step.source_key.family,
+                CanonicalSourceFamily::EngineCommand
+            );
+            assert!(matches!(
+                &published_step.disposition,
+                SourceDisposition::InternalStepOf { target }
+                    if *target == SourceKey::new(CanonicalSourceFamily::TauriCommand, target_id)
+            ));
+        }
+        for source in &unclassified {
+            assert!(canonical
+                .canonical_operation_for_source(&source.source_key)
+                .unwrap()
+                .is_none());
+        }
+        for operation in &canonical.canonical_operations {
+            if matches!(operation.operation_id.as_str(), PROJECT_NEW_OPERATION_ID | PROJECT_OPEN_OPERATION_ID | PROJECT_BACKUP_RESTORE_OPERATION_ID | "syndocal.project.save.v1" | "syndocal.project.save_as.v1" | "syndocal.project.template.save.v1" | "syndocal.project.backup.create.v1" | protocol::control_plane_file::BACKUP_DELETE_ID | protocol::control_plane_backup_management::MANAGE_ID | "syndocal.project.file.acknowledge.v1") {
+                assert_eq!(operation.risk, OperationRisk::R5);
+                assert_eq!(operation.audit, OperationAuditRequirement::Immutable);
+            } else if operation.operation_id == SAFETY_BLACKOUT_ENGAGE_OPERATION_ID {
+                assert_eq!(operation.risk, OperationRisk::S0);
+                assert_eq!(operation.audit, OperationAuditRequirement::Immutable);
+            } else if matches!(
+                operation.operation_id.as_str(),
+                OUTPUT_BLACKOUT_RELEASE_OPERATION_ID
+                    | OUTPUT_BLACKOUT_SET_OPERATION_ID
+                    | OUTPUT_OWNERSHIP_ARM_OPERATION_ID
+                    | OUTPUT_STANDBY_TAKEOVER_OPERATION_ID
+                    | OUTPUT_DISPLAY_ADD_OPERATION_ID
+                    | OUTPUT_EXTERNAL_ADD_OPERATION_ID
+                    | OUTPUT_VIDEO_CONFIGURE_OPERATION_ID
+                    | OUTPUT_VIDEO_REMOVE_OPERATION_ID
+                    | OUTPUT_DISPLAY_WINDOW_SET_OPEN_OPERATION_ID
+                    | OUTPUT_VIDEO_COMPOSITION_ASSIGN_OPERATION_ID
+                    | OUTPUT_LIGHTING_MASTER_SET_OPERATION_ID
+                    | OUTPUT_GROUP_SUBMASTER_SET_OPERATION_ID
+                    | OUTPUT_VIDEO_MASTER_SET_OPERATION_ID
+                    | OUTPUT_VIDEO_CLIP_LAUNCH_OPERATION_ID
+                    | OUTPUT_VIDEO_CLIP_TAKE_OPERATION_ID
+                    | OUTPUT_SHOW_ARTNET_LOOPBACK_ROUTE_ENABLE_OPERATION_ID
+                    | OUTPUT_NETWORK_DMX_ROUTES_SET_OPERATION_ID
+                    | OUTPUT_SHOW_SERIAL_DMX_SAFETY_BLACKOUT_ROUTE_ENABLE_OPERATION_ID
+                    | OUTPUT_SHOW_SERIAL_DMX_SAFETY_BLACKOUT_ROUTE_STOP_OPERATION_ID
+                    | OUTPUT_USB_DMX_UNIVERSE_ROUTE_ENABLE_OPERATION_ID
+                    | OUTPUT_USB_DMX_UNIVERSE_ROUTE_STOP_OPERATION_ID
+                    | OUTPUT_SHOW_SPOUT_OUTPUTS_ENABLE_OPERATION_ID
+                    | OUTPUT_SHOW_SPOUT_OUTPUTS_RESET_OPERATION_ID
+                    | OUTPUT_DSF2026_ARTNET_ACCEPTANCE_PROBE_OPERATION_ID
+                    | OUTPUT_DSF2026_ARTNET_ACCEPTANCE_PROBE_RECONCILE_OPERATION_ID
+                    | OUTPUT_ENABLE_OPERATION_ID
+                    | OUTPUT_LEASE_ACQUIRE_OPERATION_ID
+                    | OUTPUT_LEASE_RENEW_OPERATION_ID
+                    | OUTPUT_LEASE_RECOVER_OPERATION_ID
+                    | OUTPUT_LEASE_RELINQUISH_OPERATION_ID
+                    | OUTPUT_LEASE_FORCE_TRANSFER_OPERATION_ID
+            ) {
+                assert_eq!(operation.risk, OperationRisk::R4);
+                assert_eq!(operation.audit, OperationAuditRequirement::Immutable);
+            } else if matches!(operation.adapter_policy, AdapterPolicy::LocalWindowAuthoritativeMutation) {
+                assert_eq!(operation.risk,OperationRisk::R3);assert_eq!(operation.audit,OperationAuditRequirement::Immutable);
+            } else if operation.operation_id==TIMELINE_TRANSPORT_SET_PLAYING_OPERATION_ID {
+                assert_eq!(operation.risk,OperationRisk::R2);assert_eq!(operation.audit,OperationAuditRequirement::Immutable);
+            } else if matches!(operation.adapter_policy,AdapterPolicy::LocalWindowAuthoritativeRuntimeMutation | AdapterPolicy::LocalWindowRuntimeSafetyMutation) {
+                assert_eq!(operation.risk,OperationRisk::R1);assert_eq!(operation.audit,OperationAuditRequirement::NotApplicable);
+            } else {
+                assert_eq!(operation.risk, OperationRisk::R0);
+                assert_eq!(operation.audit, OperationAuditRequirement::NotApplicable);
+            }
+            assert_eq!(operation.derived_adapters.len(), 1);
+            if matches!(operation.operation_id.as_str(), PROJECT_NEW_OPERATION_ID | PROJECT_OPEN_OPERATION_ID | PROJECT_BACKUP_RESTORE_OPERATION_ID | "syndocal.project.save.v1" | "syndocal.project.save_as.v1" | "syndocal.project.template.save.v1" | "syndocal.project.backup.create.v1" | protocol::control_plane_file::BACKUP_DELETE_ID | protocol::control_plane_backup_management::MANAGE_ID | "syndocal.project.file.acknowledge.v1") {
+                assert_eq!(operation.class, OperationClass::Mutation);
+                assert_eq!(operation.idempotency, OperationIdempotency::Mutating);
+                assert_eq!(operation.adapter_policy, if matches!(operation.operation_id.as_str(), PROJECT_NEW_OPERATION_ID | PROJECT_OPEN_OPERATION_ID | PROJECT_BACKUP_RESTORE_OPERATION_ID) { AdapterPolicy::LocalWindowProjectReplacement } else { AdapterPolicy::LocalWindowProjectPublication });
+                assert_eq!(operation.receipt_policy, ReceiptPolicy::ExactTerminalReceipt);
+                assert_eq!(operation.rate_policy, RatePolicy::TokenBucket4PerSecondBurst8);
+                assert_eq!(operation.consent_policy, ConsentPolicy::NativeDangerConfirmation);
+                assert_eq!(operation.capabilities, vec![OperationCapability::LocalWindowBound, OperationCapability::AuthoritativeProjectMutation]);
+                assert!(!operation.capabilities.contains(&OperationCapability::AllowedDuringFullLock));
+            } else if operation.operation_id == SET_EFFECT_ENABLED_OPERATION_ID {
+                assert_eq!(operation.class, OperationClass::Mutation);
+                assert_eq!(operation.idempotency, OperationIdempotency::Mutating);
+                assert_eq!(
+                    operation.adapter_policy,
+                    AdapterPolicy::LocalWindowAuthoritativeMutation
+                );
+                assert_eq!(
+                    operation.receipt_policy,
+                    ReceiptPolicy::ExactTerminalReceipt
+                );
+                assert_eq!(
+                    operation.capabilities,
+                    vec![
+                        OperationCapability::LocalWindowBound,
+                        OperationCapability::AuthoritativeProjectMutation,
+                    ]
+                );
+            } else if matches!(
+                operation.operation_id.as_str(),
+                CUE_LIST_DELETE_OPERATION_ID
+                    | CUE_LIST_RENAME_OPERATION_ID
+                    | CUE_LIST_REORDER_OPERATION_ID
+                    | SCENE_CREATE_AUTHORITATIVE_V1_OPERATION_ID
+            ) {
+                assert_eq!(operation.class, OperationClass::Mutation);
+                assert_eq!(operation.idempotency, OperationIdempotency::Mutating);
+                assert_eq!(
+                    operation.adapter_policy,
+                    AdapterPolicy::LocalWindowAuthoritativeMutation
+                );
+                assert_eq!(
+                    operation.receipt_policy,
+                    ReceiptPolicy::ExactTerminalReceipt
+                );
+                assert_eq!(operation.rate_policy, RatePolicy::FailClosed);
+                assert_eq!(operation.consent_policy, ConsentPolicy::FailClosed);
+                assert_eq!(
+                    operation.capabilities,
+                    vec![
+                        OperationCapability::LocalWindowBound,
+                        OperationCapability::AuthoritativeProjectMutation,
+                    ]
+                );
+            } else if matches!(
+                operation.operation_id.as_str(),
+                TIMELINE_TRANSPORT_SET_PLAYING_OPERATION_ID | TIMELINE_LOOP_RUNTIME_OPERATION_ID
+            ) {
+                assert_eq!(operation.class, OperationClass::Mutation);
+                assert_eq!(operation.idempotency, OperationIdempotency::Mutating);
+                assert_eq!(
+                    operation.adapter_policy,
+                    AdapterPolicy::LocalWindowAuthoritativeRuntimeMutation
+                );
+                assert_eq!(
+                    operation.receipt_policy,
+                    ReceiptPolicy::ExactTerminalReceipt
+                );
+                assert_eq!(
+                    operation.rate_policy,
+                    RatePolicy::TokenBucket4PerSecondBurst8
+                );
+                assert_eq!(
+                    operation.capabilities,
+                    vec![
+                        OperationCapability::LocalWindowBound,
+                        OperationCapability::AuthoritativeRuntimeMutation,
+                    ]
+                );
+                assert!(!operation
+                    .capabilities
+                    .contains(&OperationCapability::AllowedDuringFullLock));
+            } else if operation.operation_id == TIMELINE_FOLLOW_ABORT_OPERATION_ID {
+                assert_eq!(operation.class, OperationClass::Mutation);
+                assert_eq!(operation.idempotency, OperationIdempotency::Mutating);
+                assert_eq!(
+                    operation.adapter_policy,
+                    AdapterPolicy::LocalWindowRuntimeSafetyMutation
+                );
+                assert_eq!(
+                    operation.receipt_policy,
+                    ReceiptPolicy::ExactTerminalReceipt
+                );
+                assert_eq!(
+                    operation.rate_policy,
+                    RatePolicy::TokenBucket4PerSecondBurst8
+                );
+                assert_eq!(
+                    operation.capabilities,
+                    vec![
+                        OperationCapability::LocalWindowBound,
+                        OperationCapability::AuthoritativeRuntimeMutation,
+                        OperationCapability::AllowedDuringFullLock,
+                    ]
+                );
+            } else if operation.operation_id == SAFETY_BLACKOUT_ENGAGE_OPERATION_ID {
+                assert_eq!(operation.class, OperationClass::Mutation);
+                assert_eq!(operation.idempotency, OperationIdempotency::Mutating);
+                assert_eq!(
+                    operation.adapter_policy,
+                    AdapterPolicy::LocalWindowEmergencySafetyMutation
+                );
+                assert_eq!(
+                    operation.receipt_policy,
+                    ReceiptPolicy::ExactTerminalReceipt
+                );
+                assert_eq!(
+                    operation.rate_policy,
+                    RatePolicy::TokenBucket4PerSecondBurst8
+                );
+                assert_eq!(
+                    operation.consent_policy,
+                    ConsentPolicy::NotRequiredForSafetyOnly
+                );
+                assert_eq!(
+                    operation.capabilities,
+                    vec![
+                        OperationCapability::LocalWindowBound,
+                        OperationCapability::SafetyBlackoutEngage,
+                        OperationCapability::AllowedDuringFullLock,
+                    ]
+                );
+            } else if matches!(
+                operation.operation_id.as_str(),
+                OUTPUT_BLACKOUT_RELEASE_OPERATION_ID
+                    | OUTPUT_BLACKOUT_SET_OPERATION_ID
+                    | OUTPUT_OWNERSHIP_ARM_OPERATION_ID
+                    | OUTPUT_STANDBY_TAKEOVER_OPERATION_ID
+                    | OUTPUT_DISPLAY_ADD_OPERATION_ID
+                    | OUTPUT_EXTERNAL_ADD_OPERATION_ID
+                    | OUTPUT_VIDEO_CONFIGURE_OPERATION_ID
+                    | OUTPUT_VIDEO_REMOVE_OPERATION_ID
+                    | OUTPUT_DISPLAY_WINDOW_SET_OPEN_OPERATION_ID
+                    | OUTPUT_VIDEO_COMPOSITION_ASSIGN_OPERATION_ID
+                    | OUTPUT_LIGHTING_MASTER_SET_OPERATION_ID
+                    | OUTPUT_GROUP_SUBMASTER_SET_OPERATION_ID
+                    | OUTPUT_VIDEO_MASTER_SET_OPERATION_ID
+                    | OUTPUT_VIDEO_CLIP_LAUNCH_OPERATION_ID
+                    | OUTPUT_VIDEO_CLIP_TAKE_OPERATION_ID
+                    | OUTPUT_SHOW_ARTNET_LOOPBACK_ROUTE_ENABLE_OPERATION_ID
+                    | OUTPUT_NETWORK_DMX_ROUTES_SET_OPERATION_ID
+                    | OUTPUT_SHOW_SERIAL_DMX_SAFETY_BLACKOUT_ROUTE_ENABLE_OPERATION_ID
+                    | OUTPUT_SHOW_SERIAL_DMX_SAFETY_BLACKOUT_ROUTE_STOP_OPERATION_ID
+                    | OUTPUT_USB_DMX_UNIVERSE_ROUTE_ENABLE_OPERATION_ID
+                    | OUTPUT_USB_DMX_UNIVERSE_ROUTE_STOP_OPERATION_ID
+                    | OUTPUT_SHOW_SPOUT_OUTPUTS_ENABLE_OPERATION_ID
+                    | OUTPUT_SHOW_SPOUT_OUTPUTS_RESET_OPERATION_ID
+                    | OUTPUT_DSF2026_ARTNET_ACCEPTANCE_PROBE_OPERATION_ID
+                    | OUTPUT_DSF2026_ARTNET_ACCEPTANCE_PROBE_RECONCILE_OPERATION_ID
+                    | OUTPUT_ENABLE_OPERATION_ID
+                    | OUTPUT_LEASE_ACQUIRE_OPERATION_ID
+                    | OUTPUT_LEASE_RENEW_OPERATION_ID
+                    | OUTPUT_LEASE_RECOVER_OPERATION_ID
+                    | OUTPUT_LEASE_RELINQUISH_OPERATION_ID
+                    | OUTPUT_LEASE_FORCE_TRANSFER_OPERATION_ID
+            ) {
+                assert_eq!(operation.class, OperationClass::Mutation);
+                assert_eq!(operation.idempotency, OperationIdempotency::Mutating);
+                assert_eq!(
+                    operation.adapter_policy,
+                    if matches!(
+                        operation.operation_id.as_str(),
+                        OUTPUT_ENABLE_OPERATION_ID
+                            | OUTPUT_DISPLAY_ADD_OPERATION_ID
+                            | OUTPUT_EXTERNAL_ADD_OPERATION_ID
+                            | OUTPUT_VIDEO_CONFIGURE_OPERATION_ID
+                            | OUTPUT_VIDEO_REMOVE_OPERATION_ID
+                            | OUTPUT_BLACKOUT_RELEASE_OPERATION_ID
+                            | OUTPUT_BLACKOUT_SET_OPERATION_ID
+                            | OUTPUT_DISPLAY_WINDOW_SET_OPEN_OPERATION_ID
+                            | OUTPUT_LIGHTING_MASTER_SET_OPERATION_ID
+                            | OUTPUT_GROUP_SUBMASTER_SET_OPERATION_ID
+                            | OUTPUT_VIDEO_MASTER_SET_OPERATION_ID
+                            | OUTPUT_VIDEO_CLIP_LAUNCH_OPERATION_ID
+                            | OUTPUT_VIDEO_CLIP_TAKE_OPERATION_ID
+                            | OUTPUT_LEASE_ACQUIRE_OPERATION_ID
+                            | OUTPUT_LEASE_RENEW_OPERATION_ID
+                            | OUTPUT_LEASE_RECOVER_OPERATION_ID
+                            | OUTPUT_LEASE_RELINQUISH_OPERATION_ID
+                    ) {
+                        AdapterPolicy::LocalWindowOutputControl
+                    } else {
+                        AdapterPolicy::LocalWindowDangerousOutputControl
+                    }
+                );
+                assert_eq!(
+                    operation.receipt_policy,
+                    ReceiptPolicy::ExactTerminalReceipt
+                );
+                assert_eq!(
+                    operation.rate_policy,
+                    RatePolicy::TokenBucket4PerSecondBurst8
+                );
+                assert_eq!(
+                    operation.consent_policy,
+                    if matches!(
+                        operation.operation_id.as_str(),
+                        OUTPUT_ENABLE_OPERATION_ID
+                            | OUTPUT_DISPLAY_ADD_OPERATION_ID
+                            | OUTPUT_EXTERNAL_ADD_OPERATION_ID
+                            | OUTPUT_VIDEO_CONFIGURE_OPERATION_ID
+                            | OUTPUT_VIDEO_REMOVE_OPERATION_ID
+                            | OUTPUT_BLACKOUT_RELEASE_OPERATION_ID
+                            | OUTPUT_BLACKOUT_SET_OPERATION_ID
+                            | OUTPUT_DISPLAY_WINDOW_SET_OPEN_OPERATION_ID
+                            | OUTPUT_LIGHTING_MASTER_SET_OPERATION_ID
+                            | OUTPUT_GROUP_SUBMASTER_SET_OPERATION_ID
+                            | OUTPUT_VIDEO_MASTER_SET_OPERATION_ID
+                            | OUTPUT_VIDEO_CLIP_LAUNCH_OPERATION_ID
+                            | OUTPUT_VIDEO_CLIP_TAKE_OPERATION_ID
+                            | OUTPUT_LEASE_ACQUIRE_OPERATION_ID
+                            | OUTPUT_LEASE_RENEW_OPERATION_ID
+                            | OUTPUT_LEASE_RECOVER_OPERATION_ID
+                            | OUTPUT_LEASE_RELINQUISH_OPERATION_ID
+                    ) {
+                        ConsentPolicy::LocalExplicitAction
+                    } else {
+                        ConsentPolicy::NativeDangerConfirmation
+                    }
+                );
+                assert_eq!(
+                    operation.capabilities,
+                    vec![
+                        OperationCapability::LocalWindowBound,
+                        OperationCapability::OutputControl,
+                    ]
+                );
+                assert!(!operation
+                    .capabilities
+                    .contains(&OperationCapability::AllowedDuringFullLock));
+            } else {
+                assert_eq!(
+                    operation.idempotency,
+                    OperationIdempotency::ReadOnly,
+                    "{}",
+                    operation.operation_id
+                );
+                assert_eq!(operation.adapter_policy, AdapterPolicy::LocalWindowReadOnly);
+                assert_eq!(operation.receipt_policy, ReceiptPolicy::FailClosed);
+            }
+        }
+
+        let fail_closed_effect_bindings = [
+            (
+                CanonicalSourceFamily::EngineCommand,
+                "set_effect_enabled",
+                "legacy effect-enabled engine ingress lacks a versioned authored fence",
+            ),
+            (
+                CanonicalSourceFamily::RemoteInputEvent,
+                "set_effect_enabled",
+                "legacy remote effect-enabled ingress is fail-closed pending versioned migration",
+            ),
+            (
+                CanonicalSourceFamily::RemoteWireOperation,
+                "setEffectEnabled",
+                "legacy remote effect-enabled ingress is fail-closed pending versioned migration",
+            ),
+            (
+                CanonicalSourceFamily::MidiControlAction,
+                "effect_enabled",
+                "legacy midi effect-enabled ingress is fail-closed pending versioned migration",
+            ),
+            (
+                CanonicalSourceFamily::MidiControlEvent,
+                "set_effect_enabled",
+                "legacy midi effect-enabled ingress is fail-closed pending versioned migration",
+            ),
+            (
+                CanonicalSourceFamily::OscControlAction,
+                "effect_enabled",
+                "legacy osc effect-enabled ingress is fail-closed pending versioned migration",
+            ),
+            (
+                CanonicalSourceFamily::OscInputEvent,
+                "set_effect_enabled",
+                "legacy osc effect-enabled ingress is fail-closed pending versioned migration",
+            ),
+        ];
+        for (family, source_id, reason) in fail_closed_effect_bindings {
+            let source = canonical
+                .source_inventory
+                .iter()
+                .find(|source| {
+                    source.source_key.family == family && source.source_key.source_id == source_id
+                })
+                .unwrap_or_else(|| {
+                    panic!("missing legacy effect-enabled source {family:?}:{source_id}")
+                });
+            assert!(matches!(
+                &source.disposition,
+                SourceDisposition::Unclassified { reason: actual } if actual == reason
+            ));
+        }
+
+        // These are the actual existing non-local timeline ingress bindings.
+        // They remain deliberately unclassified until each adapter has its own
+        // versioned identity and server-derived runtime authority contract.
+        let fail_closed_timeline_transport_bindings = [
+            (
+                CanonicalSourceFamily::EngineCommand,
+                "set_timeline_playing",
+                "legacy timeline set-playing engine ingress lacks a versioned runtime identity",
+            ),
+            (
+                CanonicalSourceFamily::RemoteInputEvent,
+                "set_timeline_playing",
+                "legacy remote timeline set-playing ingress is fail-closed pending versioned migration",
+            ),
+            (
+                CanonicalSourceFamily::RemoteWireOperation,
+                "setTimelinePlaying",
+                "legacy remote timeline set-playing ingress is fail-closed pending versioned migration",
+            ),
+            (
+                CanonicalSourceFamily::MidiControlAction,
+                "timeline_play",
+                "legacy midi timeline set-playing ingress is fail-closed pending versioned migration",
+            ),
+            (
+                CanonicalSourceFamily::MidiControlEvent,
+                "set_timeline_playing",
+                "legacy midi timeline set-playing ingress is fail-closed pending versioned migration",
+            ),
+            (
+                CanonicalSourceFamily::OscControlAction,
+                "timeline_play",
+                "legacy osc timeline set-playing ingress is fail-closed pending versioned migration",
+            ),
+            (
+                CanonicalSourceFamily::OscInputEvent,
+                "set_timeline_playing",
+                "legacy osc timeline set-playing ingress is fail-closed pending versioned migration",
+            ),
+        ];
+        for (family, source_id, reason) in fail_closed_timeline_transport_bindings {
+            let source = canonical
+                .source_inventory
+                .iter()
+                .find(|source| {
+                    source.source_key.family == family && source.source_key.source_id == source_id
+                })
+                .unwrap_or_else(|| {
+                    panic!("missing legacy timeline transport source {family:?}:{source_id}")
+                });
+            assert!(matches!(
+                &source.disposition,
+                SourceDisposition::Unclassified { reason: actual } if actual == reason
+            ));
+            assert!(canonical
+                .canonical_operation_for_source(&source.source_key)
+                .unwrap()
+                .is_none());
+        }
+
+        let canonical_json = serde_json::to_value(&canonical).unwrap();
+        for source in canonical_json["source_inventory"].as_array().unwrap() {
+            let source = source.as_object().unwrap();
+            assert!(!source.contains_key("risk"));
+            assert!(!source.contains_key("availability"));
+            assert!(!source.contains_key("adapter_policy"));
+        }
+    }
+
+    #[test]
+    fn canonical_registry_rejects_dropped_legacy_and_keyboard_sources() {
+        let legacy = registry().unwrap();
+        let mut canonical = canonical_registry().unwrap();
+        let legacy_index = canonical
+            .source_inventory
+            .iter()
+            .position(|source| source.source_key.family == CanonicalSourceFamily::TauriCommand)
+            .unwrap();
+        canonical.source_inventory.remove(legacy_index);
+        assert!(matches!(
+            verify_canonical_registry_exact_sources(&legacy, &canonical),
+            Err(ControlPlaneRegistryError::MissingCanonicalSource(_))
+        ));
+
+        let mut canonical = canonical_registry().unwrap();
+        let keyboard_index = canonical
+            .source_inventory
+            .iter()
+            .position(|source| {
+                source.source_key
+                    == SourceKey::new(CanonicalSourceFamily::KeyboardApp, "new_project_v1")
+            })
+            .unwrap();
+        canonical.source_inventory.remove(keyboard_index);
+        assert!(matches!(
+            verify_canonical_registry_exact_sources(&legacy, &canonical),
+            Err(ControlPlaneRegistryError::MissingCanonicalSource(_))
+        ));
+    }
+
+    #[test]
+    fn legacy_v1_registry_json_and_count_remain_inventory_honest() {
+        let legacy = registry().unwrap();
+        // Includes both native and frontend sources for generator create/update.
+        assert_eq!(legacy.operations.len(), 1753);
+        let encoded = serde_json::to_value(&legacy).unwrap();
+        assert_eq!(encoded["schema"]["version"], CONTROL_PLANE_SCHEMA_VERSION);
+        let operations = encoded["operations"].as_array().unwrap();
+        assert_eq!(operations.len(), 1753);
+        assert!(operations.iter().all(|operation| {
+            operation["source_family"] != "keyboard_app"
+                && operation["source_family"] != "keyboard_project_file"
+        }));
+    }
+
+    #[test]
+    fn keyboard_shortcut_manifest_rejects_malformed_duplicate_and_drifting_sources() {
+        assert!(matches!(
+            keyboard_shortcut_source_ids_from_manifest("{"),
+            Err(ControlPlaneRegistryError::InvalidKeyboardShortcutSourceManifest)
+        ));
+        assert!(matches!(
+            keyboard_shortcut_source_ids_from_manifest(
+                "{\"schema_version\":1,\"keyboard_app\":[],\"keyboard_project_file\":[],\"unknown\":true}"
+            ),
+            Err(ControlPlaneRegistryError::InvalidKeyboardShortcutSourceManifest)
+        ));
+
+        let mut duplicate = serde_json::from_str::<KeyboardShortcutSourceManifest>(
+            KEYBOARD_SHORTCUT_SOURCE_MANIFEST,
+        )
+        .unwrap();
+        duplicate.keyboard_app[1] = duplicate.keyboard_app[0].clone();
+        let duplicate = format!("{}\n", serde_json::to_string_pretty(&duplicate).unwrap());
+        assert!(matches!(
+            keyboard_shortcut_source_ids_from_manifest(&duplicate),
+            Err(ControlPlaneRegistryError::DuplicateKeyboardShortcutSource(
+                _
+            ))
+        ));
+
+        let mut drifted = serde_json::from_str::<KeyboardShortcutSourceManifest>(
+            KEYBOARD_SHORTCUT_SOURCE_MANIFEST,
+        )
+        .unwrap();
+        drifted.keyboard_project_file.pop();
+        let drifted = format!("{}\n", serde_json::to_string_pretty(&drifted).unwrap());
+        assert!(matches!(
+            keyboard_shortcut_source_ids_from_manifest(&drifted),
+            Err(ControlPlaneRegistryError::InvalidKeyboardShortcutSourceManifest)
+        ));
+    }
+
+    #[test]
+    fn legacy_registry_only_adds_the_canonical_query_endpoint_row() {
+        let legacy = registry().unwrap();
+        let encoded = serde_json::to_value(&legacy).unwrap();
+        let operations = encoded["operations"].as_array().unwrap();
+        let endpoint_rows = operations
+            .iter()
+            .filter(|operation| {
+                operation["source_family"] == "tauri_command"
+                    && operation["source_id"] == "get_control_plane_canonical_registry"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(endpoint_rows.len(), 1);
+        let endpoint = endpoint_rows[0];
+        assert_eq!(
+            endpoint["operation_id"],
+            "syndocal.query.control_plane.canonical_registry.v3"
+        );
+        assert_eq!(
+            endpoint["request_schema"]["name"],
+            "syndocal.query.control_plane.canonical_registry.v3.request"
+        );
+        assert_eq!(
+            endpoint["response_schema"]["name"],
+            "syndocal.query.control_plane.canonical_registry.v3.response"
+        );
+        assert_eq!(
+            endpoint["request_schema"]["version"],
+            CONTROL_PLANE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            endpoint["response_schema"]["version"],
+            CONTROL_PLANE_SCHEMA_VERSION
+        );
+        assert_eq!(endpoint["risk"], "r0");
+        assert_eq!(endpoint["availability"], "local_window_only");
+        assert_eq!(endpoint["idempotency"], "read_only");
+        assert_eq!(endpoint["audit"], "not_applicable");
+        assert_eq!(
+            endpoint["capabilities"],
+            serde_json::json!([
+                "read_only",
+                "local_window_bound",
+                "allowed_during_full_lock",
+                "registry_discovery"
+            ])
+        );
+    }
+
+    #[test]
+    fn legacy_set_effect_enabled_stays_r5_while_v2_owns_the_authoritative_mutation() {
+        let legacy = registry().unwrap();
+        let descriptor = legacy
+            .operations
+            .iter()
+            .find(|descriptor| {
+                descriptor.source_family == OperationSourceFamily::TauriCommand
+                    && descriptor.source_id == "set_effect_enabled"
+            })
+            .expect("set_effect_enabled must remain in the exact v1 source inventory");
+        assert_eq!(descriptor.operation_id, SET_EFFECT_ENABLED_OPERATION_ID);
+        assert_eq!(descriptor.risk, OperationRisk::R5);
+        assert_eq!(descriptor.availability, OperationAvailability::Unavailable);
+        assert_eq!(descriptor.class, OperationClass::Mutation);
+        assert_eq!(descriptor.idempotency, OperationIdempotency::Mutating);
+        assert_eq!(
+            descriptor.capabilities,
+            vec![OperationCapability::LocalWindowBound]
+        );
+        assert_eq!(
+            descriptor.audit,
+            OperationAuditRequirement::RequiredBeforeExternalExecution
+        );
+        assert_eq!(
+            descriptor.request_schema,
+            command_schema(SET_EFFECT_ENABLED_OPERATION_ID, "request")
+        );
+        assert_eq!(
+            descriptor.response_schema,
+            command_schema(SET_EFFECT_ENABLED_OPERATION_ID, "response")
+        );
+    }
+
+    #[test]
+    fn duplicate_handler_command_is_rejected() {
+        let source = "tauri::generate_handler![\n  get_snapshot,\n  get_snapshot,\n]";
+        assert_eq!(
+            registered_tauri_command_names_from_source(source),
+            Err(ControlPlaneRegistryError::DuplicateCommandName(
+                "get_snapshot".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn handler_parser_accepts_only_exact_nonorphaned_windows_x64_asio_cfg() {
+        const ASIO_CFG: &str =
+            "#[cfg(all(target_os = \"windows\", target_arch = \"x86_64\", feature = \"asio\"))]";
+        let accepted = format!(
+            "tauri::generate_handler![\n  get_snapshot,\n  {ASIO_CFG}\n  get_asio_output_status,\n]"
+        );
+        assert_eq!(
+            registered_tauri_command_names_from_source(&accepted),
+            Ok(vec![
+                "get_asio_output_status".to_string(),
+                "get_snapshot".to_string()
+            ])
+        );
+
+        for invalid in [
+            "tauri::generate_handler![\n  #[cfg(feature = \"asio\")]\n  get_asio_output_status,\n]"
+                .to_string(),
+            format!(
+                "tauri::generate_handler![\n  {ASIO_CFG}\n  {ASIO_CFG}\n  get_asio_output_status,\n]"
+            ),
+            format!("tauri::generate_handler![\n  get_snapshot,\n  {ASIO_CFG}\n]"),
+        ] {
+            assert!(matches!(
+                registered_tauri_command_names_from_source(&invalid),
+                Err(ControlPlaneRegistryError::InvalidCommandName(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn frontend_manifest_rejects_duplicate_unsorted_and_invalid_commands() {
+        assert_eq!(
+            frontend_invoke_names_from_manifest("[\"get_snapshot\",\"get_snapshot\"]"),
+            Err(ControlPlaneRegistryError::DuplicateFrontendInvokeCommand(
+                "get_snapshot".to_string()
+            ))
+        );
+        assert_eq!(
+            frontend_invoke_names_from_manifest("[\"set_bpm\",\"get_snapshot\"]"),
+            Err(ControlPlaneRegistryError::InvalidFrontendInvokeManifest)
+        );
+        assert_eq!(
+            frontend_invoke_names_from_manifest("[\"GetSnapshot\"]"),
+            Err(ControlPlaneRegistryError::InvalidFrontendInvokeManifest)
+        );
+    }
+
+    #[test]
+    fn multiple_production_handler_blocks_are_rejected() {
+        let source = "tauri::generate_handler![\n  get_snapshot,\n]\ntauri::generate_handler![\n  get_snapshot_delta,\n]";
+        assert_eq!(
+            registered_tauri_command_names_from_source(source),
+            Err(ControlPlaneRegistryError::MultipleHandlerMarkers)
+        );
+    }
+
+    #[test]
+    fn missing_or_new_registry_descriptor_is_rejected() {
+        let names = vec!["get_snapshot".to_string()];
+        let mut registry = OperationRegistry {
+            schema: SchemaIdentity::registry(),
+            operations: Vec::new(),
+        };
+        assert_eq!(
+            verify_registry_exact_set(&names, &registry),
+            Err(ControlPlaneRegistryError::MissingRegistryDescriptor(
+                "get_snapshot".to_string()
+            ))
+        );
+        registry
+            .operations
+            .push(descriptor_for_command("get_snapshot"));
+        registry
+            .operations
+            .push(unavailable_descriptor("new_command"));
+        assert_eq!(
+            verify_registry_exact_set(&names, &registry),
+            Err(ControlPlaneRegistryError::UnexpectedRegistryDescriptor(
+                "new_command".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn conservative_default_never_makes_a_mutation_externally_available() {
+        let descriptor = unavailable_descriptor("set_blackout");
+        assert_eq!(descriptor.risk, OperationRisk::R5);
+        assert_eq!(descriptor.availability, OperationAvailability::Unavailable);
+        assert_eq!(descriptor.idempotency, OperationIdempotency::Mutating);
+        assert!(descriptor.validate().is_ok());
+    }
+
+    #[test]
+    fn registry_requires_a_window_binding() {
+        assert_eq!(
+            registry_for_window(""),
+            Err(ControlPlaneRegistryError::MissingWindowBinding)
+        );
+    }
+}

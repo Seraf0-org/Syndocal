@@ -1,0 +1,1231 @@
+import assert from "node:assert/strict";
+import { readdir, readFile } from "node:fs/promises";
+import ts from "typescript";
+
+const source = await readFile(new URL("../src/uiLocalization.ts", import.meta.url), "utf8");
+const transpiled = ts.transpileModule(source, {
+  compilerOptions: {
+    module: ts.ModuleKind.ESNext,
+    target: ts.ScriptTarget.ES2022,
+    importsNotUsedAsValues: ts.ImportsNotUsedAsValues.Remove,
+  },
+  fileName: "uiLocalization.ts",
+});
+const localization = await import(
+  `data:text/javascript;base64,${Buffer.from(transpiled.outputText).toString("base64")}`
+);
+const timelineOverviewSource = await readFile(
+  new URL("../src/components/TimelineOverview.tsx", import.meta.url),
+  "utf8",
+);
+const timelineCueEventsPanelSource = await readFile(
+  new URL("../src/components/TimelineCueEventsPanel.tsx", import.meta.url),
+  "utf8",
+);
+const timelineOperatorBarSource = await readFile(
+  new URL("../src/components/TimelineOperatorBar.tsx", import.meta.url),
+  "utf8",
+);
+const phase1SmokeReportPanelSource = await readFile(
+  new URL("../src/components/Phase1SmokeReportPanel.tsx", import.meta.url),
+  "utf8",
+);
+const valueEffectEditorSource = await readFile(
+  new URL("../src/components/ValueEffectEditorPanel.tsx", import.meta.url),
+  "utf8",
+);
+const colorEffectEditorSource = await readFile(
+  new URL("../src/components/ColorEffectEditorPanel.tsx", import.meta.url),
+  "utf8",
+);
+const videoOutputCreatePanelSource = await readFile(
+  new URL("../src/components/VideoOutputCreatePanel.tsx", import.meta.url),
+  "utf8",
+);
+const typesSource = await readFile(new URL("../src/types.ts", import.meta.url), "utf8");
+
+assert.equal(localization.uiLocaleFromUnknown("ja"), "ja");
+assert.equal(localization.uiLocaleFromUnknown("en"), "en");
+assert.equal(localization.uiLocaleFromUnknown("future"), "en");
+assert.equal(localization.translateUiText("Save", "ja"), "保存");
+assert.equal(localization.translateUiText("Load", "ja"), "開く");
+assert.equal(localization.translateUiText("New Scene", "ja"), "新しいシーン");
+assert.equal(localization.translateUiText("Actions", "ja"), "操作");
+assert.equal(localization.translateUiText("Selection", "ja"), "選択");
+assert.equal(localization.translateUiText("Clipboard", "ja"), "クリップボード");
+assert.equal(localization.translateUiText("Timing", "ja"), "タイミング");
+assert.equal(localization.translateUiText("Lane", "ja"), "レーン");
+assert.equal(localization.translateUiText("Close", "ja"), "閉じる");
+// Perform layer state words stay distinct from the imperative Stop button.
+assert.equal(localization.translateUiText("Stopped", "ja"), "停止中");
+assert.equal(localization.translateUiText("Paused", "ja"), "一時停止中");
+assert.equal(localization.translateUiText("LIVE", "ja"), "LIVE");
+assert.equal(localization.translateUiText("Stop", "ja"), "停止");
+assert.equal(localization.translateUiText("  Save  ", "ja"), "  保存  ");
+assert.equal(localization.translateUiText("3 steps", "ja"), "3 手順");
+assert.equal(localization.translateUiText("Install v1.2.0", "ja"), "v1.2.0をインストール");
+assert.equal(localization.translateUiText("Jump", "ja"), "ジャンプ");
+assert.equal(localization.translateUiText("Live audio input stopped.", "ja"), "ライブ音声入力は停止中です。");
+assert.equal(localization.translateUiText("Cue Audio", "ja"), "キュー音声");
+assert.equal(localization.translateUiText("Follow PROGRAM output", "ja"), "PROGRAM出力に追従");
+assert.equal(localization.translateUiText("Explicit WDM output", "ja"), "WDM出力を指定");
+assert.equal(localization.translateUiText("Click gain", "ja"), "クリック音量");
+assert.equal(localization.translateUiText("Refresh Windows outputs", "ja"), "Windows出力を更新");
+assert.equal(localization.translateUiText("Music (missing; reselect)", "ja"), "Music（見つかりません。再選択してください）");
+assert.equal(localization.translateUiText("Music (2 matching outputs; ambiguous)", "ja"), "Music（一致する出力 2 件・曖昧）");
+assert.equal(localization.translateUiText("Music (not currently selectable)", "ja"), "Music（現在選択できません）");
+assert.equal(localization.translateUiText("Staged same-PC Art-Net loopback show route enabled.", "ja"), "準備済みの同一PC Art-Netループバック公演ルートを有効化しました。");
+assert.equal(localization.translateUiText("Send fixed red DSF2026 Art-Net probe once", "ja"), "固定赤色DSF2026 Art-Netプローブを1回送信");
+assert.equal(
+  localization.translateUiText("One-shot fixed red 530-byte ArtDmx U0 proof only to 127.0.0.1:6454: payload[0] and payload[4] are 255; payload[499] remains 0. The authored route stays staged disabled. OS UDP acceptance only; receiver and physical output remain unverified.", "ja"),
+  "127.0.0.1:6454へ530バイトの固定赤色ArtDmx U0検証フレームを1回だけ送信します。payload[0]とpayload[4]は255、payload[499]は0のままです。作成済みルートは無効のステージ状態を維持します。OSのUDP受付だけを確認し、受信側と物理出力は未確認です。",
+);
+assert.equal(
+  localization.translateUiText("DSF2026 fixed red probe: OS accepted one 530-byte ArtDmx U0 datagram to 127.0.0.1:6454; receiver and physical output remain unverified.", "ja"),
+  "DSF2026固定赤色プローブ: OSは127.0.0.1:6454への530バイトArtDmx U0データグラムを1回受け付けました。受信側と物理出力は未確認です。",
+);
+assert.equal(localization.translateUiText("Reconcile DSF2026 probe InDoubt (no send)", "ja"), "DSF2026プローブのInDoubtを照合（送信なし）");
+assert.equal(
+  localization.translateUiText("DSF2026 probe outcome is InDoubt. Reconcile without sending after independent receiver and physical-output verification; it records the unobservable result as permanently consumed and never re-enables retry or a new probe.", "ja"),
+  "DSF2026プローブの結果はInDoubtです。受信側と物理出力を独立して確認した後、送信なしで照合してください。不観測の結果を恒久的に消費済みとして記録し、再試行や新しいプローブを再び許可しません。",
+);
+assert.equal(
+  localization.translateUiText("Reconcile is a separate no-send action after independent receiver and physical-output verification; it records the unobservable result as permanently consumed and never re-enables retry or another fixed probe.", "ja"),
+  "照合は、受信側と物理出力を独立して確認した後に行う送信なしの別操作です。不観測の結果を恒久的に消費済みとして記録し、再試行や別の固定プローブを再び許可しません。",
+);
+assert.equal(
+  localization.translateUiText("DSF2026 probe InDoubt hold reconciled without sending Art-Net. Receiver and physical output were independently verified by the operator.", "ja"),
+  "Art-Netを送信せずにDSF2026プローブのInDoubt保留を照合しました。受信側と物理出力はオペレーターが独立して確認済みです。",
+);
+assert.equal(localization.translateUiText("Same-PC V2 Syndocal Background/Foreground Spout outputs enabled.", "ja"), "同一PCのV2 Syndocal Background / Syndocal Foreground Spout出力を有効化しました。");
+assert.match(
+  videoOutputCreatePanelSource,
+  /<strong data-no-localize>Syndocal Background<\/strong>/,
+  "the exact Syndocal Background sender name must remain outside UI localization",
+);
+assert.match(
+  videoOutputCreatePanelSource,
+  /<strong data-no-localize>Syndocal Foreground<\/strong>/,
+  "the exact Syndocal Foreground sender name must remain outside UI localization",
+);
+assert.match(
+  videoOutputCreatePanelSource,
+  /<strong data-no-localize>Background Video2 Camera<\/strong>/,
+  "the exact V2 Background composition name must remain outside UI localization",
+);
+assert.match(
+  videoOutputCreatePanelSource,
+  /<strong data-no-localize>Foreground Video 1<\/strong>/,
+  "the exact V2 Foreground composition name must remain outside UI localization",
+);
+assert.equal(localization.translateUiText("Output topology changed. Reselect the device.", "ja"), "出力トポロジーが変わりました。デバイスを再選択してください。");
+assert.equal(localization.translateUiText("CUE route", "ja"), "CUE経路");
+assert.equal(localization.translateUiText("Same ASIO", "ja"), "同じASIO");
+assert.equal(localization.translateUiText("Split device", "ja"), "デバイスを分離");
+assert.equal(localization.translateUiText("WDM endpoint", "ja"), "WDMエンドポイント");
+assert.equal(localization.translateUiText("CUE WDM endpoint", "ja"), "CUE WDMエンドポイント");
+assert.equal(localization.translateUiText("Select WDM endpoint", "ja"), "WDMエンドポイントを選択");
+assert.equal(localization.translateUiText("Spare", "ja"), "予備");
+const usbDmxExactTranslations = [
+  ["Machine-local USB-DMX device", "このPCのUSB-DMXデバイス"],
+  ["Select the exact current PnP device", "現在のPnPデバイスを正確に選択"],
+  ["Confirm this machine-local Open DMX binding", "このPCのOpen DMXバインディングを確定"],
+  ["Arm Open DMX worker under S0", "S0セーフティブラックアウト下でOpen DMXワーカーをアーム"],
+  ["Stop Open DMX worker", "Open DMXワーカーを停止"],
+  ["Logical routes", "論理ルート"],
+  ["Enttec Open DMX · machine local", "Enttec Open DMX · このPC"],
+  ["Logical U0 · 250000 baud · S0-first live mirror", "論理U0 · 250000 baud · S0先行ライブミラー（キュー状態）"],
+  [
+    "Confirmation retains the native lease, safety-blackout, exact binding, sender-open, acknowledgement, and rollback fences. It opens only while S0 is engaged and queues zero first; after the separately confirmed Release Blackout, the same worker mirrors the completed U0 frame alongside Art-Net. Re-engaging S0 preempts later live bytes with zero. USB serial DMX is not a fallback route.",
+    "確定後もネイティブリース、セーフティブラックアウト、正確なバインディング、送信元オープン、確認応答、ロールバックの各フェンスを保持します。S0が有効な間だけ開き、最初にゼロをキューします。別途確定したブラックアウト解除後、同じワーカーが完成済みU0フレームをArt-Netと並行してキュー済みミラーします。S0を再度有効にすると、その後のライブバイトをゼロで先取りします。キュー済みであり、灯体や物理配線への到達は未確認です。USBシリアルDMXは代替ルートではありません。",
+  ],
+  ["USB-DMX machine-local selection is loading; no worker can start.", "USB-DMXのこのPC用選択を読み込み中です。ワーカーは開始できません。"],
+  ["USB-DMX worker status is loading; no worker can start.", "USB-DMXワーカー状態を読み込み中です。ワーカーは開始できません。"],
+  [
+    "A generic FTDI VID/PID is not auto-selected and does not imply a protocol. This explicit operator selection is Open DMX only. Worker status distinguishes queue acceptance from the bounded physical zero transaction; neither is fixture or wire delivery. No one-shot USB probe is implemented in this tranche.",
+    "汎用FTDI VID/PIDは自動選択されず、プロトコルを示すものでもありません。この明示的なオペレーター選択はOpen DMX専用です。ワーカー状態ではキュー受理と限定的な物理ゼロトランザクションを区別します。いずれも灯体や物理配線への送達を示しません。このトランシェではワンショットUSBプローブを実装していません。",
+  ],
+  ["Worker status unavailable — S0 required", "ワーカー状態を取得できません — S0が必要"],
+  ["Faulted — S0 latched", "異常 — S0ラッチ中"],
+  ["S0 armed", "S0アーム済み"],
+  ["Live U0 mirror queued", "ライブU0ミラー（キュー済み）"],
+  ["Worker active", "ワーカー稼働中（キュー状態）"],
+  ["Confirmed, stopped", "バインディング確定・停止中"],
+  ["Binding required", "バインディングが必要"],
+  ["Logical route mismatch", "論理ルート不一致"],
+  ["Staged disabled", "準備済み・無効"],
+  [
+    "USB-DMX confirmation requires the current Windows PnP instance; no binding was written.",
+    "USB-DMX確認には現在のWindows PnPインスタンスが必要です。バインディングは書き込まれませんでした。",
+  ],
+  [
+    "USB-DMX machine-local identity confirmed. Project files were not changed.",
+    "USB-DMXのこのPC用識別情報を確定しました。プロジェクトファイルは変更していません。",
+  ],
+  [
+    "Engage S0 safety blackout first; the USB-DMX worker is intentionally zero-first and will not start while S0 is clear.",
+    "最初にS0セーフティブラックアウトを有効にしてください。USB-DMXワーカーはゼロ先行のため、S0が解除された状態では開始しません。",
+  ],
+  [
+    "USB-DMX worker is unavailable until exactly one confirmed machine-local identity is present.",
+    "USB-DMXワーカーは、このPC用の正確に1件の確定済み識別情報があるまで利用できません。",
+  ],
+  [
+    "USB-DMX Open DMX worker activated with S0 queued. This is not a fixture or physical-wire acceptance result.",
+    "USB-DMX Open DMXワーカーをS0キュー済みで有効化しました。これは灯体または物理配線の受入結果ではありません。",
+  ],
+  [
+    "USB-DMX Open DMX worker stopped. No project route was changed.",
+    "USB-DMX Open DMXワーカーを停止しました。プロジェクトルートは変更していません。",
+  ],
+];
+for (const [sourceText, expectedJapanese] of usbDmxExactTranslations) {
+  assert.equal(localization.translateUiText(sourceText, "ja"), expectedJapanese, `USB-DMX exact translation missing: ${sourceText}`);
+}
+const usbDmxPatternTranslations = [
+  [
+    "No machine-local USB-DMX interface is selected. Select and confirm an enumerated interface on this PC.",
+    "このPC用のUSB-DMXインターフェースが選択されていません。検出済みインターフェースを選択して確定してください。",
+  ],
+  [
+    "The selected machine-local USB-DMX identity is present. Opening revalidates the real Windows handle again.",
+    "選択したこのPC用USB-DMX識別情報は存在します。開始時に実際のWindowsハンドルを再検証します。",
+  ],
+  [
+    "Selected USB-DMX identity is not present exactly (COM7 / FTDI / Open DMX / serial-7). COM renumber, restart, replacement, or unplug requires explicit reselection; no interface was substituted.",
+    "選択したUSB-DMX識別情報が正確には存在しません（COM7 / FTDI / Open DMX / serial-7）。COM番号変更、再起動、交換、抜去の後は明示的に再選択してください。インターフェースは代用していません。",
+  ],
+  [
+    "Selected USB-DMX identity is ambiguous (COM7 / FTDI / Open DMX / serial-7); output remains disabled until one exact interface can be selected.",
+    "選択したUSB-DMX識別情報が曖昧です（COM7 / FTDI / Open DMX / serial-7）。正確なインターフェースを1件選択するまで出力は無効です。",
+  ],
+  [
+    "USB-DMX selection must include an enumerated COM alias and Windows PnP instance",
+    "USB-DMXの選択には、検出済みCOMエイリアスとWindows PnPインスタンスが必要です。",
+  ],
+  [
+    "Selected USB-DMX interface is no longer enumerated; refresh and select again",
+    "選択したUSB-DMXインターフェースが検出一覧から消えました。更新して再選択してください。",
+  ],
+  [
+    "Selected USB-DMX COM alias and PnP instance are ambiguous; no binding was written",
+    "選択したUSB-DMXのCOMエイリアスとPnPインスタンスが曖昧です。バインディングは書き込まれませんでした。",
+  ],
+  ["USB-DMX selection was lost during validation", "検証中にUSB-DMXの選択が失われました。"],
+  [
+    "Machine-local USB-DMX selection is not usable: selected interface is stale",
+    "このPC用USB-DMXの選択は使用できません: selected interface is stale",
+  ],
+  ["Machine-local USB-DMX selection exceeds the 4096 byte safety limit", "このPC用USB-DMXの選択が安全上限（4096バイト）を超えています。"],
+  ["Machine-local USB-DMX selection exceeds its safety limit", "このPC用USB-DMXの選択が安全上限を超えています。"],
+  ["Machine-local USB-DMX selection is invalid: malformed JSON", "このPC用USB-DMXの選択が不正です: malformed JSON"],
+  ["Machine-local USB-DMX selection version 2 is unsupported", "このPC用USB-DMX選択のバージョン 2 はサポートされていません。"],
+  ["Machine-local USB-DMX selection grew during read", "読み取り中にこのPC用USB-DMXの選択ファイルが増大しました。"],
+  ["Selected USB-DMX interface is missing USB VID", "選択したUSB-DMXインターフェースに USB VID がありません。"],
+  ["Selected USB-DMX interface must expose nonzero USB VID and PID", "選択したUSB-DMXインターフェースは、0以外のUSB VIDとPIDを公開する必要があります。"],
+  ["Show serial DMX device enumeration failed: access denied", "シリアルDMXデバイスの列挙に失敗しました: access denied"],
+  ["Show serial DMX device identity is incomplete: missing PnP", "シリアルDMXデバイスの識別情報が不完全です: missing PnP"],
+  [
+    "Selected machine-local USB-DMX interface is absent or stale; refresh and explicitly reselect it. No interface was substituted.",
+    "選択したこのPC用USB-DMXインターフェースがないか古くなっています。更新して明示的に再選択してください。インターフェースは代用していません。",
+  ],
+  [
+    "Selected machine-local USB-DMX interface is ambiguous; output remains disabled until explicit reselect.",
+    "選択したこのPC用USB-DMXインターフェースが曖昧です。明示的に再選択するまで出力は無効です。",
+  ],
+  [
+    "Show serial DMX hardware identity changed after selection; expected COM7, observed COM8. Output remains disabled.",
+    "選択後にシリアルDMXハードウェア識別情報が変わりました。期待値 COM7、検出値 COM8。出力は無効のままです。",
+  ],
+  [
+    "Show serial DMX worker did not complete its initial physical S0 zero write: access denied",
+    "シリアルDMXワーカーは初回の物理S0ゼロ書き込みを完了できませんでした: access denied。これは灯体や物理配線への送達確認ではありません。",
+  ],
+  [
+    "Open DMX worker is active with the latest S0 zero frame queued. Queue acceptance is not fixture or wire-delivery verification.",
+    "Open DMXワーカーは稼働中で、最新のS0ゼロフレームをキュー済みです。キュー受理は灯体や物理配線への送達確認ではありません。",
+  ],
+  [
+    "Open DMX worker is active; the completed U0 mirror frame is queued at show cadence. Queue acceptance is not fixture or wire-delivery verification.",
+    "Open DMXワーカーは稼働中で、完成済みU0ミラーフレームを公演周期でキュー済みです。キュー受理は灯体や物理配線への送達確認ではありません。",
+  ],
+  [
+    "Open DMX worker started after its initial physical zero transaction. The existing safety blackout state is preserved; clear S0 admits the completed U0 mirror. This is not fixture or wire-delivery verification.",
+    "USB-DMXを開始しました。初回ゼロ送信を確認し、既存の安全ブラックアウト状態を保持しています。灯体への送達確認ではありません。",
+  ],
+  [
+    "Open DMX worker stopped after an S0 zero BREAK/MAB/write_all/flush transaction completed. This is not fixture or wire-delivery verification.",
+    "Open DMXワーカーはS0ゼロのBREAK/MAB/write_all/flushトランザクション完了後に停止しました。これは灯体や物理配線への送達確認ではありません。",
+  ],
+  [
+    "USB-DMX worker faulted: write timeout. S0 is engaged; zero queued=true; physical zero completion=false; zero receipt fault=timeout; bounded shutdown fault=none. No fixture or wire delivery was verified.",
+    "USB-DMXワーカーが異常になりました: write timeout. S0 is engaged; zero queued=true; physical zero completion=false; zero receipt fault=timeout; bounded shutdown fault=none. No fixture or wire delivery was verified.",
+  ],
+  ["S0 is engaged", "S0は有効です。"],
+  ["S0 was not confirmed", "S0は確認されていません。"],
+  ["S0 authority lock failed; the local output latch remains fail-closed", "S0権限ロックに失敗しました。ローカル出力ラッチはフェイルクローズのままです。"],
+  ["USB-DMX device enumeration failed: access denied", "USB-DMXデバイスの列挙に失敗しました: access denied"],
+];
+for (const [sourceText, expectedJapanese] of usbDmxPatternTranslations) {
+  assert.equal(localization.translateUiText(sourceText, "ja"), expectedJapanese, `USB-DMX pattern translation missing: ${sourceText}`);
+}
+const machineIdentityLabel = "COM7 · FTDI / Open DMX · serial-7";
+assert.equal(localization.translateUiText(machineIdentityLabel, "ja"), machineIdentityLabel, "machine-specific USB-DMX identity must remain unchanged");
+assert.equal(
+  localization.translateUiText(
+    "PROGRAM and CUE use separate device clocks. Timing can drift; no clock lock is claimed.",
+    "ja",
+  ),
+  "PROGRAMとCUEは別々のデバイスクロックを使用します。タイミングがずれる可能性があります。クロックロックは保証されません。",
+);
+assert.equal(localization.translateUiText("Exact Output (2 matching outputs; ambiguous)", "ja"), "Exact Output（一致する出力 2 件・曖昧）");
+assert.equal(localization.translateUiText("Missing Output (missing)", "ja"), "Missing Output（見つかりません）");
+assert.equal(localization.translateUiText("Backend fault:", "ja"), "バックエンド異常:");
+assert.equal(localization.translateUiText("Local IPC error:", "ja"), "ローカル IPC エラー:");
+assert.equal(localization.translateUiText("Restart required", "ja"), "再起動が必要");
+assert.equal(localization.translateUiText("Interlude", "ja"), "間奏");
+assert.equal(localization.translateUiText("Scene Opening is unavailable because its Bank is missing", "ja"), "シーン Opening は参照先Bankが見つからないため利用できません");
+assert.equal(localization.translateUiText("Scene Opening is unavailable because its Bank identity is invalid", "ja"), "シーン Opening は参照先Bank IDが不正なため利用できません");
+assert.equal(localization.translateUiText("Scene 7 is unavailable because its Scene identity is duplicated", "ja"), "シーン 7 はシーンIDが重複しているため利用できません");
+assert.equal(localization.translateUiText("Scene Opening is unavailable because its Scene identity is invalid", "ja"), "シーン Opening はシーンIDが不正なため利用できません");
+assert.equal(localization.translateUiText("Playback Executor 4 is unavailable because its identity is duplicated", "ja"), "Playback Executor 4 はIDが重複しているため利用できません");
+assert.equal(localization.translateUiText("Playback Executor 4 is unavailable because its identity is invalid", "ja"), "Playback Executor 4 はIDが不正なため利用できません");
+assert.equal(localization.translateUiText("Playback Executor 4 is unavailable because its Bank identity is invalid", "ja"), "Playback Executor 4 は参照先Bank IDが不正なため利用できません");
+assert.equal(localization.translateUiText("Playback Executor 4 is unavailable because its Bank is missing", "ja"), "Playback Executor 4 は参照先Bankが見つからないため利用できません");
+assert.equal(localization.translateUiText("Timeline Bank L7 is unavailable because its identity is duplicated", "ja"), "タイムラインBank L7 はIDが重複しているため利用できません");
+assert.equal(localization.translateUiText("Timeline Bank L0 is unavailable because its identity is invalid", "ja"), "タイムラインBank L0 はIDが不正なため利用できません");
+assert.equal(localization.translateUiText("Timeline Bank L7 is unavailable because its active Scene identity is invalid", "ja"), "タイムラインBank L7 はアクティブシーンIDが不正なため利用できません");
+assert.equal(localization.translateUiText("Timeline Bank L7 is unavailable because active Scene 9 is missing", "ja"), "タイムラインBank L7 はアクティブシーン 9 が見つからないため利用できません");
+assert.equal(localization.translateUiText("Timeline Bank L7 is unavailable because active Scene 9 belongs to Bank L8", "ja"), "タイムラインBank L7 はアクティブシーン 9 がBank L8に属しているため利用できません");
+assert.equal(localization.translateUiText("Timeline Bank Main", "ja"), "タイムラインBank Main");
+assert.equal(localization.translateUiText("Timeline Scene sources are unavailable because the Scene identity set does not match the current project.", "ja"), "シーンIDの集合が現在のプロジェクトと一致しないため、タイムラインのシーンソースは利用できません。");
+assert.equal(localization.translateUiText("No Scenes in this Bank yet.", "ja"), "このBankにはまだシーンがありません。");
+assert.equal(localization.translateUiText("Bass level", "ja"), "低域レベル");
+assert.equal(localization.translateUiText("0 percent", "ja"), "0パーセント");
+assert.equal(localization.translateUiText("Checking", "ja"), "確認中");
+assert.equal(
+  localization.translateUiText("Media library: 2 imported, 1 reused, 3 failed, 4 skipped.", "ja"),
+  "メディアライブラリ: 2件 読み込み、1件 再利用、3件 失敗、4件 スキップ。",
+);
+assert.equal(
+  localization.translateUiText("Media availability: 2 verified, 1 need attention. Project history was not changed.", "ja"),
+  "メディア利用可否: 2件を検証済み、1件は要確認。プロジェクト履歴は変更されていません。",
+);
+assert.equal(
+  localization.translateUiText("Relinked media asset 7 and adopted the replacement.", "ja"),
+  "メディア素材 7 を再リンクし、置換コンテンツを採用しました。",
+);
+assert.equal(
+  localization.translateUiText("Media asset 7 does not match the expected content hash.", "ja"),
+  "メディア素材 7 は想定されたコンテンツハッシュと一致しません。",
+);
+// Media health view and folder relink.
+for (const [english, japanese] of [
+  ["Media health…", "メディア状態…"],
+  ["Relink missing from folder…", "見つからないファイルをフォルダーから再リンク…"],
+  ["Same name and size", "名前とサイズが一致"],
+  ["Same name, size differs", "名前は一致・サイズが異なる"],
+  ["Apply selected", "選択を適用"],
+  ["Choose relink folder", "再リンク用フォルダーを選択"],
+  ["Folder relink canceled. No project changes were made.", "フォルダー再リンクをキャンセルしました。プロジェクトは変更されていません。"],
+  ["Folder relink: 2 relinked, 1 have different content, 1 failed, 3 not attempted.", "フォルダー再リンク: 2件 再リンク、1件 内容が異なる、1件 失敗、3件 未実行。"],
+  ["Folder relink: nothing was applied.", "フォルダー再リンク: 何も適用されませんでした。"],
+  ["This file's content differs from what the project recorded for this asset (the hash does not match).", "このファイルの内容は、プロジェクトがこの素材として記録した内容と異なります（ハッシュが一致しません）。"],
+]) {
+  assert.equal(localization.translateUiText(english, "en"), english);
+  assert.equal(localization.translateUiText(english, "ja"), japanese);
+}
+assert.equal(localization.translateUiText("Clear Pending", "ja"), "クリア待ち");
+assert.equal(localization.translateUiText("Audio Reactive", "ja"), "オーディオリアクティブ");
+assert.equal(localization.translateUiText("Audio feature input level", "ja"), "音声特徴量の入力レベル");
+assert.equal(localization.translateUiText("Open Scene FX", "ja"), "シーンFXを開く");
+assert.equal(localization.translateUiText("Mapping transform", "ja"), "マッピング変形");
+assert.equal(localization.translateUiText("Mapping rotation °", "ja"), "マッピング回転（°）");
+assert.equal(localization.translateUiText("Grid mapping", "ja"), "グリッドマッピング");
+assert.equal(localization.translateUiText("Grid size", "ja"), "グリッドサイズ");
+assert.equal(localization.translateUiText("Grid width", "ja"), "グリッド幅");
+assert.equal(localization.translateUiText("Lines mapping", "ja"), "ラインマッピング");
+assert.equal(localization.translateUiText("Line size", "ja"), "ラインサイズ");
+assert.equal(localization.translateUiText("Graph mapping", "ja"), "グラフマッピング");
+assert.equal(localization.translateUiText("Graph height", "ja"), "グラフ高さ");
+assert.equal(localization.translateUiText("Graph width", "ja"), "グラフ幅");
+assert.equal(localization.translateUiText("Graph pitch", "ja"), "グラフピッチ");
+assert.equal(localization.translateUiText("Graph frequency", "ja"), "グラフ周波数");
+assert.equal(localization.translateUiText("Graph amplitude", "ja"), "グラフ振幅");
+assert.equal(localization.translateUiText("Graph offset", "ja"), "グラフオフセット");
+assert.equal(localization.translateUiText("Grid mapping requires 2 to 5 palette stops.", "ja"), "グリッドマッピングには2～5個のパレットストップが必要です。");
+assert.equal(localization.translateUiText("Graph mapping requires 2 to 10 palette stops.", "ja"), "グラフマッピングには2～10個のパレットストップが必要です。");
+assert.equal(localization.translateUiText("This mapping requires 2 to 255 palette stops.", "ja"), "このマッピングには2～255個のパレットストップが必要です。");
+assert.equal(
+  localization.translateUiText(
+    "Enabled effects 65 / supported 64. Output timing is no longer guaranteed.",
+    "ja",
+  ),
+  "有効FX 65 / サポート上限 64。出力タイミングは保証されません。",
+);
+assert.equal(
+  localization.translateUiText("Built-in FX for Program Texture (layer 12)", "ja"),
+  "Program Texture（レイヤー12）の内蔵FX",
+);
+assert.equal(
+  localization.translateUiText("FX enabled for Program Texture (layer 12)", "ja"),
+  "Program Texture（レイヤー12）のFX有効状態",
+);
+assert.equal(
+  localization.translateUiText("Threshold FX enabled for Program Texture (layer 12)", "ja"),
+  "Program Texture（レイヤー12）のThreshold FX有効状態",
+);
+assert.equal(
+  localization.translateUiText("useSourceAlpha for Threshold FX on Program Texture (layer 12)", "ja"),
+  "Program Texture（レイヤー12）のThreshold FXのuseSourceAlpha",
+);
+assert.equal(
+  localization.translateUiText("FX stack for Program Texture (layer 12)", "ja"),
+  "Program Texture（レイヤー12）のFXスタック",
+);
+assert.equal(localization.translateUiText("Move FX 3 down", "ja"), "FX 3を下へ移動");
+assert.equal(localization.translateUiText("Reset FX 2", "ja"), "FX 2をリセット");
+assert.equal(
+  localization.translateUiText("Trigger pulse for Program Texture (layer 12)", "ja"),
+  "Program Texture（レイヤー12）のpulseをトリガー",
+);
+assert.equal(
+  localization.translateUiText("Advanced FX controls for Program Texture (layer 12)", "ja"),
+  "Program Texture（レイヤー12）のFX詳細操作",
+);
+assert.equal(
+  localization.translateUiText("FX error for Program Texture (layer 12): shader compile failed", "ja"),
+  "Program Texture（レイヤー12）のFXエラー: shader compile failed",
+);
+assert.equal(localization.translateUiText("Video output selection", "ja"), "映像出力の選択");
+assert.equal(localization.translateUiText("Live", "ja"), "ライブ");
+assert.equal(localization.translateUiText("BO", "ja"), "BO");
+assert.equal(localization.translateUiText("Off", "ja"), "OFF");
+assert.equal(localization.translateUiText("SAFE ZERO", "ja"), "安全ゼロ");
+assert.equal(localization.translateUiText("Release safety blackout", "ja"), "安全ブラックアウトを解除");
+assert.equal(
+  localization.translateUiText("System default audio input", "ja"),
+  "システム既定の音声入力",
+);
+assert.equal(localization.translateUiText("Audio input backend", "ja"), "音声入力バックエンド");
+assert.equal(localization.translateUiText("NOT BUILT", "ja"), "未ビルド");
+assert.equal(localization.translateUiText("Select ASIO driver", "ja"), "ASIOドライバを選択");
+assert.equal(localization.translateUiText("Select fixed buffer", "ja"), "固定バッファを選択");
+assert.equal(localization.translateUiText("Reselect input", "ja"), "入力を再選択");
+assert.equal(
+  localization.translateUiText("Found 2 audio input device(s).", "ja"),
+  "音声入力デバイスが2件見つかりました。",
+);
+assert.equal(
+  localization.translateUiText("Live audio FFT input started.", "ja"),
+  "ライブ音声FFT入力を開始しました。",
+);
+assert.equal(
+  localization.translateUiText(
+    "The previous audio input could not be identified safely after Refresh. Select an input again; Start is locked.",
+    "ja",
+  ),
+  "更新後に以前の音声入力を安全に特定できませんでした。入力を選び直してください。開始はロックされています。",
+);
+assert.match(source, /"aria-valuetext"/, "dynamic meter aria-valuetext must be localized");
+assert.equal(localization.translateUiText("Blocks 13-24 / 500", "ja"), "ブロック 13-24 / 500");
+assert.equal(localization.translateUiText("SS", "ja"), "SS");
+assert.equal(localization.translateUiText("EDIT", "ja"), "EDIT");
+assert.equal(localization.translateUiText("EDIT:", "ja"), "EDIT:");
+assert.equal(localization.translateUiText("LIVE", "ja"), "LIVE");
+assert.equal(localization.translateUiText("BLIND", "ja"), "BLIND");
+assert.equal(localization.translateUiText("Fader write mode", "ja"), "フェーダー書込モード");
+assert.equal(localization.translateUiText("No scene selected", "ja"), "シーン未選択");
+assert.equal(localization.translateUiText("Scene settings", "ja"), "シーン設定");
+assert.equal(localization.translateUiText("Static scene", "ja"), "Staticシーン");
+assert.equal(localization.translateUiText("Cue-owned FX", "ja"), "Cue所有FX");
+assert.equal(localization.translateUiText("Save cue-owned FX", "ja"), "Cue所有FXを保存");
+assert.equal(localization.translateUiText("Edit Source", "ja"), "ソースを編集");
+assert.equal(
+  localization.translateUiText("Edit scene settings for Cue Opening Wash", "ja"),
+  "キュー Opening Wash のシーン設定を編集",
+);
+assert.equal(
+  localization.translateUiText("Jump to scene bank Front", "ja"),
+  "シーンバンク Front へ移動",
+);
+assert.equal(
+  localization.translateUiText(
+    "Drag Cue Opening Wash to reorder, move between banks, or place on Timeline",
+    "ja",
+  ),
+  "キュー Opening Wash をドラッグして並べ替え、バンク間移動、またはタイムラインへ配置",
+);
+assert.equal(
+  localization.translateUiText("Created cue-owned Curve FX for scene 302.", "ja"),
+  "シーン 302 にCue所有 Curve FXを作成しました。",
+);
+assert.equal(
+  localization.translateUiText("Saved cue-owned Curve FX for scene 302.", "ja"),
+  "シーン 302 のCue所有 Curve FXを保存しました。",
+);
+assert.equal(
+  localization.translateUiText("Open Super Scene Opening Wash", "ja"),
+  "タイムライン Opening Wash を開く",
+);
+assert.equal(
+  localization.translateUiText("Open Timeline Opening Wash", "ja"),
+  "タイムライン Opening Wash を開く",
+);
+assert.equal(
+  localization.translateUiText(
+    "The timeline is empty. 1 Super Scene has a child timeline (open it from the SS badge in Scene Matrix).",
+    "ja",
+  ),
+  "タイムラインは空です。1件のCueが子タイムラインを持っています（Scene MatrixのTLバッジから開けます）",
+);
+assert.equal(
+  localization.translateUiText(
+    "The timeline is empty. 3 Super Scenes have child timelines (open them from the SS badges in Scene Matrix).",
+    "ja",
+  ),
+  "タイムラインは空です。3件のCueが子タイムラインを持っています（Scene MatrixのTLバッジから開けます）",
+);
+assert.equal(
+  localization.translateUiText(
+    "The timeline is empty. 1 Cue has a child Timeline (open it from the TL badge in Scene Matrix).",
+    "ja",
+  ),
+  "タイムラインは空です。1件のCueが子タイムラインを持っています（Scene MatrixのTLバッジから開けます）",
+);
+assert.equal(
+  localization.translateUiText(
+    "The timeline is empty. 3 Cues have child Timelines (open them from the TL badges in Scene Matrix).",
+    "ja",
+  ),
+  "タイムラインは空です。3件のCueが子タイムラインを持っています（Scene MatrixのTLバッジから開けます）",
+);
+assert.equal(localization.translateUiText("Cue-owned 50", "ja"), "Cue所有 50");
+assert.equal(
+  localization.translateUiText(
+    "1 cue-owned effect is available in Cue editing > Effect Recall.",
+    "ja",
+  ),
+  "Cue所有エフェクトが1件あります。キュー編集の「エフェクト呼び出し」から開けます。",
+);
+assert.equal(
+  localization.translateUiText(
+    "50 cue-owned effects are available in Cue editing > Effect Recall.",
+    "ja",
+  ),
+  "Cue所有エフェクトが50件あります。キュー編集の「エフェクト呼び出し」から開けます。",
+);
+assert.equal(localization.translateUiText("Lighting overlap ×250", "ja"), "照明の重複 ×250");
+assert.equal(
+  localization.translateUiText("Lane 3: Front Wash, 42 items", "ja"),
+  "レーン 3: Front Wash、42件",
+);
+assert.equal(
+  localization.translateUiText("Expand Lighting timeline section", "ja"),
+  "照明タイムラインセクションを展開",
+);
+assert.equal(
+  localization.translateUiText("Collapse Video timeline section", "ja"),
+  "映像タイムラインセクションを折りたたむ",
+);
+assert.equal(
+  localization.translateUiText("Video overlap (250); 0 to 256000 ms; inspect 250 overlapping blocks", "ja"),
+  "映像の重複。0〜256000 ms、250ブロックを確認",
+);
+assert.equal(
+  localization.translateUiText(
+    "Lighting overlap groups (3); 1000 to 9000 ms; inspect 42 blocks across 3 overlap groups",
+    "ja",
+  ),
+  "照明の重複グループ。1000〜9000 ms、3グループ内の42ブロックを確認",
+);
+assert.equal(
+  localization.translateUiText("L 3 · V 2 · FX 1 · Fade 320 ms", "ja"),
+  "照明 3 · 映像 2 · FX 1 · フェード 320 ms",
+);
+assert.equal(
+  localization.translateUiText("1000 ms × 4 = 4000 ms span", "ja"),
+  "1000 ms × 4回 = 4000 ms",
+);
+assert.equal(
+  localization.translateUiText("Opening Wash / Lighting / 0 ms / 1000 ms x 4", "ja"),
+  "Opening Wash / 照明 / 0 ms / 1000 ms × 4回",
+);
+assert.equal(
+  localization.translateUiText("Added linked Scene Block 9 at 1200 ms (500 ms × 4)", "ja"),
+  "連動シーンブロック 9 を 1200 ms に追加しました（500 ms × 4回）",
+);
+assert.equal(
+  localization.translateUiText("Moved Scene Block 9 to 2400 ms", "ja"),
+  "シーンブロック 9 を 2400 ms へ移動しました",
+);
+assert.equal(
+  localization.translateUiText("Block 12 · 4.2 Moving Head @ 8000ms", "ja"),
+  "ブロック 12 · 4.2 Moving Head @ 8000ms",
+);
+assert.equal(
+  localization.translateUiText("Jump · Block 12 · 4.2 Moving Head @ 8000ms", "ja"),
+  "ジャンプ · ブロック 12 · 4.2 Moving Head @ 8000ms",
+);
+assert.equal(
+  localization.translateUiText("Repeat this block · Block 12 · 4.2 Moving Head @ 8000ms", "ja"),
+  "このブロックを繰り返す · ブロック 12 · 4.2 Moving Head @ 8000ms",
+);
+assert.equal(
+  localization.translateUiText("80 shown · 500 total", "ja"),
+  "80件表示 · 全500件",
+);
+assert.equal(
+  localization.translateUiText(
+    "Created an unsaved project from Festival Base (2 embedded profiles, 4 MIDI, 1 OSC, 3 DMX mappings). Outputs remain disarmed until explicit Arm; authored output settings were preserved.",
+    "ja",
+  ),
+  "Festival Baseから未保存プロジェクトを作成しました（埋め込みプロファイル 2、MIDI 4、OSC 1、DMX 3）。出力は明示的にArmするまで停止状態です。作成済みの出力設定は保持されています。",
+);
+assert.equal(
+  localization.translateUiText(
+    "Recovered Festival Base from 2026/7/29 14:30:00 (2 embedded profiles). Save to keep it.",
+    "ja",
+  ),
+  "Festival Baseを2026/7/29 14:30:00の復旧データから復元しました（埋め込みプロファイル2件）。維持するには保存してください。",
+);
+assert.equal(localization.translateUiText("Custom fixture", "ja"), "Custom fixture");
+assert.equal(localization.translateUiText("Effect family chooser", "ja"), "エフェクトファミリーチューザー");
+for (const family of [
+  "STEPS",
+  "COLOR FX",
+  "CHASER FX",
+  "MOVE FX",
+  "VALUE FX",
+  "CURVE FX",
+  "2D MAPPING",
+]) {
+  assert.equal(localization.translateUiText(family, "ja"), family);
+}
+assert.equal(localization.translateUiText("SUPER SCENE", "ja"), "TIMELINE");
+assert.equal(localization.translateUiText("TIMELINE", "ja"), "TIMELINE");
+assert.equal(localization.translateUiText("Current effect waveform preview", "ja"), "現在のエフェクト波形プレビュー");
+assert.equal(localization.translateUiText("Move graphical preview", "ja"), "ムーブのグラフィカルプレビュー");
+assert.equal(localization.translateUiText("Value graphical preview", "ja"), "バリューのグラフィカルプレビュー");
+assert.equal(localization.translateUiText("Imported Daslight Custom CURVE", "ja"), "インポート済みDaslightカスタムCURVE");
+assert.equal(localization.translateUiText("Custom CURVE", "ja"), "カスタムCURVE");
+assert.equal(localization.translateUiText("Daslight import", "ja"), "Daslightインポート");
+assert.equal(localization.translateUiText("Phasing", "ja"), "フェージング");
+assert.equal(localization.translateUiText("points · Daslight order", "ja"), "ポイント・Daslight順序");
+assert.equal(
+  localization.translateUiText("Imported source; point values and easing remain read-only.", "ja"),
+  "インポート元です。ポイント値とイージングは読み取り専用です。",
+);
+assert.equal(
+  localization.translateUiText("Explicit beam targets are preserved without retargeting.", "ja"),
+  "明示的なビームターゲットは再ターゲットせず保持されます。",
+);
+assert.equal(
+  localization.translateUiText("explicit beam / segment targets", "ja"),
+  "明示的なビーム／セグメントターゲット",
+);
+assert.equal(localization.translateUiText("REL @ 50%", "ja"), "相対 @ 50%");
+assert.equal(
+  localization.translateUiText("Output preview · neutral 50% base", "ja"),
+  "出力プレビュー · 基準値50%",
+);
+assert.equal(localization.translateUiText("Path point 3, X 0.125, Y 0.875", "ja"), "パスポイント3、X 0.125、Y 0.875");
+assert.equal(localization.translateUiText("4 points", "ja"), "4ポイント");
+assert.equal(
+  localization.translateUiText(
+    "Absolute Line value envelope with 4 points. Double-click to add. Focus a point and use Arrow keys to nudge, Shift coarse, Alt fine, Delete to remove.",
+    "ja",
+  ),
+  "絶対・線のバリューエンベロープ、4ポイント。ダブルクリックで追加。ポイントにフォーカスし、矢印キーで微調整、Shiftで粗く、Altで細かく、Deleteで削除。",
+);
+assert.equal(
+  localization.translateUiText(
+    "Absolute Step value envelope with 2 points. Double-click to add. Focus a point and use Arrow keys to nudge, Shift coarse, Alt fine, Delete to remove.",
+    "ja",
+  ),
+  "絶対・ステップのバリューエンベロープ、2ポイント。ダブルクリックで追加。ポイントにフォーカスし、矢印キーで微調整、Shiftで粗く、Altで細かく、Deleteで削除。",
+);
+assert.equal(
+  localization.translateUiText(
+    "Relative Smooth value envelope with 3 points. Double-click to add. Focus a point and use Arrow keys to nudge, Shift coarse, Alt fine, Delete to remove.",
+    "ja",
+  ),
+  "相対・スムーズのバリューエンベロープ、3ポイント。ダブルクリックで追加。ポイントにフォーカスし、矢印キーで微調整、Shiftで粗く、Altで細かく、Deleteで削除。",
+);
+assert.equal(
+  localization.translateUiText("Envelope point 2, position 0.5, value 0.75", "ja"),
+  "エンベロープポイント2、位置 0.5、値 0.75",
+);
+assert.equal(localization.translateUiText("Select envelope point 2", "ja"), "エンベロープポイント2を選択");
+assert.equal(localization.translateUiText("Position for envelope point 2", "ja"), "エンベロープポイント2の位置");
+assert.equal(localization.translateUiText("Value for envelope point 2", "ja"), "エンベロープポイント2の値");
+assert.equal(localization.translateUiText("Remove envelope point 2", "ja"), "エンベロープポイント2を削除");
+assert.equal(
+  localization.translateUiText(
+    "ColorRainbow Black 0 White 100 value palette with 3 points. Double-click to add. Focus a point and use Arrow keys to nudge, Shift coarse, Alt fine, Delete to remove.",
+    "ja",
+  ),
+  "Rainbow・Black 0 / White 100の値パレット、3ポイント。ダブルクリックで追加。ポイントにフォーカスし、矢印キーで微調整、Shiftで粗く、Altで細かく、Deleteで削除。",
+);
+assert.equal(
+  localization.translateUiText(
+    "Sweep Black 0 White 100 value palette with 3 points. Double-click to add. Focus a point and use Arrow keys to nudge, Shift coarse, Alt fine, Delete to remove.",
+    "ja",
+  ),
+  "スイープ・Black 0 / White 100の値パレット、3ポイント。ダブルクリックで追加。ポイントにフォーカスし、矢印キーで微調整、Shiftで粗く、Altで細かく、Deleteで削除。",
+);
+assert.ok(
+  valueEffectEditorSource.includes('generatorKind() === "CustomEnvelope" ? `${props.mode} ${props.interpolation} value envelope`'),
+  "Value FX canvas must retain the localized custom-envelope aria contract",
+);
+assert.ok(
+  valueEffectEditorSource.includes('`${generatorKind()} Black 0 White 100 value palette`'),
+  "Value FX canvas must expose the localized Daslight-generator palette aria contract",
+);
+assert.equal(localization.translateUiText("Size %", "ja"), "サイズ（%）");
+assert.equal(localization.translateUiText("Point width %", "ja"), "ポイント幅（%）");
+assert.equal(localization.translateUiText("Point height %", "ja"), "ポイント高さ（%）");
+assert.equal(localization.translateUiText("Sparkle width %", "ja"), "スパークル幅（%）");
+for (const editorSource of [valueEffectEditorSource, colorEffectEditorSource]) {
+  assert.doesNotMatch(
+    editorSource,
+    /DVC corrected|Syndocal corrected|Enhanced|daslightExactKnight|data-value-daslight-exact/,
+    "unified editors must not expose evaluator-route language or imported-route affordances",
+  );
+}
+const spatialRecipeSource = typesSource.match(
+  /export type ColorEffectSpatialRecipe =([\s\S]*?);\r?\n\r?\nexport type ColorEffectSpatialCoordinateFrame/,
+)?.[1];
+assert.ok(spatialRecipeSource, "ColorEffectSpatialRecipe declaration must remain discoverable");
+const valueRecipeLine = (kind) => spatialRecipeSource
+  ?.split(/\r?\n/)
+  .find((line) => line.includes(`{ ${kind}:`)) ?? "";
+assert.doesNotMatch(valueRecipeLine("KnightRider"), /daslight_exact/);
+assert.match(valueRecipeLine("KnightRider"), /grayscale\?: boolean/);
+assert.match(valueRecipeLine("KnightRider"), /vertical_symmetry\?: boolean/);
+assert.doesNotMatch(valueRecipeLine("Burst"), /daslight_exact/);
+assert.match(valueRecipeLine("Burst"), /grayscale\?: boolean/);
+assert.match(valueRecipeLine("Burst"), /vertical_symmetry\?: boolean/);
+assert.match(typesSource, /parameter_model_version: 1;/);
+for (const editorSource of [valueEffectEditorSource, colorEffectEditorSource]) {
+  assert.equal(
+    [...editorSource.matchAll(/<option value="daslight">DVC corrected<\/option>/g)].length,
+    0,
+    "unified effects must not retain DVC evaluator labels",
+  );
+  assert.ok(
+    editorSource.includes("Period ms")
+      && editorSource.includes('min="10"')
+      && editorSource.includes('step="10"')
+      && editorSource.includes("props.onPeriodMs(Math.max(10, value));"),
+    "unified effects must retain the authored 10 ms period contract",
+  );
+  assert.doesNotMatch(editorSource, /40 ms compatibility|daslightExactTiming|Math\.floor\([^\n]*\/ 40\)/);
+}
+assert.doesNotMatch(valueRecipeLine("RandomFill"), /syndocal_corrected/);
+assert.match(valueRecipeLine("RandomFill"), /rng_seed\?: number/);
+assert.match(valueRecipeLine("RandomFill"), /vertical_symmetry\?: boolean/);
+assert.match(valueRecipeLine("RandomFill"), /source_point_height\?: number \| null/);
+assert.doesNotMatch(valueRecipeLine("Sparkle"), /syndocal_corrected|lifespan:/);
+assert.match(valueRecipeLine("Sparkle"), /rng_seed\?: number/);
+assert.match(valueRecipeLine("Sparkle"), /lifetime_ms\?: number \| null/);
+assert.match(valueRecipeLine("Sparkle"), /source_lifespan\?: number \| null/);
+for (const editorSource of [valueEffectEditorSource, colorEffectEditorSource]) {
+  assert.ok(
+    editorSource.includes('max="4294967295"')
+      && editorSource.includes('Lifetime ms'),
+    "Random fill and Sparkle must expose deterministic unified fields",
+  );
+}
+for (const dynamicAriaPrefix of [
+  "Envelope point ",
+  "Select envelope point ",
+  "Position for envelope point ",
+  "Value for envelope point ",
+  "Remove envelope point ",
+]) {
+  assert.ok(
+    valueEffectEditorSource.includes(`aria-label={\`${dynamicAriaPrefix}\${`),
+    `Value FX must keep its localized ${dynamicAriaPrefix.trim()} aria-label contract`,
+  );
+}
+for (const shape of ["Sine", "Cosine", "Triangle", "Saw", "Square", "Random", "Perlin"]) {
+  assert.equal(localization.translateUiText(shape, "ja"), shape);
+}
+assert.equal(localization.translateUiText("Ramp", "ja"), "ランプ");
+assert.equal(localization.translateUiText("Sinus3", "ja"), "サイン3");
+assert.equal(localization.translateUiText("Tangeant", "ja"), "タンジェント");
+for (const category of ["Dimmer", "Color", "Position", "Beam"]) {
+  assert.equal(localization.translateUiText(category, "ja"), category);
+}
+assert.equal(localization.translateUiText("Live modifier defaults", "ja"), "ライブモディファイア初期値");
+assert.equal(localization.translateUiText("Live speed for Cue 新宝島", "ja"), "キュー 新宝島 のライブSpeed");
+assert.equal(localization.translateUiText("Live size for Cue 新宝島", "ja"), "キュー 新宝島 のライブSize");
+assert.equal(localization.translateUiText("Live phase for Cue 新宝島", "ja"), "キュー 新宝島 のライブPhase");
+assert.equal(localization.translateUiText("Default live speed for 新宝島", "ja"), "新宝島 のライブSpeed初期値");
+assert.equal(localization.translateUiText("Default live size for 新宝島", "ja"), "新宝島 のライブSize初期値");
+assert.equal(localization.translateUiText("Default live phase for 新宝島", "ja"), "新宝島 のライブPhase初期値");
+assert.equal(
+  localization.translateUiText("Reset live modifier for Cue Amber", "ja"),
+  "キュー Amber のライブモディファイアをリセット",
+);
+assert.equal(localization.translateUiText("Flash Cue Strobe", "ja"), "キュー Strobe をフラッシュ");
+assert.equal(localization.translateUiText("Flash mode for White", "ja"), "White のフラッシュモード");
+for (const modifier of ["Speed", "Size", "Phase"]) {
+  assert.equal(localization.translateUiText(modifier, "ja"), modifier);
+}
+for (const [sourceText, expectedJapaneseDisplay] of [
+  ["Beam feature records", "Beam特徴量レコード"],
+  ["Beam feature mismatches", "Beam特徴量不一致"],
+  ["Color graphical preview", "Colorのグラフィカルプレビュー"],
+  ["Move FX", "MOVE FX"],
+  ["Move phase percent", "ムーブPhase（パーセント）"],
+  ["Move phase percent value", "ムーブPhase（パーセント）の値"],
+  ["Value FX", "VALUE FX"],
+  ["Value phase percent", "バリューPhase（パーセント）"],
+  ["Value phase percent value", "バリューPhase（パーセント）の値"],
+  ["Curve FX", "CURVE FX"],
+  ["Curve phase percent", "カーブPhase（パーセント）"],
+  ["Curve phase percent value", "カーブPhase（パーセント）の値"],
+  ["Mapping phase percent", "マッピングPhase（パーセント）"],
+  ["Mapping phase percent value", "マッピングPhase（パーセント）の値"],
+  ["2D Colour Mapping", "2D COLOUR MAPPINGS"],
+  ["Colour Mapping (2D media)", "COLOUR MAPPINGS（2Dメディア）"],
+  ["Colour Mapping clock sync presets", "COLOUR MAPPINGSクロック同期プリセット"],
+  ["Colour Mapping effect editor", "COLOUR MAPPINGSエフェクトエディター"],
+  ["Colour Mapping text", "COLOUR MAPPINGSテキスト"],
+  ["Colour Mapping text color", "COLOUR MAPPINGSテキストColor"],
+  ["Phase %", "Phase %"],
+  ["Phase / Spread", "Phase / 分散"],
+  ["Chaser size percent", "チェイサーのSize（パーセント）"],
+  ["Random seed", "Randomシード"],
+  ["Random cycles", "Randomサイクル数"],
+  ["sequence slots ·", "系列スロット・"],
+  ["Beam order", "Beam順序"],
+  ["Chaser beam steps", "チェイサーのBeamステップ"],
+  ["phase", "Phase"],
+  ["% size", "% Size"],
+  ["Preview speed", "プレビューSpeed"],
+  ["Decrease preview speed", "プレビューSpeedを下げる"],
+  ["Increase preview speed", "プレビューSpeedを上げる"],
+  ["Dimmer Limits", "Dimmer制限"],
+  ["Video Position", "映像Position"],
+  ["Position Wave", "Positionウェーブ"],
+  ["Position Favorites", "Positionのお気に入り"],
+  ["Clear Color", "Colorをクリア"],
+  ["Color picker", "Colorピッカー"],
+  ["Open color picker", "Colorピッカーを開く"],
+  ["Set dimmer off", "DimmerをOFFにする"],
+  ["Additional color channel sliders", "追加Colorチャンネルスライダー"],
+  ["Colour Mappings", "COLOUR MAPPINGS"],
+  ["Curve Saw", "カーブ・Saw"],
+  ["Color effect editor", "Colorエフェクトエディター"],
+  ["Color palette stops", "Colorパレットストップ"],
+  ["Color flow", "Colorフロー"],
+  ["Beam-space pattern", "Beam空間パターン"],
+  ["Color beam-space pattern", "ColorのBeam空間パターン"],
+  ["Random fill", "Randomフィル"],
+  ["Sweep", "スイープ"],
+  ["Direction change", "方向を交互に変更"],
+  ["Plasma", "プラズマ"],
+  ["Rainbow strip", "Rainbowストリップ"],
+  ["Grid mapping", "グリッドマッピング"],
+  ["Grid size", "グリッドサイズ"],
+  ["Grid width", "グリッド幅"],
+  ["Lines mapping", "ラインマッピング"],
+  ["Line size", "ラインサイズ"],
+  ["Graph mapping", "グラフマッピング"],
+  ["Graph height", "グラフ高さ"],
+  ["Graph width", "グラフ幅"],
+  ["Graph pitch", "グラフピッチ"],
+  ["Graph frequency", "グラフ周波数"],
+  ["Graph amplitude", "グラフ振幅"],
+  ["Graph offset", "グラフオフセット"],
+  ["Grid mapping requires 2 to 5 palette stops.", "グリッドマッピングには2～5個のパレットストップが必要です。"],
+  ["Graph mapping requires 2 to 10 palette stops.", "グラフマッピングには2～10個のパレットストップが必要です。"],
+  ["This mapping requires 2 to 255 palette stops.", "このマッピングには2～255個のパレットストップが必要です。"],
+  ["Simultaneous particles created per 40 ms generation", "40 msごとの生成で同時に作られるパーティクル数"],
+  ["Effect-time milliseconds, scaling with clock sync and BPM speed", "エフェクト時間のミリ秒。クロック同期とBPM速度に応じて伸縮します"],
+  ["Perlin mapping", "Perlinマッピング"],
+  ["Grayscale", "グレースケール"],
+  ["Horizontal symmetry", "左右対称"],
+  ["Color width %", "Color幅（%）"],
+  ["Color width °", "Color幅（°）"],
+  ["Sparkle height %", "スパークル高さ（%）"],
+  ["Spiral mapping", "スパイラルマッピング"],
+  ["Butterfly mapping", "バタフライマッピング"],
+  ["Radius", "半径"],
+  ["Arms", "アーム数"],
+  ["Clockwise", "時計回り"],
+  ["Color width", "Color幅"],
+  ["Size X", "サイズ X"],
+  ["Param X", "パラメータ X"],
+  ["Size Y", "サイズ Y"],
+  ["Param Y", "パラメータ Y"],
+  ["Speed X", "速度 X"],
+  ["Param SX", "パラメータ SX"],
+  ["Speed Y", "速度 Y"],
+  ["Param SY", "パラメータ SY"],
+  ["Fixture color phase spread", "灯体Color Phaseスプレッド"],
+  ["Fixture color phase spread percent", "灯体Color Phaseスプレッド（%）"],
+  ["Color effect clock sync presets", "Colorエフェクトのクロック同期プリセット"],
+  ["Dimmer visual level", "Dimmer表示レベル"],
+  ["Open Control/Edit with a Position Wave draft for the picked fixtures", "選択灯体のPositionウェーブ下書きをコントロール／編集で開く"],
+  ["Position favorite label", "Positionお気に入り名"],
+  ["Position ms", "Position ms"],
+  ["Position wave clock sync presets", "Positionウェーブクロック同期プリセット"],
+  ["Position wave speed presets", "PositionウェーブSpeedプリセット"],
+  ["Position wave wavelength presets", "Positionウェーブ波長プリセット"],
+  ["speed", "Speed"],
+]) {
+  assert.equal(localization.translateUiText(sourceText, "ja"), expectedJapaneseDisplay);
+}
+assert.equal(localization.translateUiText("Save", "en"), "Save");
+for (const [english, japanese] of [
+  ["Overlay", "オーバーレイ"],
+  ["Subtract", "減算"],
+  ["Difference", "差の絶対値"],
+  ["Lighten", "比較（明）"],
+  ["Darken", "比較（暗）"],
+  ["Soft Light", "ソフトライト"],
+]) {
+  assert.equal(localization.translateUiText(english, "en"), english);
+  assert.equal(localization.translateUiText(english, "ja"), japanese);
+}
+
+const accessibleSceneBlock = {
+  id: 12,
+  cue_label: "Opening Wash",
+  track: "Lighting",
+  time_ms: 1_500,
+  duration_ms: 750,
+  loop_count: 4,
+  total_duration_ms: 3_000,
+};
+const accessiblePointEvent = {
+  id: 13,
+  cue_label: "Video Hit",
+  track: "Video",
+  time_ms: 4_250,
+  duration_ms: 0,
+  loop_count: 99,
+  total_duration_ms: 0,
+};
+const englishSceneBlockLabel = localization.timelineOverviewMarkerAriaLabel(accessibleSceneBlock, "en");
+assert.equal(
+  englishSceneBlockLabel,
+  "Scene Block #12, Opening Wash, Lighting, starts at 1500 milliseconds, base duration 750 milliseconds, loop count 4, effective span 3000 milliseconds",
+);
+assert.match(englishSceneBlockLabel, /base duration 750 milliseconds/);
+assert.match(englishSceneBlockLabel, /loop count 4/);
+assert.match(englishSceneBlockLabel, /effective span 3000 milliseconds/);
+assert.equal(
+  localization.timelineOverviewMarkerAriaLabel(accessibleSceneBlock, "ja"),
+  "シーンブロック #12、Opening Wash、照明、開始 1500ミリ秒、基本時間 750ミリ秒、ループ回数 4、実効範囲 3000ミリ秒",
+);
+const englishPointEventLabel = localization.timelineOverviewMarkerAriaLabel(accessiblePointEvent, "en");
+assert.equal(englishPointEventLabel, "Point event #13, Video Hit, Video, at 4250 milliseconds");
+assert.doesNotMatch(englishPointEventLabel, /Block|duration|loop|span/);
+assert.equal(
+  localization.timelineOverviewMarkerAriaLabel(accessiblePointEvent, "ja"),
+  "ポイントイベント #13、Video Hit、映像、4250ミリ秒",
+);
+assert.match(
+  timelineOverviewSource,
+  /aria-label=\{props\.markerAriaLabel\(event\)\}/,
+  "TimelineOverview must use the tested localized marker formatter",
+);
+assert.doesNotMatch(
+  timelineOverviewSource,
+  /aria-label=\{`Block #\$\{event\.id\}/,
+  "the old generic Block label must not bypass point/Scene Block semantics",
+);
+assert.match(
+  timelineOverviewSource,
+  /<text\s+class="timelineSceneBlockLabel"\s+data-no-localize[\s\S]*?\{sceneBlockName\(event\)\}[\s\S]*?<\/text>/,
+  "Timeline Scene Block display names must remain authored user data when a label matches UI copy such as New Scene",
+);
+assert.match(
+  timelineCueEventsPanelSource,
+  /Armed:\s*<span data-no-localize>\{cue\(\)\.label\}<\/span>/,
+  "armed Timeline cue names must remain authored user data when a label matches UI copy such as New Scene",
+);
+const appSource = (await Promise.all(["../src/App.tsx","../src/components/AppWorkspaceView.tsx","../src/components/PersistentWorkspaceView.tsx","../src/components/SetupIoWorkspaceView.tsx"].map((path) => readFile(new URL(path, import.meta.url), "utf8")))).join("\n");
+assert.match(
+  appSource,
+  /overviewMarkerAriaLabel=\{\(event\) => timelineOverviewMarkerAriaLabel\(event, uiLocale\(\)\)\}/,
+  "App must inject the tested uiLocalization formatter into TimelineOverview",
+);
+assert.equal(
+  [...appSource.matchAll(/<strong>\{pad\.cue \? <span data-no-localize>\{pad\.cue\.label\}<\/span> : "Empty"\}<\/strong>/g)].length,
+  // Task 21: the hidden Edit > Timeline pad copy was removed; Lighting's pad surface is the only one left
+  // (Control > Timeline lists cues in ControlTimelinePlaybackPanel, whose names are data-no-localize).
+  1,
+  "Cue Pad labels must protect authored scene names while Empty remains localizable UI copy",
+);
+assert.match(
+  timelineOperatorBarSource,
+  /Armed:\s*<span data-no-localize>\{label\(\)\}<\/span>/,
+  "Timeline operator armed cue names must remain authored user data when a label matches UI copy such as New Scene",
+);
+assert.match(
+  phase1SmokeReportPanelSource,
+  /<strong data-no-localize>\{report\(\)\.cue_label\}<\/strong>/,
+  "Phase-1 smoke report cue names must remain authored user data when a label matches UI copy such as New Scene",
+);
+
+for (const operatorText of [
+  "New",
+  "Save",
+  "Load",
+  "Undo",
+  "Redo",
+  "User Templates",
+  "Application Updates",
+  "Setup",
+  "Control",
+  "Touch",
+  "Patch",
+  "Video I/O",
+  "Mapping",
+  "Remote",
+  "Live Edit",
+  "Timeline",
+  "VJ Desk",
+  "Cues",
+  "Playback",
+  "Attributes",
+  "Effects",
+  "Fixtures",
+  "Lighting",
+  "DMX Output",
+  "DMX Blackout",
+  "Video Outputs",
+  "Video Blackout",
+  "Projection Mapping",
+  "Web Remote",
+  "UI language",
+]) {
+  assert.notEqual(localization.translateUiText(operatorText, "ja"), operatorText, `${operatorText} must be localized`);
+}
+
+const values = new Map();
+globalThis.window = {
+  localStorage: {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+  },
+};
+assert.equal(localization.loadUiLocale(), "en");
+assert.equal(localization.saveUiLocale("ja"), true);
+assert.equal(localization.loadUiLocale(), "ja");
+
+globalThis.window.localStorage.setItem = () => {
+  throw new Error("storage denied");
+};
+assert.equal(localization.saveUiLocale("en"), false);
+delete globalThis.window;
+
+class LocalizationTestElement {
+  constructor(tagName) {
+    this.tagName = tagName.toUpperCase();
+    this.attributes = new Map();
+    this.childNodes = [];
+    this.parentElement = null;
+  }
+
+  append(...nodes) {
+    for (const node of nodes) {
+      node.parentElement = this;
+      this.childNodes.push(node);
+    }
+  }
+
+  hasAttribute(name) { return this.attributes.has(name); }
+  getAttribute(name) { return this.attributes.get(name) ?? null; }
+  setAttribute(name, value) { this.attributes.set(name, String(value)); }
+
+  closest(selector) {
+    const selectors = selector.split(",").map((item) => item.trim().toLowerCase());
+    for (let current = this; current; current = current.parentElement) {
+      if (selectors.includes(current.tagName.toLowerCase()) || (selectors.includes("[data-no-localize]") && current.hasAttribute("data-no-localize"))) {
+        return current;
+      }
+    }
+    return null;
+  }
+}
+
+class LocalizationTestMutationObserver {
+  constructor() {}
+  observe() {}
+  disconnect() {}
+}
+
+const localizationRoot = new LocalizationTestElement("main");
+const chrome = new LocalizationTestElement("button");
+chrome.setAttribute("title", "Save");
+chrome.setAttribute("aria-label", "Load");
+const authored = new LocalizationTestElement("span");
+authored.setAttribute("data-no-localize", "");
+authored.setAttribute("title", "New Scene");
+const authoredControl = new LocalizationTestElement("button");
+authoredControl.setAttribute("aria-label", "New Scene");
+authored.append(authoredControl);
+localizationRoot.append(chrome, authored);
+globalThis.Element = LocalizationTestElement;
+globalThis.Text = class {};
+globalThis.NodeFilter = { SHOW_ELEMENT: 1, SHOW_TEXT: 4 };
+globalThis.MutationObserver = LocalizationTestMutationObserver;
+globalThis.document = {
+  documentElement: {},
+  createTreeWalker(root) {
+    const descendants = [];
+    const visit = (node) => {
+      for (const child of node.childNodes) {
+        descendants.push(child);
+        visit(child);
+      }
+    };
+    visit(root);
+    let index = 0;
+    return { nextNode: () => descendants[index++] ?? null };
+  },
+};
+const localizationHandle = localization.installUiLocalization(localizationRoot, () => "ja");
+assert.deepEqual(
+  [chrome.getAttribute("title"), chrome.getAttribute("aria-label"), authored.getAttribute("title"), authoredControl.getAttribute("aria-label")],
+  ["保存", "開く", "New Scene", "New Scene"],
+  "data-no-localize protects literal attributes while unmarked UI chrome remains localized",
+);
+localizationHandle.dispose();
+delete globalThis.document;
+delete globalThis.Element;
+delete globalThis.Text;
+delete globalThis.NodeFilter;
+delete globalThis.MutationObserver;
+
+const sourceRoot = new URL("../src/", import.meta.url);
+const tsxFiles = [];
+async function collectTsx(directory) {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = new URL(entry.name + (entry.isDirectory() ? "/" : ""), directory);
+    if (entry.isDirectory()) await collectTsx(path);
+    else if (entry.name.endsWith(".tsx")) tsxFiles.push(path);
+  }
+}
+await collectTsx(sourceRoot);
+
+const localeInvariantText = new Set([
+  "Syndocal", "Syndocal Background", "Syndocal Foreground", "Background Video2 Camera", "Foreground Video 1", "SAFE", "DMX", "MIDI", "MIDI Learn", "OSC", "RDM", "ISF", "NDI", "Spout", "Syphon", "HAP", "FFmpeg",
+  "GO", "SET", "FLASH", "EDIT", "EDIT:", "LIVE", "BLIND", "HTP", "LTP", "RGB", "BPM", "PULSE", "PATCH", "A", "B", "R", "G", "X", "Y", "Z", "Pan", "Tilt",
+  "Dimmer", "Color", "Position", "Beam", "Speed", "Size", "Phase",
+  "Sine", "Cosine", "Triangle", "Saw", "Square", "Random", "Perlin", "Rainbow",
+  "STEPS", "COLOR FX", "CHASER FX", "MOVE FX", "VALUE FX", "CURVE FX", "2D MAPPING",
+  "Phase %", "Position ms",
+  "Art-Net", "USB-DMX", "USB-DMX + Art-Net", "USB-DMX · Art-Net · sACN", "U0", "sACN", "sACN / E1.31", "sACN E1.31", "Enttec USB PRO", "Syphon Server", "Spout Sender",
+  "NDI Sender", "Bezier", "Linear", "Full", "Half", "Scale X", "Scale Y",
+  "ms", "x", "U", "ch", "CH", "deg", "m", "Hz", "MB", "P", "S", "O", "V", "D", "H", "L",
+  "f", "· BUF", "f · CB", "· CB", "C→W", "I/O", "k ·", "kHz", "OVR", "XRUN", "Q",
+  "Key R", "Key G", "Key B", "Key Threshold", "Pan +", "Pan -", "Tilt +", "Tilt -",
+  "ms /", "/ Z", "/512 used", "ch max free", "label, U1 A24, group", ", Y", ", Z", "· PID 0x",
+  "· subdevices", "/ D", "/ native", "/ Tilt", "/ U", "/ V", "/ X", "/touchosc/page/*/fader/1",
+  "&gt;", "% / Tilt", "|&lt;", "0.25x", "0.5x", "1x", "2x", "4x", "1234:56789ABC", "16-bit",
+  "8-bit", "BL X", "BL Y", "BR X", "BR Y", "C:\\path\\fixture.gdtf", "CC", "ch · personality", "ch /",
+  "COM3 or /dev/ttyUSB0", "Crop B", "Crop L", "Crop R", "Crop T", "ctl", "ctrl", "Cue #", "DECK A",
+  "DECK B", "deg / Sat", "Dimmer@1:8, Pan@2:16, Tilt@4:16, ColorRed@6:8", "Dir X", "Dir Y", "Dir Z",
+  "DMXKing ultraDMX", "e/", "Enttec Open DMX", "ENTTEC USB Pro", "fps", "front, bars",
+  "front, movers, floor", "FX", "FX面", "FX面を表示", "SS", "TL", "GDTF", "GDTF Share", "GET", "Hi", "HL",
+  "https://gdtf-share.com/.../fixture.gdtf", "Key H", "Key V", "Keystone H", "Keystone V", "Keystone X",
+  "Keystone Y", "LFO", "LIVE LINK", "m /", "MID", "MIB targets (", "ms ·", "ms · max", "NACK reason 0x",
+  "PID (hex)", "Port-Address",
+  "BO", "DMX BO", "C:\\\\path\\\\fixture.gdtf", "Pan %", "Rev", "s",
+  "T", "Tilt %", "TL X", "TL Y", "TR X", "TR Y", "us", "v", "Video L", "W", "wl", "x/",
+  // Official NDI® URLs are shown as selectable text and never translated.
+  "https://ndi.video/", "https://ndi.video/tools/", "https://ndi.link/NDIRedistV6",
+]);
+const untranslated = new Map();
+const unprotectedUserText = [];
+const localizedDynamicTextAllow = new Set([
+  "ChaserEffectEditorPanel.tsx:preset.label",
+  "ColorEffectEditorPanel.tsx:preset.label",
+  "CueCapturePreviewPanel.tsx:row.label",
+  "MappingHotkeyHelp.tsx:group.label",
+  "MappingProjectorControlsPanel.tsx:preset.label",
+  "OpticsControlPanel.tsx:preset.label",
+  "ProjectorMapEditor.tsx:preset.label",
+]);
+let staticTextCount = 0;
+let localizedStaticTextCount = 0;
+for (const file of tsxFiles) {
+  const sourceText = await readFile(file, "utf8");
+  const sourceFile = ts.createSourceFile(file.pathname, sourceText, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
+  const visit = (node) => {
+    const candidates = [];
+    if (ts.isJsxText(node)) candidates.push(node.getText(sourceFile).replace(/\s+/g, " ").trim());
+    if (
+      ts.isJsxAttribute(node) &&
+      ["title", "aria-label", "placeholder"].includes(node.name.getText(sourceFile)) &&
+      node.initializer &&
+      ts.isStringLiteral(node.initializer)
+    ) {
+      candidates.push(node.initializer.text.trim());
+    }
+    for (const text of candidates) {
+      if (!text || !/[A-Za-z]/.test(text)) continue;
+      staticTextCount += 1;
+      if (localeInvariantText.has(text) || localization.translateUiText(text, "ja") !== text) {
+        localizedStaticTextCount += 1;
+      } else {
+        untranslated.set(text, (untranslated.get(text) ?? 0) + 1);
+      }
+    }
+    if (ts.isJsxExpression(node) && ts.isJsxElement(node.parent) && node.expression) {
+      const expressionText = node.expression.getText(sourceFile).replace(/\s+/g, "");
+      if (
+        /(?:^|\.)(?:fixture|cue|layer|output|composition|palette|group|object|surface|event|automation|preset|profile|submaster|report|row)[A-Za-z0-9_?!.]*\.(?:label|name|groupId|group_id|path)$/.test(expressionText)
+      ) {
+        const attributes = node.parent.openingElement.attributes.properties;
+        const protectedText = attributes.some(
+          (attribute) => ts.isJsxAttribute(attribute) && attribute.name.getText(sourceFile) === "data-no-localize",
+        );
+        const sourceName = file.pathname.split("/").pop();
+        if (!protectedText && !localizedDynamicTextAllow.has(`${sourceName}:${expressionText}`)) {
+          const position = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+          unprotectedUserText.push(`${sourceName}:${position.line + 1} ${expressionText}`);
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+}
+const coverage = staticTextCount === 0 ? 1 : localizedStaticTextCount / staticTextCount;
+// Diagnostic output is emitted below before the final coverage assertion.
+const reportOffset = Number.parseInt(process.env.LOCALIZATION_REPORT_OFFSET ?? "0", 10);
+const reportLimit = Number.parseInt(process.env.LOCALIZATION_REPORT_LIMIT ?? "20", 10);
+console.log(
+  `static Japanese UI coverage: ${localizedStaticTextCount}/${staticTextCount} (${(coverage * 100).toFixed(1)}%)`,
+);
+console.log(`unprotected bare user-data labels: ${unprotectedUserText.length}`);
+if (unprotectedUserText.length > 0) {
+  console.log(unprotectedUserText.slice(0, Number.parseInt(process.env.USER_TEXT_REPORT_LIMIT ?? "30", 10)).join(" | "));
+}
+assert.equal(unprotectedUserText.length, 0, "bare user-data labels must opt out of UI localization");
+console.log(
+  "most frequent untranslated static UI:",
+  [...untranslated.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .slice(reportOffset, reportOffset + reportLimit)
+    .map(([text, count]) => `${count}× ${text}`)
+    .join(" | "),
+);
+
+assert.equal(coverage, 1, `static Japanese UI coverage regressed to ${(coverage * 100).toFixed(1)}%`);
+
+console.log("ui localization helpers ok");
+
+for (const [english, japanese] of [["Add generator", "ジェネレーターを追加"], ["Solid colour", "単色"], ["Linear gradient", "線形グラデーション"], ["Animated noise", "アニメーションノイズ"], ["Generator parameters", "ジェネレーター設定"], ["Generator colour", "ジェネレーターの色"], ["Generator alpha", "ジェネレーターの不透明度"], ["Generator colour A", "ジェネレーターの色 A"], ["Generator colour B", "ジェネレーターの色 B"], ["Generator alpha A", "ジェネレーターの不透明度 A"], ["Generator alpha B", "ジェネレーターの不透明度 B"], ["Gradient angle", "グラデーション角度"], ["Noise seed", "ノイズのシード"], ["Noise scale", "ノイズのスケール"], ["Noise speed", "ノイズの速度"]]) {
+  assert.equal(localization.translateUiText(english, "en"), english);
+  assert.equal(localization.translateUiText(english, "ja"), japanese);
+}

@@ -1,0 +1,487 @@
+.videoPerformMatrix {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--theme-line);
+  background: var(--theme-panel);
+  color: var(--theme-text);
+  font-size: 14px;
+}
+
+.videoPerformMatrixScroll {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+.videoPerformMatrixHead,
+.videoPerformMatrixRow {
+  display: grid;
+  grid-template-columns: 336px repeat(var(--perform-visible-columns, 1), 100px);
+  width: 100%;
+  min-width: 0;
+}
+
+.videoPerformMatrixHead {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  grid-template-columns: 336px minmax(0, 1fr);
+  min-height: 44px;
+  background: var(--theme-raised);
+}
+
+.videoPerformMatrixCorner,
+.videoPerformMatrixColumn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 0 10px;
+  border-right: 1px solid var(--theme-line);
+  border-bottom: 1px solid var(--theme-line);
+}
+
+.videoPerformMatrixCorner {
+  position: sticky;
+  left: 0;
+  z-index: 6;
+  box-sizing: border-box;
+  gap: 6px;
+  padding: 0 6px 0 10px;
+  border-bottom: 0;
+  background: var(--theme-raised);
+  box-shadow: inset 0 -1px 0 var(--theme-line);
+}
+
+.videoPerformMatrixCorner > strong {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.videoPerformMatrixCorner [data-video-perform-page-range] { flex: 1 1 auto; min-width: 0; white-space: nowrap; font-variant-numeric: tabular-nums; text-align: center; }
+.videoPerformMatrixSelection { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; padding-inline: 10px; border-bottom: 1px solid var(--theme-line); }
+.videoPerformSelectedClip { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; min-width: 0; overflow-wrap: anywhere; }
+.videoPerformSelectedClip > span { color: var(--theme-muted); }
+.videoPerformSelectedClip > strong { min-width: 0; font-weight: 400; }
+.videoPerformMatrix [data-video-perform-offpage-status] { display: flex; flex: 0 0 auto; align-items: center; flex-wrap: wrap; gap: 6px; padding: 0 8px; }
+.videoPerformOffpageLive { background: var(--theme-program); color: var(--theme-on-program); font-weight: 700; }
+.videoPerformOffpageQueued { background: var(--theme-queued); color: var(--theme-on-queued); font-weight: 700; }
+
+.videoPerformMatrix .videoPerformMatrixCorner > button {
+  flex: 0 0 auto;
+  padding: 0 8px;
+  white-space: nowrap;
+}
+
+.videoPerformMatrix .videoPerformMatrixCorner > button:disabled {
+  color: var(--theme-dim);
+  background: var(--theme-inset);
+  border-style: dashed;
+}
+
+.videoPerformMatrix kbd {
+  color: var(--theme-muted);
+  border: 1px solid var(--theme-line-strong);
+  border-radius: 0;
+  padding: 1px 4px;
+  background: var(--theme-inset);
+  font: inherit;
+  font-weight: 400;
+  line-height: 18px;
+}
+
+.videoPerformMatrixRow {
+  min-height: 100px;
+  border-bottom: 2px solid var(--theme-line);
+}
+
+.videoPerformLayerStrip {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  display: grid;
+  grid-template-rows: 44px 44px;
+  gap: 4px;
+  padding: 4px 8px;
+  border-right: 2px solid var(--theme-line-strong);
+  background: var(--theme-panel);
+  box-shadow: 4px 0 8px #0006;
+}
+
+.videoPerformMatrixRow.selected .videoPerformLayerStrip {
+  background: var(--theme-raised);
+  border-left: 4px solid var(--theme-selected);
+  padding-left: 4px;
+}
+
+.videoPerformLayerTop {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.videoPerformMatrix button,
+.videoPerformMatrix select,
+.videoPerformMatrix input[type="range"] {
+  min-height: 44px;
+  min-width: 44px;
+  max-height: none;
+  font-size: 14px;
+  box-sizing: border-box;
+}
+
+.videoPerformMatrix button {
+  margin: 0;
+  border: 1px solid var(--theme-line-strong);
+  border-radius: 0;
+  background: var(--theme-raised);
+  color: var(--theme-text);
+  line-height: 1.25;
+}
+
+.videoPerformMatrix button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--theme-raised), var(--theme-text) 8%);
+}
+
+.videoPerformMatrix button:focus-visible,
+.videoPerformMatrix select:focus-visible,
+.videoPerformMatrix input:focus-visible {
+  outline: 3px solid var(--theme-focus);
+  outline-offset: -3px;
+}
+
+.videoPerformMatrix .videoPerformLayerName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  font-weight: 400;
+  padding: 6px;
+}
+
+.videoPerformLayerLive {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 2px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--theme-muted);
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.videoPerformLayerLive.live {
+  background-color: var(--theme-program);
+  background-image: var(--theme-pattern-program, none);
+  color: var(--theme-on-program);
+  font-weight: 700;
+}
+
+.videoPerformLayerMix {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1.2fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+}
+
+.videoPerformMatrix .videoPerformLayerMix label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  min-width: 0;
+  color: var(--theme-text);
+  font-size: 14px;
+  line-height: 18px;
+}
+
+.videoPerformLayerOpacity > strong {
+  flex: 0 0 auto;
+  min-width: 4ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.videoPerformLayerMix input,
+.videoPerformLayerMix select {
+  flex: 1 1 0;
+  min-width: 0;
+  margin: 0;
+  padding: 0 3px;
+}
+
+.videoPerformMatrix .videoPerformLayerTop button.active {
+  border: 2px solid var(--theme-latched);
+  background: var(--theme-latched);
+  color: var(--theme-on-latched);
+  font-weight: 700;
+}
+
+.videoPerformMatrix .videoPerformLayerTop > button:not(.videoPerformLayerName) {
+  padding: 0 6px;
+}
+
+.videoPerformMatrixCell {
+  min-width: 0;
+  padding: 4px 3px;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  border-right: 1px solid var(--theme-line);
+  background: var(--theme-inset);
+}
+
+.videoPerformMatrix .videoPerformClipTrigger {
+  display: grid;
+  grid-template-rows: minmax(48px, 1fr) minmax(40px, auto);
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 92px;
+  padding: 0;
+  overflow: hidden;
+  background: var(--theme-raised);
+  border: 1px solid var(--theme-line-strong);
+  text-align: left;
+}
+
+.videoPerformMatrixCell.selected .videoPerformClipTrigger {
+  outline: 2px solid var(--theme-selected);
+  outline-offset: -2px;
+}
+
+.videoPerformMatrixCell.live .videoPerformClipTrigger {
+  border: 2px solid var(--theme-program);
+}
+
+.videoPerformMatrixCell.queued:not(.live):not(.error) .videoPerformClipTrigger {
+  border: 2px dashed var(--theme-queued);
+}
+
+.videoPerformMatrixCell.error .videoPerformClipTrigger {
+  border: 2px solid var(--theme-error);
+}
+
+.videoPerformClipImage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--theme-inset);
+}
+
+.videoPerformClipImage img {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: cover;
+}
+
+.videoPerformClipPlaceholder {
+  color: var(--theme-dim);
+  font-size: 24px;
+}
+
+.videoPerformClipImage kbd {
+  position: absolute;
+  left: 3px;
+  top: 3px;
+}
+
+.videoPerformClipTitle {
+  display: -webkit-box;
+  grid-column: 1 / -1;
+  padding: 0 4px;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  line-height: 20px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.videoPerformClipState {
+  position: absolute;
+  z-index: 3;
+  top: 4px;
+  right: 4px;
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  overflow: visible;
+  border: 1px solid currentcolor;
+  border-radius: 999px;
+  color: var(--theme-muted);
+  line-height: 1;
+}
+
+.live .videoPerformClipState {
+  background-color: var(--theme-program);
+  background-image: var(--theme-pattern-program, none);
+  color: var(--theme-on-program);
+  font-weight: 700;
+}
+
+.queued:not(.live):not(.error) .videoPerformClipState {
+  background-color: var(--theme-queued);
+  background-image: var(--theme-pattern-queued, none);
+  color: var(--theme-on-queued);
+  font-weight: 700;
+}
+
+.error .videoPerformClipState {
+  background-color: var(--theme-error);
+  background-image: var(--theme-pattern-error, none);
+  color: var(--theme-on-error);
+  font-weight: 700;
+}
+
+.videoPerformMatrixEmpty {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 16px;
+}
+
+/* A file dragged over the empty Perform starts the first show on drop. */
+.videoPerformMatrixEmpty[data-file-drag-over] {
+  outline: 2px dashed var(--theme-accent);
+  outline-offset: -8px;
+}
+
+/* Broadcast labels and tally bars use existing runtime classes and words. */
+.videoPerformClipState {
+  font-family: var(--theme-font-label);
+  font-weight: 700;
+  letter-spacing: 0;
+}
+.videoPerformMatrixCorner > strong,
+.videoPerformMatrixColumn {
+  font-family: var(--theme-font-ui);
+  font-weight: 400;
+}
+.videoPerformMatrix .videoPerformLayerName,
+.videoPerformMatrix .videoPerformClipTrigger,
+.videoPerformMatrix .videoPerformClipTitle {
+  text-transform: none;
+}
+.videoPerformMatrix .videoPerformClipTrigger { position: relative; }
+.videoPerformMatrix .videoPerformClipTrigger::before {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 3px;
+  background: var(--theme-tally-bar);
+  pointer-events: none;
+}
+.videoPerformMatrixCell.preview:not(.live):not(.queued):not(.error) .videoPerformClipTrigger {
+  border: 2px solid var(--theme-preview);
+}
+.preview:not(.live):not(.queued):not(.error) .videoPerformClipState {
+  background-color: var(--theme-preview);
+  background-image: var(--theme-pattern-preview, none);
+  color: var(--theme-on-preview);
+  font-weight: 700;
+}
+.videoPerformMatrixCell.live .videoPerformClipTrigger::before {
+  background-color: var(--theme-program);
+  background-image: var(--theme-pattern-program, none);
+}
+.videoPerformMatrixCell.queued:not(.live):not(.error) .videoPerformClipTrigger::before {
+  background-color: var(--theme-queued);
+  background-image: var(--theme-pattern-queued, none);
+}
+.videoPerformMatrixCell.preview:not(.live):not(.queued):not(.error) .videoPerformClipTrigger::before {
+  background-color: var(--theme-preview);
+  background-image: var(--theme-pattern-preview, none);
+}
+.videoPerformMatrixCell.error .videoPerformClipTrigger::before {
+  background-color: var(--theme-error);
+  background-image: var(--theme-pattern-error, none);
+}
+.videoPerformMatrix .videoPerformPreviewBadge {
+  position: absolute;
+  inset: auto 1px 1px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  padding: 1px;
+  background: var(--theme-preview);
+  color: var(--theme-on-preview);
+  font-family: var(--theme-font-label);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 20px;
+  white-space: nowrap;
+}
+.preview:not(.live):not(.queued):not(.error) .videoPerformClipState {
+  padding-inline: 1px;
+  letter-spacing: 0;
+}
+
+/* The portal keeps clip actions outside the scrolling matrix. */
+.videoPerformClipMenu {
+  position: fixed;
+  z-index: 40;
+  display: grid;
+  min-width: 208px;
+  max-width: calc(100vw - 16px);
+  padding: 4px;
+  border: 1px solid var(--theme-line-strong);
+  background: var(--theme-panel);
+  color: var(--theme-text);
+  font-family: var(--theme-font-ui);
+}
+.videoPerformClipMenu button {
+  min-height: 44px;
+  margin: 0;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font-family: inherit;
+  font-size: 14px;
+}
+.videoPerformClipMenu button:hover:not(:disabled) { background: var(--theme-raised); }
+.videoPerformClipMenu button:focus-visible { outline: 3px solid var(--theme-focus); outline-offset: -3px; }
+.videoPerformClipMenu button:disabled { color: var(--theme-muted); }
+
+/* Group policy is a single 44px strip above its unchanged child controls. */
+.videoPerformGroupRow { width: 100%; min-width: 0; min-height: 44px; border-bottom: 1px solid var(--theme-line-strong); background: var(--theme-raised); }
+.videoPerformGroupStrip { position: sticky; left: 0; display: grid; grid-template-columns: 44px minmax(140px,1fr) minmax(140px,220px) 130px 64px 80px 80px; gap: 6px; width: min(1060px,100%); min-height: 44px; padding-inline: 6px; box-sizing: border-box; align-items: center; background: var(--theme-raised); }
+.videoPerformMatrix .videoPerformGroupStrip button, .videoPerformMatrix .videoPerformGroupStrip select, .videoPerformMatrix .videoPerformGroupStrip input { min-height: 44px; min-width: 44px; font-family: var(--theme-font-ui); font-size: 14px; margin: 0; }
+.videoPerformGroupStrip label { display: flex; align-items: center; gap: 6px; min-width: 0; margin: 0; }
+.videoPerformGroupStrip label input { width: 100%; min-width: 0; }
+.videoPerformGroupStrip label span { min-width: 5ch; font-variant-numeric: tabular-nums; }
+.videoPerformGroupName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.videoPerformGroupStrip button[aria-pressed="true"] { outline: 2px solid var(--theme-selected); outline-offset: -2px; }
+/* A selected group name uses the same latched colours as a selected layer name, not a dim fill. */
+.videoPerformMatrix .videoPerformGroupStrip .videoPerformGroupName[aria-pressed="true"] { border-color: var(--theme-latched); background: var(--theme-latched); color: var(--theme-on-latched); }
+.videoPerformMatrixRow.grouped .videoPerformLayerName { padding-inline-start: 18px; box-shadow: inset 3px 0 var(--theme-line-strong); }
+
+/* Off-page runtime signals stay available without nesting a scroll area in the matrix. */
+.videoPerformOffpageList { position: fixed; z-index: 40; display: grid; gap: 6px; width: min(560px, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow: auto; overscroll-behavior: contain; padding: 8px; box-sizing: border-box; border: 1px solid var(--theme-line-strong); background: var(--theme-panel); color: var(--theme-text); font-family: var(--theme-font-ui); font-size: 14px; }
+.videoPerformOffpageList header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.videoPerformOffpageList button { min-width: 44px; min-height: 44px; margin: 0; padding: 8px 12px; box-sizing: border-box; border: 1px solid var(--theme-line-strong); background: var(--theme-key); color: var(--theme-text); font: inherit; text-align: left; }
+.videoPerformOffpageList > button { display: flex; align-items: center; gap: 8px; }
+.videoPerformOffpageList > button > span[data-no-localize] { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.videoPerformOffpageList > button > strong { flex: 0 0 auto; }
+.videoPerformOffpageList button:focus-visible { outline: 3px solid var(--theme-focus); outline-offset: -3px; }

@@ -1,0 +1,4553 @@
+#[cfg(feature = "libav")]
+use std::collections::VecDeque;
+use std::{
+    path::PathBuf,
+    sync::{atomic::AtomicBool, Arc},
+};
+
+#[path = "libav_cancellation.rs"]
+mod cancellation;
+#[cfg(feature = "libav")]
+use cancellation::InterruptInput;
+use cancellation::StopState;
+
+use protocol::{VideoLayerId, VideoSourceKind};
+
+#[cfg(feature = "libav")]
+use super::VideoPixelFormat;
+use super::{
+    render_input_cache_owner_matches, StillImageSignature, VideoDecodeError, VideoFrame,
+    VideoFrameDecoder, VideoFrameRequest, VideoRenderInput,
+};
+#[cfg(feature = "libav")]
+use ffmpeg_next as ffmpeg;
+
+#[cfg(feature = "libav")]
+#[path = "libav_hardware.rs"]
+mod hardware;
+
+#[cfg(feature = "libav")]
+#[path = "libav_scaler.rs"]
+mod scaler;
+
+#[cfg(feature = "libav")]
+#[path = "libav_rgba_reuse.rs"]
+mod rgba_reuse;
+#[cfg(feature = "libav")]
+use rgba_reuse::ReturnedRgba;
+
+#[cfg(all(feature = "libav", test))]
+#[path = "libav_live_hold_tests.rs"]
+mod live_hold_tests;
+
+#[cfg(all(feature = "libav", test))]
+#[path = "libav_rgba_reuse_tests.rs"]
+mod rgba_reuse_tests;
+
+#[cfg(all(feature = "libav", test))]
+#[path = "libav_seek_projection_tests.rs"]
+mod seek_projection_tests;
+
+#[cfg(all(feature = "libav", test))]
+#[path = "libav_catch_up_tests.rs"]
+mod catch_up_tests;
+
+#[cfg(all(feature = "libav", test))]
+#[path = "libav_loop_wrap_tests.rs"]
+mod loop_wrap_tests;
+
+#[cfg(all(feature = "libav", test))]
+#[path = "libav_parallel_decode_tests.rs"]
+mod parallel_decode_tests;
+
+#[cfg(all(feature = "libav", test))]
+#[path = "libav_cancellation_tests.rs"]
+mod cancellation_tests;
+
+#[cfg(all(feature = "libav", test))]
+#[path = "libav_run_decode_ahead_tests.rs"]
+mod run_decode_ahead_tests;
+
+#[cfg(all(feature = "libav", test))]
+#[path = "libav_terminal_frame_tests.rs"]
+mod terminal_frame_tests;
+
+#[cfg(all(feature = "libav", test))]
+use std::cell::Cell;
+#[cfg(feature = "libav")]
+use std::cell::RefCell;
+
+#[cfg(feature = "libav")]
+// Two serialized output decodes can briefly exceed 250 ms during cold GPU
+// startup. Reopening both sessions at that cadence sustains the slow path.
+// Bound forward catch-up to one second; larger jumps and reversals still seek.
+const LIBAV_SEQUENTIAL_REQUEST_GAP_MS: u64 = 1_000;
+#[cfg(any(feature = "libav", test))]
+// Retain the 16-input performance envelope without reopening every tick.
+// Retention is independent from the bounded eight-worker decode pool below.
+const LIBAV_WORKING_SET_CAPACITY: usize = 16;
+#[cfg(feature = "libav")]
+const LIBAV_DECODE_WORKERS: usize = 8;
+
+#[cfg(feature = "libav")]
+const LIBAV_SCALER_CACHE_CAPACITY: usize = 8;
+
+// A look-ahead run decodes consecutive frames until it covers the owner's next
+// expected request (its last request plus one and a half observed request
+// strides) with `LIBAV_LOOKAHEAD_SLACK_FRAMES` source frames of slack, so a
+// frame is decoded well before it is first requested rather than just in
+// time (C4R7: at 60 Hz with a 30 fps clip the single next frame was often
+// still decoding when it was needed, a 4-11 ms wait on the render tick every
+// few ticks; with one frame of slack a late decode still stalled a tick by
+// 10-16 ms about once every 30 s).
+// One frame is enough while requests are closer than the source
+// frame interval; when they are farther apart (a tick slower than the source
+// rate) a single next frame never covers the next request, and every request
+// then decodes on the caller's thread. The run is bounded per owner and by a
+// total byte budget over the working set, so many inputs fall back to the
+// single next frame instead of holding many output-sized frames.
+// Three frames still cover the next request plus the two slack frames at
+// 60 Hz with a 30 fps clip. A fourth only raised the private-memory peak at
+// simultaneous loop wraps (headless 3-layer group probe 2026-11-10: wrap
+// peak +6 -> +3 output-sized frames, work time unchanged).
+#[cfg(feature = "libav")]
+const LIBAV_LOOKAHEAD_MAX_FRAMES: usize = 3;
+#[cfg(feature = "libav")]
+const LIBAV_LOOKAHEAD_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+#[cfg(feature = "libav")]
+const LIBAV_LOOKAHEAD_MAX_STRIDE_MS: u64 = 250;
+#[cfg(feature = "libav")]
+const LIBAV_LOOKAHEAD_SLACK_FRAMES: u64 = 2;
+// Near the stream's declared end a run reads on, within its frame allowance,
+// to the real clip end, so the clip start is decoded ahead (for a loop wrap)
+// a few source frames before the wrap rather than just before it.
+#[cfg(feature = "libav")]
+const LIBAV_LOOKAHEAD_END_MARGIN_MS: u64 = 150;
+
+// `scaler::RgbaScaler` owns a native pointer (and its slice threads) and
+// intentionally is not `Send`. Decoders, however, are moved into the native
+// output worker, so the scaler cannot be stored in `LibavDecodeSession`
+// without weakening that ownership boundary. Keep a bounded cache on the
+// decoding thread instead. A scaler is keyed by the complete source/target
+// geometry and pixel formats; it is therefore safe to reuse for any render
+// input that has the same conversion contract while leaving the input/session
+// ownership in `LibavDecodeSession` unchanged. Only the process-lifetime
+// decode pool's workers cache slice-threaded scalers (`scaler::slice_threads`):
+// this cache is freed in TLS destructors, where joining threads deadlocks.
+#[cfg(feature = "libav")]
+thread_local! {
+    static LIBAV_SCALER_CACHE: RefCell<Vec<LibavScalerCacheEntry>> = const {
+        RefCell::new(Vec::new())
+    };
+}
+
+#[cfg(all(feature = "libav", test))]
+thread_local! {
+    static LIBAV_SCALER_CREATION_COUNT: Cell<usize> = const { Cell::new(0) };
+    static LIBAV_RGBA_ROW_COPIES: Cell<usize> = const { Cell::new(0) };
+    static LIBAV_WRAP_FRAME_HOOK: RefCell<Option<Box<dyn FnMut(usize)>>> = const { RefCell::new(None) };
+}
+
+pub struct LibavFrameDecoder {
+    stop: StopState,
+    entries: Vec<LibavFrameCacheEntry>,
+    working_set_lru: Vec<LibavRenderInputOwner>,
+    #[cfg(feature = "libav")]
+    sessions: Vec<LibavDecodeSession>,
+    /// Next frames being decoded on the decode pool, each holding its
+    /// input's session until an uncovered request or retirement joins it.
+    #[cfg(feature = "libav")]
+    lookaheads: Vec<LibavLookahead>,
+    #[cfg(feature = "libav")]
+    session_counters: LibavSessionCounters,
+    #[cfg(feature = "libav")]
+    hardware_enabled: bool,
+    /// Each live owner's last request and the stride before it, which size
+    /// its next look-ahead run.
+    #[cfg(feature = "libav")]
+    request_strides: Vec<LibavRequestStride>,
+}
+
+#[cfg(feature = "libav")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LibavRequestStride {
+    owner: LibavRenderInputOwner,
+    last_ms: u64,
+    stride_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LibavRenderInputOwner {
+    key: protocol::VideoRenderInputKey,
+    legacy_layer_id: Option<VideoLayerId>,
+}
+
+impl LibavRenderInputOwner {
+    #[cfg_attr(not(any(feature = "libav", test)), allow(dead_code))]
+    fn new(key: protocol::VideoRenderInputKey, layer_id: VideoLayerId) -> Self {
+        Self {
+            key,
+            legacy_layer_id: (key == protocol::VideoRenderInputKey::LEGACY).then_some(layer_id),
+        }
+    }
+
+    fn matches(self, key: protocol::VideoRenderInputKey, layer_id: VideoLayerId) -> bool {
+        render_input_cache_owner_matches(
+            self.key,
+            self.legacy_layer_id.unwrap_or(layer_id),
+            key,
+            layer_id,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct LibavSessionDiagnostics {
+    pub active_sessions: usize,
+    pub hardware_sessions: usize,
+    pub hardware_frames: u64,
+    pub hardware_errors: u64,
+    pub opens: u64,
+    pub resets: u64,
+    pub sequential_continues: u64,
+    pub frame_reuses: u64,
+    pub evictions: u64,
+    pub errors: u64,
+    pub lookahead_decodes: u64,
+    pub lookahead_hits: u64,
+    pub lookahead_discards: u64,
+    /// Live resident ticks answered by the same owner's last served frame.
+    pub live_held_frames: u64,
+}
+
+#[derive(Clone)]
+#[cfg_attr(not(feature = "libav"), allow(dead_code))]
+struct LibavFrameCacheEntry {
+    key: protocol::VideoRenderInputKey,
+    layer_id: VideoLayerId,
+    path: PathBuf,
+    width: u32,
+    height: u32,
+    position_ms: u64,
+    signature: StillImageSignature,
+    /// Shared with the renderer, so reusing a frame never copies it.
+    frame: Arc<VideoFrame>,
+    #[cfg(feature = "libav")]
+    rgba_returns: rgba_reuse::RetiredRgba,
+}
+
+/// What `prepare_decode` leaves for the frame decode.
+#[cfg(feature = "libav")]
+enum LibavPrepared {
+    /// Answered without decoding: from the cache, by reuse, or an error.
+    Done(Result<Option<Arc<VideoFrame>>, VideoDecodeError>),
+    /// The input's session must decode the requested frame.
+    Decode(LibavDecodeJob),
+}
+
+#[cfg(feature = "libav")]
+struct LibavDecodeJob {
+    path: PathBuf,
+    signature: StillImageSignature,
+    seek_before_decode: bool,
+    /// The open session was rewound in place for this request. A seek that
+    /// cannot rewind it must re-open the file, whatever the target position.
+    rewound: bool,
+    /// The frame a continuation falls back on if the clip ends before the
+    /// requested time: the latest frame this session decoded.
+    terminal: Option<Arc<VideoFrame>>,
+}
+
+/// The frames after the one just served, being decoded on the decode pool.
+/// It holds the input's session until joined.
+#[cfg(feature = "libav")]
+struct LibavLookahead {
+    key: protocol::VideoRenderInputKey,
+    layer_id: VideoLayerId,
+    /// The frame it looks past: the owner's cached (last served) frame.
+    served_pts_ms: u64,
+    /// The session's `last_request_ms` before the look-ahead; restored on
+    /// join, so the next request is judged exactly as if nothing had been
+    /// decoded since.
+    last_request_ms: Option<u64>,
+    hardware: bool,
+    /// Consecutive frames after the served one that are already decoded:
+    /// the session's queued frames when the run started, then each frame the
+    /// run streams before its last. A request can take one without joining.
+    ready: VecDeque<Arc<VideoFrame>>,
+    /// The run's streamed frames. The worker drops its sender before it
+    /// sends `done`.
+    frames: Option<std::sync::mpsc::Receiver<Arc<VideoFrame>>>,
+    /// The run's window, shared with its worker, so later requests extend a
+    /// run that is still decoding.
+    control: Option<Arc<std::sync::Mutex<LibavRunControl>>>,
+    done: std::sync::mpsc::Receiver<LibavLookaheadDone>,
+}
+
+/// What a look-ahead run may still decode. The worker decides under this
+/// lock whether a frame continues the run; once it sets `finished` it sends
+/// `done` without decoding again, so the owner either extends a run that will
+/// see the new window or joins one that has ended.
+#[cfg(feature = "libav")]
+#[derive(Debug)]
+struct LibavRunControl {
+    /// The run continues past a frame only while that frame is before this.
+    until_ms: u64,
+    /// Frames the owner may hold ahead: streamed and not yet taken, plus the
+    /// run's last frame.
+    limit: usize,
+    /// Streamed (or inherited) frames the owner has not taken yet.
+    outstanding: usize,
+    finished: bool,
+    /// The run read to the clip end: every frame it streamed is the clip's
+    /// last ones, and the owner is answered exactly as by a drained session.
+    /// Set before the clip start is decoded ahead, so requests still at the
+    /// clip end never wait for that.
+    clip_end: bool,
+    /// After the clip end the run decodes the clip start until a frame
+    /// reaches this time: the run window measured from the clip start, so
+    /// the first requests after the loop wrap are covered with the same one
+    /// source frame of slack as any other run.
+    wrap_until_ms: u64,
+    /// First post-wrap request coverage, without source-frame slack.
+    wrap_cover_ms: u64,
+    /// One unused displaced allocation across this control and its session.
+    rgba_spare: Option<ReturnedRgba>,
+    /// A returned allocation checked out to the worker's next projection.
+    /// Kept until its existing post-decode lock, so hand-back never installs
+    /// another unused buffer while the session still owns one.
+    rgba_spare_in_decode: bool,
+}
+
+#[cfg(feature = "libav")]
+impl LibavRunControl {
+    /// Move only an admitted spare under the control lock. The caller keeps
+    /// rejected storage and frees it after releasing the guard.
+    fn accept_returned_rgba(&mut self, returned: &mut Option<ReturnedRgba>) {
+        if self.rgba_spare.is_none() && !self.rgba_spare_in_decode {
+            self.rgba_spare = returned.take();
+        }
+    }
+}
+
+#[cfg(feature = "libav")]
+fn lock_run_control(
+    control: &std::sync::Mutex<LibavRunControl>,
+) -> std::sync::MutexGuard<'_, LibavRunControl> {
+    control
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The end of a look-ahead run: the session and the result of its last
+/// decode, which is validated on join exactly like a single next frame.
+#[cfg(feature = "libav")]
+impl LibavLookahead {
+    /// Moves every frame the run has streamed so far into `ready`, without
+    /// waiting; returns how many arrived.
+    fn receive_streamed(&mut self) -> u64 {
+        let Some(frames) = self.frames.as_ref() else {
+            return 0;
+        };
+        let mut received = 0;
+        for frame in frames.try_iter() {
+            self.ready.push_back(frame);
+            received += 1;
+        }
+        received
+    }
+
+    /// Takes the first ready frame at or after `target_ms` (dropping the
+    /// ones before it) and returns their number to the run's allowance.
+    fn take_ready(
+        &mut self,
+        target_ms: u64,
+        cached: &mut Arc<VideoFrame>,
+        extent: (u32, u32),
+        retired: &mut rgba_reuse::RetiredRgba,
+    ) -> Option<Arc<VideoFrame>> {
+        let before = self.ready.len();
+        let frame = take_first_at_or_after(&mut self.ready, target_ms)?;
+        let displaced = std::mem::replace(cached, Arc::clone(&frame));
+        let mut returned = retired.retire(displaced, extent);
+        if let Some(control) = self.control.as_ref() {
+            let mut control = lock_run_control(control);
+            control.outstanding = control
+                .outstanding
+                .saturating_sub(before - self.ready.len());
+            // Move an admitted spare under the lock already required by
+            // taking a streamed frame. Rejected pixel storage drops below,
+            // after the guard, and adds no lock acquisition.
+            control.accept_returned_rgba(&mut returned);
+        }
+        drop(returned);
+        Some(frame)
+    }
+}
+
+/// Removes and returns the first queued frame at or after `target_ms`, with
+/// every frame before it; leaves the queue unchanged when there is none.
+#[cfg(feature = "libav")]
+fn take_first_at_or_after(
+    queue: &mut VecDeque<Arc<VideoFrame>>,
+    target_ms: u64,
+) -> Option<Arc<VideoFrame>> {
+    let index = queue.iter().position(|frame| target_ms <= frame.pts_ms)?;
+    queue.drain(..index);
+    queue.pop_front()
+}
+
+#[cfg(feature = "libav")]
+struct LibavLookaheadDone {
+    session: LibavDecodeSession,
+    /// The run's last decode, sharing the terminal frame at EOF; `None` for a clip-start job, which decodes
+    /// nothing after the served frame (`start_clip_start_job`).
+    result: Option<Result<Arc<VideoFrame>, VideoDecodeError>>,
+    hardware_frames: u64,
+}
+
+#[cfg(all(feature = "libav", feature = "qa-native-frame-timing"))]
+use crate::native_frame_timing as demand_timing;
+
+#[cfg(all(feature = "libav", feature = "qa-native-frame-timing"))]
+fn begin_demand_trace(input: &VideoRenderInput) -> demand_timing::DecoderRequest {
+    demand_timing::begin_decoder_request(
+        input.layer_id(),
+        input.key.project_render_epoch,
+        input.key.input_id.0,
+        input.request.position_ms,
+    )
+}
+
+#[cfg(all(feature = "libav", feature = "qa-native-frame-timing"))]
+fn finish_demand_trace(
+    trace: demand_timing::DecoderRequest,
+    result: &Result<Option<Arc<VideoFrame>>, VideoDecodeError>,
+) {
+    trace.finish(
+        result
+            .as_ref()
+            .ok()
+            .and_then(|frame| frame.as_ref().map(|frame| frame.pts_ms)),
+        matches!(result, Err(VideoDecodeError::Cancelled)),
+    );
+}
+
+#[cfg(feature = "libav")]
+struct LibavDemandDecoded {
+    result: Result<Arc<VideoFrame>, VideoDecodeError>,
+    hardware_frames: u64,
+    #[cfg(feature = "qa-native-frame-timing")]
+    work: demand_timing::DecoderWorkSample,
+}
+
+/// The pool a tick's libav frame decodes run on. It is separate from the
+/// global pool the compositor's row bands use, so a decode, which may block
+/// on file I/O, never holds up another output's blending. `None` (one by one)
+/// if its threads cannot be started.
+#[cfg(feature = "libav")]
+fn libav_decode_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(
+                std::thread::available_parallelism()
+                    .map_or(1, std::num::NonZeroUsize::get)
+                    .clamp(1, LIBAV_DECODE_WORKERS),
+            )
+            .thread_name(|index| format!("syndocal-video-decode-{index}"))
+            .build()
+            .ok()
+    })
+    .as_ref()
+}
+
+#[cfg(feature = "libav")]
+struct LibavDecodeSession {
+    key: protocol::VideoRenderInputKey,
+    layer_id: VideoLayerId,
+    path: PathBuf,
+    width: u32,
+    height: u32,
+    signature: StillImageSignature,
+    input: InterruptInput,
+    stop: StopState,
+    decoder: ffmpeg::decoder::Video,
+    hardware: bool,
+    stream_index: usize,
+    time_base: ffmpeg::Rational,
+    timestamp_origin: i64,
+    last_request_ms: Option<u64>,
+    eof_sent: bool,
+    decoder_drained: bool,
+    /// Consecutive frames after the cached one, decoded ahead in order: a
+    /// continuation returns the first one at or after its time, which is
+    /// exactly the frame continuing the decode would return.
+    next_frames: VecDeque<Arc<VideoFrame>>,
+    /// The open session was rewound for a backward jump (a loop wrap): the next
+    /// decode must seek and flush even when the target is the clip start. It is
+    /// taken (cleared) by the decode that performs that seek.
+    rewind_pending: bool,
+    /// Whether the frame the last decode returned was a key frame.
+    last_key_frame: bool,
+    /// While the session is drained at the clip end: the clip start, decoded
+    /// ahead for a loop wrap (`predecode_clip_start`).
+    wrap: Option<LibavWrapAhead>,
+    /// A clip-start job already ran for this drained state; cleared when the
+    /// session rewinds, so a failing job is not repeated every tick.
+    wrap_attempted: bool,
+    /// The stream's declared end (its duration from the stream start), only
+    /// a hint: a run whose frame reaches it reads on to the real clip end, so
+    /// the clip start is decoded ahead well before the loop wrap.
+    end_ms: Option<u64>,
+    /// Sole unused allocation for this input while no look-ahead is running.
+    rgba_spare: Option<ReturnedRgba>,
+}
+
+/// The clip start decoded ahead by a run that reached the clip end. Rewinding
+/// and decoding the first frames on the caller's thread at every loop wrap
+/// (seek, flush, D3D11VA transfer and output-size scaling, for each layer one
+/// by one) stalled the live 3-layer Display tick for 70-90 ms every 12 s.
+/// The session's logical state stays "drained at the end" (later requests at
+/// the end are answered by reuse and never decode); `eof_sent` and
+/// `decoder_drained` here are the physical decoder state after these frames.
+#[cfg(feature = "libav")]
+struct LibavWrapAhead {
+    /// Consecutive frames from the clip start (the rewind to position 0 that
+    /// an on-demand request at 0 performs), each with its key-frame flag.
+    frames: VecDeque<(Arc<VideoFrame>, bool)>,
+    eof_sent: bool,
+    decoder_drained: bool,
+}
+
+#[cfg(feature = "libav")]
+impl LibavDecodeSession {
+    /// Answers a backward request (a loop wrap) from the clip start decoded
+    /// ahead, exactly as the on-demand rewind would. On demand, the rewind
+    /// seeks to the last key frame at or before the target and decodes to
+    /// the first frame at or after it. The queue was decoded from the rewind
+    /// to position 0, whose key frame is its front; both decodes start from
+    /// the same key frame (so produce the same frames) unless the queue holds
+    /// another key frame at or before the target, which is then refused.
+    /// The session then continues after the queue, as after a decode.
+    fn take_wrapped(&mut self, target_ms: u64) -> Option<Arc<VideoFrame>> {
+        let wrap = self.wrap.take()?;
+        let index = wrap
+            .frames
+            .iter()
+            .position(|(frame, _)| target_ms <= frame.pts_ms)?;
+        if !wrap.frames.front().is_some_and(|(_, key)| *key)
+            || wrap
+                .frames
+                .iter()
+                .skip(1)
+                .any(|(frame, key)| *key && frame.pts_ms <= target_ms)
+        {
+            return None;
+        }
+        let mut frames = wrap
+            .frames
+            .into_iter()
+            .map(|(frame, _)| frame)
+            .collect::<VecDeque<_>>();
+        frames.drain(..index);
+        let frame = frames.pop_front()?;
+        self.next_frames = frames;
+        self.eof_sent = wrap.eof_sent;
+        self.decoder_drained = wrap.decoder_drained;
+        self.rewind_pending = false;
+        self.wrap_attempted = false;
+        self.last_request_ms = Some(target_ms);
+        Some(frame)
+    }
+}
+
+#[cfg(feature = "libav")]
+struct LibavScalerCacheEntry {
+    source_format: ffmpeg::format::Pixel,
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    target_height: u32,
+    scaler: scaler::RgbaScaler,
+}
+
+#[cfg(feature = "libav")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct LibavSessionCounters {
+    hardware_frames: u64,
+    hardware_errors: u64,
+    opens: u64,
+    resets: u64,
+    sequential_continues: u64,
+    frame_reuses: u64,
+    evictions: u64,
+    errors: u64,
+    lookahead_decodes: u64,
+    lookahead_hits: u64,
+    lookahead_discards: u64,
+    live_held_frames: u64,
+}
+
+#[cfg(feature = "libav")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LibavSessionDecision {
+    ReuseFrame,
+    Continue,
+    Reopen,
+}
+
+#[cfg(feature = "libav")]
+struct LibavReceiveResult {
+    frame: Option<VideoFrame>,
+    decoder_drained: bool,
+}
+
+impl Default for LibavFrameDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LibavFrameDecoder {
+    pub fn new() -> Self {
+        Self {
+            stop: StopState::new(None),
+            entries: Vec::new(),
+            working_set_lru: Vec::new(),
+            #[cfg(feature = "libav")]
+            sessions: Vec::new(),
+            #[cfg(feature = "libav")]
+            lookaheads: Vec::new(),
+            #[cfg(feature = "libav")]
+            session_counters: LibavSessionCounters::default(),
+            #[cfg(feature = "libav")]
+            hardware_enabled: true,
+            #[cfg(feature = "libav")]
+            request_strides: Vec::new(),
+        }
+    }
+
+    /// Bind the decoder to its worker's stop signal. Replacement first reaps
+    /// the old jobs; decoder Drop never changes the worker's external signal.
+    pub fn with_stop_signal(mut self, stop: Arc<AtomicBool>) -> Self {
+        self.stop.cancel();
+        self.join_lookaheads();
+        #[cfg(feature = "libav")]
+        self.sessions.clear();
+        self.entries.clear();
+        self.working_set_lru.clear();
+        self.stop = StopState::new(Some(stop));
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn software_for_tests() -> Self {
+        let decoder = Self::new();
+        #[cfg(feature = "libav")]
+        let decoder = {
+            let mut decoder = decoder;
+            decoder.hardware_enabled = false;
+            decoder
+        };
+        decoder
+    }
+
+    #[cfg(feature = "libav")]
+    fn record_hardware_error(&mut self, error: &VideoDecodeError) {
+        if matches!(error, VideoDecodeError::HardwareDecode { .. }) {
+            self.session_counters.hardware_errors =
+                self.session_counters.hardware_errors.saturating_add(1);
+        }
+    }
+
+    pub const fn is_built() -> bool {
+        cfg!(feature = "libav")
+    }
+
+    pub fn cache_len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn session_diagnostics(&self) -> LibavSessionDiagnostics {
+        #[cfg(feature = "libav")]
+        {
+            LibavSessionDiagnostics {
+                active_sessions: self.sessions.len() + self.lookaheads.len(),
+                hardware_sessions: self
+                    .sessions
+                    .iter()
+                    .filter(|session| session.hardware)
+                    .count()
+                    + self
+                        .lookaheads
+                        .iter()
+                        .filter(|lookahead| lookahead.hardware)
+                        .count(),
+                hardware_frames: self.session_counters.hardware_frames,
+                hardware_errors: self.session_counters.hardware_errors,
+                opens: self.session_counters.opens,
+                resets: self.session_counters.resets,
+                sequential_continues: self.session_counters.sequential_continues,
+                frame_reuses: self.session_counters.frame_reuses,
+                evictions: self.session_counters.evictions,
+                errors: self.session_counters.errors,
+                lookahead_decodes: self.session_counters.lookahead_decodes,
+                lookahead_hits: self.session_counters.lookahead_hits,
+                lookahead_discards: self.session_counters.lookahead_discards,
+                live_held_frames: self.session_counters.live_held_frames,
+            }
+        }
+        #[cfg(not(feature = "libav"))]
+        {
+            LibavSessionDiagnostics::default()
+        }
+    }
+
+    #[cfg(any(feature = "libav", test))]
+    fn cached_frame(
+        &self,
+        key: protocol::VideoRenderInputKey,
+        request: &VideoFrameRequest,
+        path: &std::path::Path,
+        signature: &StillImageSignature,
+    ) -> Option<Arc<VideoFrame>> {
+        self.entries
+            .iter()
+            .find(|entry| {
+                entry.key == key
+                    && entry.layer_id == request.layer_id
+                    && entry.path == path
+                    && entry.width == request.width
+                    && entry.height == request.height
+                    && entry.position_ms == request.position_ms
+                    && entry.signature == *signature
+            })
+            .map(|entry| Arc::clone(&entry.frame))
+    }
+
+    #[cfg(any(feature = "libav", test))]
+    fn replace_layer_cache_entry(&mut self, entry: LibavFrameCacheEntry) {
+        #[cfg(feature = "libav")]
+        let mut entry = entry;
+        self.touch_input(entry.key, entry.layer_id);
+        while let Some(index) = self.entries.iter().position(|cached| {
+            render_input_cache_owner_matches(entry.key, entry.layer_id, cached.key, cached.layer_id)
+        }) {
+            let displaced = self.entries.remove(index);
+            #[cfg(feature = "libav")]
+            if displaced.path == entry.path
+                && displaced.signature == entry.signature
+                && displaced.width == entry.width
+                && displaced.height == entry.height
+            {
+                entry.rgba_returns = displaced.rgba_returns;
+                if !Arc::ptr_eq(&displaced.frame, &entry.frame) {
+                    let returned = entry
+                        .rgba_returns
+                        .retire(displaced.frame, (entry.width, entry.height));
+                    self.return_rgba_allocation(
+                        entry.key,
+                        entry.layer_id,
+                        returned,
+                        (entry.width, entry.height),
+                    );
+                }
+            }
+            #[cfg(not(feature = "libav"))]
+            drop(displaced);
+        }
+        self.entries.push(entry);
+    }
+
+    /// Hand an exclusively displaced allocation to its existing input owner.
+    /// No shared Arc is retained. A busy worker receives storage only through
+    /// take_ready, under its existing allowance lock; this path never locks.
+    #[cfg(feature = "libav")]
+    fn return_rgba_allocation(
+        &mut self,
+        key: protocol::VideoRenderInputKey,
+        layer_id: VideoLayerId,
+        mut returned: Option<ReturnedRgba>,
+        extent: (u32, u32),
+    ) {
+        if returned.is_none() {
+            return;
+        }
+        if let Some(index) = self.session_index(key, layer_id) {
+            let session = &mut self.sessions[index];
+            if (session.width, session.height) == extent && session.rgba_spare.is_none() {
+                session.rgba_spare = returned.take();
+            }
+        }
+        drop(returned);
+    }
+
+    fn evict_input_state(&mut self, key: protocol::VideoRenderInputKey, layer_id: VideoLayerId) {
+        self.entries.retain(|entry| {
+            !render_input_cache_owner_matches(key, layer_id, entry.key, entry.layer_id)
+        });
+        #[cfg(feature = "libav")]
+        self.sessions.retain(|session| {
+            !render_input_cache_owner_matches(key, layer_id, session.key, session.layer_id)
+        });
+    }
+
+    pub(crate) fn release_layer(&mut self, layer_id: VideoLayerId) {
+        self.join_lookaheads();
+        self.entries.retain(|entry| entry.layer_id != layer_id);
+        #[cfg(feature = "libav")]
+        self.sessions.retain(|session| session.layer_id != layer_id);
+        let active_owners = self
+            .entries
+            .iter()
+            .map(|entry| LibavRenderInputOwner::new(entry.key, entry.layer_id))
+            .collect::<Vec<_>>();
+        self.working_set_lru
+            .retain(|owner| active_owners.contains(owner));
+    }
+
+    fn release_input_key(&mut self, key: protocol::VideoRenderInputKey, layer_id: VideoLayerId) {
+        self.join_lookaheads();
+        self.evict_input_state(key, layer_id);
+        self.working_set_lru
+            .retain(|cached| !cached.matches(key, layer_id));
+    }
+
+    #[cfg(any(feature = "libav", test))]
+    fn touch_input(&mut self, key: protocol::VideoRenderInputKey, layer_id: VideoLayerId) {
+        let owner = LibavRenderInputOwner::new(key, layer_id);
+        self.working_set_lru.retain(|cached| *cached != owner);
+        self.working_set_lru.push(owner);
+        while self.working_set_lru.len() > LIBAV_WORKING_SET_CAPACITY {
+            let evicted = self.working_set_lru.remove(0);
+            self.evict_input_state(evicted.key, evicted.legacy_layer_id.unwrap_or(0));
+            self.join_retired_lookaheads();
+            #[cfg(feature = "libav")]
+            {
+                self.session_counters.evictions = self.session_counters.evictions.saturating_add(1);
+            }
+        }
+    }
+
+    #[cfg(feature = "libav")]
+    fn session_index(
+        &self,
+        key: protocol::VideoRenderInputKey,
+        layer_id: VideoLayerId,
+    ) -> Option<usize> {
+        self.sessions.iter().position(|session| {
+            render_input_cache_owner_matches(key, layer_id, session.key, session.layer_id)
+        })
+    }
+
+    #[cfg(feature = "libav")]
+    fn decode_enabled(
+        &mut self,
+        input: &VideoRenderInput,
+        live: bool,
+    ) -> Result<Option<Arc<VideoFrame>>, VideoDecodeError> {
+        #[cfg(feature = "qa-native-frame-timing")]
+        let trace = begin_demand_trace(input);
+        let job = match self.prepare_decode(
+            input,
+            live,
+            #[cfg(feature = "qa-native-frame-timing")]
+            trace,
+        ) {
+            LibavPrepared::Done(result) => {
+                #[cfg(feature = "qa-native-frame-timing")]
+                finish_demand_trace(trace, &result);
+                return result;
+            }
+            LibavPrepared::Decode(job) => job,
+        };
+        let session_index = self
+            .session_index(input.key, input.request.layer_id)
+            .expect("a prepared decode has a session");
+        let mut hardware_frames = 0;
+        #[cfg(feature = "qa-native-frame-timing")]
+        let work = trace.queued().work();
+        let primary_decode = decode_libav_session_frame(
+            &input.request,
+            &mut self.sessions[session_index],
+            job.seek_before_decode,
+            job.terminal.as_ref(),
+            &mut hardware_frames,
+        );
+        self.session_counters.hardware_frames = self
+            .session_counters
+            .hardware_frames
+            .saturating_add(hardware_frames);
+        #[cfg(feature = "qa-native-frame-timing")]
+        trace.record_work(work.finish());
+        let result = self.finish_decode(
+            input,
+            job,
+            primary_decode,
+            #[cfg(feature = "qa-native-frame-timing")]
+            trace,
+        );
+        #[cfg(feature = "qa-native-frame-timing")]
+        finish_demand_trace(trace, &result);
+        result
+    }
+
+    /// Decodes distinct inputs of one tick on `pool`: the cache, session and
+    /// fallback decisions run one by one in input order, and only the frame
+    /// decodes run in parallel, each on its own session. The caller ensures
+    /// the batch cannot evict anything from the working set; then the
+    /// results, counters, cache and working-set order all equal decoding the
+    /// inputs one by one.
+    #[cfg(feature = "libav")]
+    fn decode_enabled_together(
+        &mut self,
+        inputs: &[VideoRenderInput],
+        pool: &rayon::ThreadPool,
+        live: bool,
+    ) -> Vec<Result<Option<Arc<VideoFrame>>, VideoDecodeError>> {
+        use rayon::prelude::*;
+
+        #[cfg(feature = "qa-native-frame-timing")]
+        let mut traces = [demand_timing::DecoderRequest::default(); LIBAV_WORKING_SET_CAPACITY];
+        #[cfg(feature = "qa-native-frame-timing")]
+        let mut trace_index = 0;
+        let prepared = inputs
+            .iter()
+            .map(|input| {
+                #[cfg(feature = "qa-native-frame-timing")]
+                let trace = begin_demand_trace(input);
+                #[cfg(feature = "qa-native-frame-timing")]
+                {
+                    traces[trace_index] = trace;
+                    trace_index += 1;
+                }
+                self.prepare_decode(
+                    input,
+                    live,
+                    #[cfg(feature = "qa-native-frame-timing")]
+                    trace,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut session_jobs = vec![None; self.sessions.len()];
+        for (index, prepared) in prepared.iter().enumerate() {
+            if let LibavPrepared::Decode(job) = prepared {
+                if let Some(session_index) =
+                    self.session_index(inputs[index].key, inputs[index].request.layer_id)
+                {
+                    session_jobs[session_index] = Some((index, job));
+                }
+            }
+        }
+        let work = self
+            .sessions
+            .iter_mut()
+            .zip(session_jobs)
+            .filter_map(|(session, job)| job.map(|(index, job)| (index, job, session)))
+            .collect::<Vec<_>>();
+        // Queue admission is explicit; workers never write the caller's TLS parent.
+        #[cfg(feature = "qa-native-frame-timing")]
+        for (index, _, _) in &work {
+            traces[*index] = traces[*index].queued();
+        }
+        let decode = |(index, job, session): (usize, &LibavDecodeJob, &mut LibavDecodeSession)| {
+            let input = &inputs[index];
+            let mut hardware_frames = 0;
+            #[cfg(feature = "qa-native-frame-timing")]
+            let work = traces[index].work();
+            let result = decode_libav_session_frame(
+                &input.request,
+                session,
+                job.seek_before_decode,
+                job.terminal.as_ref(),
+                &mut hardware_frames,
+            );
+            (
+                index,
+                LibavDemandDecoded {
+                    result,
+                    hardware_frames,
+                    #[cfg(feature = "qa-native-frame-timing")]
+                    work: work.finish(),
+                },
+            )
+        };
+        // A tick where at most one layer advances decodes on this thread.
+        let decoded = if work.len() < 2 {
+            work.into_iter().map(decode).collect::<Vec<_>>()
+        } else {
+            pool.install(|| work.into_par_iter().map(decode).collect::<Vec<_>>())
+        };
+        let mut decoded_by_input = (0..inputs.len()).map(|_| None).collect::<Vec<_>>();
+        for (index, decoded) in decoded {
+            #[cfg(feature = "qa-native-frame-timing")]
+            traces[index].record_work(decoded.work);
+            decoded_by_input[index] = Some(decoded);
+        }
+        let mut results = Vec::with_capacity(inputs.len());
+        #[cfg(feature = "qa-native-frame-timing")]
+        let mut result_traces = traces.into_iter();
+        for ((input, prepared), decoded) in inputs.iter().zip(prepared).zip(decoded_by_input) {
+            #[cfg(feature = "qa-native-frame-timing")]
+            let trace = result_traces
+                .next()
+                .expect("one trace slot per prepared input");
+            let result = match prepared {
+                LibavPrepared::Done(result) => {
+                    // One by one, an answered input is touched in its turn;
+                    // touching it again here keeps the working-set order.
+                    if matches!(result, Ok(Some(_))) {
+                        self.touch_input(input.key, input.request.layer_id);
+                    }
+                    result
+                }
+                LibavPrepared::Decode(job) => match decoded {
+                    Some(LibavDemandDecoded {
+                        result: primary_decode,
+                        hardware_frames,
+                        ..
+                    }) => {
+                        self.session_counters.hardware_frames = self
+                            .session_counters
+                            .hardware_frames
+                            .saturating_add(hardware_frames);
+                        self.finish_decode(
+                            input,
+                            job,
+                            primary_decode,
+                            #[cfg(feature = "qa-native-frame-timing")]
+                            trace,
+                        )
+                    }
+                    // Its session is gone, which a batch that cannot evict
+                    // never sees; decode it on its own rather than fail.
+                    None => {
+                        debug_assert!(false, "a prepared decode lost its session");
+                        self.decode_enabled(input, live)
+                    }
+                },
+            };
+            #[cfg(feature = "qa-native-frame-timing")]
+            finish_demand_trace(trace, &result);
+            results.push(result);
+        }
+        results
+    }
+
+    /// Everything `decode_enabled` does before the frame decode: answering
+    /// from the cache, reusing the last frame, or choosing (and if needed
+    /// opening) the session that must decode.
+    #[cfg(feature = "libav")]
+    fn prepare_decode(
+        &mut self,
+        input: &VideoRenderInput,
+        live: bool,
+        #[cfg(feature = "qa-native-frame-timing")] trace: demand_timing::DecoderRequest,
+    ) -> LibavPrepared {
+        if let Err(error) = self.stop.check() {
+            return LibavPrepared::Done(Err(error));
+        }
+        let key = input.key;
+        let request = &input.request;
+        let Some(path) = request
+            .source
+            .path
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+        else {
+            self.release_input_key(key, request.layer_id);
+            self.session_counters.errors = self.session_counters.errors.saturating_add(1);
+            return LibavPrepared::Done(Err(VideoDecodeError::MissingSourcePath {
+                layer_id: request.layer_id,
+                label: request.label.clone(),
+            }));
+        };
+        let path = PathBuf::from(path);
+        let signature = StillImageSignature::from_path(&path);
+        #[cfg(feature = "qa-native-frame-timing")]
+        if trace.is_active() {
+            let pending = self.lookaheads.iter().find(|owner| {
+                render_input_cache_owner_matches(key, request.layer_id, owner.key, owner.layer_id)
+            });
+            let session = self
+                .session_index(key, request.layer_id)
+                .map(|index| &self.sessions[index]);
+            let cached = self.entries.iter().find(|entry| {
+                render_input_cache_owner_matches(key, request.layer_id, entry.key, entry.layer_id)
+            });
+            trace.state(
+                pending
+                    .and_then(|owner| owner.last_request_ms)
+                    .or_else(|| session.and_then(|session| session.last_request_ms)),
+                cached.map(|entry| entry.frame.pts_ms),
+                session.and_then(|session| session.next_frames.front().map(|frame| frame.pts_ms)),
+                request.width,
+                request.height,
+            );
+        }
+        // The pending session owns only the speculative frames. Its last
+        // served frame can still answer a covered tick without waiting for it.
+        if let Some(frame) = self.reuse_pending_cached_frame(input, &path, &signature, live) {
+            if let Err(error) = self.stop.check() {
+                return LibavPrepared::Done(Err(error));
+            }
+            #[cfg(feature = "qa-native-frame-timing")]
+            trace.mark(demand_timing::DECODER_CACHED);
+            return LibavPrepared::Done(Ok(Some(frame)));
+        }
+        // A continuation the pending run already decoded (or is about to
+        // stream) is answered from it while the run goes on.
+        if let Some(frame) = self.take_pending_ready_frame(input, &path, &signature, live) {
+            if let Err(error) = self.stop.check() {
+                return LibavPrepared::Done(Err(error));
+            }
+            #[cfg(feature = "qa-native-frame-timing")]
+            trace.mark(demand_timing::DECODER_PREFETCH);
+            return LibavPrepared::Done(Ok(Some(frame)));
+        }
+        // Uncovered or invalidated requests must recover the owner before the
+        // canonical cache/session policy below can seek, replace or decode it.
+        self.join_lookaheads_for(std::slice::from_ref(input));
+        if let Err(error) = self.stop.check() {
+            return LibavPrepared::Done(Err(error));
+        }
+        if let Some(frame) = self.cached_frame(key, request, &path, &signature) {
+            self.touch_input(key, request.layer_id);
+            self.session_counters.frame_reuses =
+                self.session_counters.frame_reuses.saturating_add(1);
+            #[cfg(feature = "qa-native-frame-timing")]
+            trace.mark(demand_timing::DECODER_CACHED);
+            return LibavPrepared::Done(Ok(Some(frame)));
+        }
+
+        // The cached entry is read in place: cloning it would copy the whole
+        // frame on every request, decoded or not.
+        let cached_entry_index = self.entries.iter().position(|entry| {
+            render_input_cache_owner_matches(key, request.layer_id, entry.key, entry.layer_id)
+        });
+        let session_index = self.session_index(key, request.layer_id);
+        let session_matches = session_index
+            .is_some_and(|index| self.sessions[index].matches(request, &path, &signature));
+        let decision = if session_matches {
+            let session = &self.sessions[session_index.expect("matching session index")];
+            session_decision(
+                session.last_request_ms,
+                cached_entry_index.map(|index| self.entries[index].frame.pts_ms),
+                cached_entry_index.is_some(),
+                // Frames queued ahead come before the end the run reached.
+                session.decoder_drained && session.next_frames.is_empty(),
+                request.position_ms,
+            )
+        } else {
+            LibavSessionDecision::Reopen
+        };
+
+        #[cfg(feature = "qa-native-frame-timing")]
+        if trace.is_active() {
+            trace.state(
+                session_index.and_then(|index| self.sessions[index].last_request_ms),
+                cached_entry_index.map(|index| self.entries[index].frame.pts_ms),
+                session_index.and_then(|index| {
+                    self.sessions[index]
+                        .next_frames
+                        .front()
+                        .map(|frame| frame.pts_ms)
+                }),
+                request.width,
+                request.height,
+            );
+        }
+        if decision == LibavSessionDecision::ReuseFrame {
+            #[cfg(feature = "qa-native-frame-timing")]
+            trace.mark(demand_timing::DECODER_CACHED);
+            let mut entry = self
+                .entries
+                .remove(cached_entry_index.expect("frame reuse requires a cached frame"));
+            entry.position_ms = request.position_ms;
+            let frame = entry.frame.clone();
+            self.replace_layer_cache_entry(entry);
+            let index = session_index.expect("frame reuse requires a matching session");
+            self.sessions[index].last_request_ms = Some(request.position_ms);
+            self.session_counters.frame_reuses =
+                self.session_counters.frame_reuses.saturating_add(1);
+            return LibavPrepared::Done(Ok(Some(frame)));
+        }
+
+        let mut terminal = None;
+        let mut rewound = false;
+        if decision == LibavSessionDecision::Continue {
+            self.session_counters.sequential_continues =
+                self.session_counters.sequential_continues.saturating_add(1);
+            let index = session_index.expect("continuation requires a matching session");
+            if let Some(last) = self.sessions[index].next_frames.back().cloned() {
+                let queued = &mut self.sessions[index].next_frames;
+                if let Some(next) = take_first_at_or_after(queued, request.position_ms) {
+                    // The queued frames follow the cached one without a gap,
+                    // so the first one at or after this time is exactly the
+                    // frame continuing the decode would return.
+                    #[cfg(feature = "qa-native-frame-timing")]
+                    trace.mark(demand_timing::DECODER_PREFETCH);
+                    self.session_counters.lookahead_hits =
+                        self.session_counters.lookahead_hits.saturating_add(1);
+                    self.sessions[index].last_request_ms = Some(request.position_ms);
+                    self.replace_layer_cache_entry(LibavFrameCacheEntry {
+                        key,
+                        layer_id: request.layer_id,
+                        path,
+                        width: request.width,
+                        height: request.height,
+                        position_ms: request.position_ms,
+                        signature,
+                        frame: Arc::clone(&next),
+                        #[cfg(feature = "libav")]
+                        rgba_returns: Default::default(),
+                    });
+                    return LibavPrepared::Done(Ok(Some(next)));
+                }
+                // Continuing past them all: the last is the latest frame
+                // decoded.
+                queued.clear();
+                let session = &mut self.sessions[index];
+                if session.decoder_drained && session.wrap.is_some() {
+                    // Past the clip end, a drained decoder returns exactly
+                    // this latest frame. Its decoder has moved on to decode
+                    // the clip start ahead, so answer without decoding.
+                    session.last_request_ms = Some(request.position_ms);
+                    self.replace_layer_cache_entry(LibavFrameCacheEntry {
+                        key,
+                        layer_id: request.layer_id,
+                        path,
+                        width: request.width,
+                        height: request.height,
+                        position_ms: request.position_ms,
+                        signature,
+                        frame: Arc::clone(&last),
+                        #[cfg(feature = "libav")]
+                        rgba_returns: Default::default(),
+                    });
+                    return LibavPrepared::Done(Ok(Some(last)));
+                }
+                terminal = Some(last);
+            } else {
+                terminal = cached_entry_index.map(|index| Arc::clone(&self.entries[index].frame));
+            }
+        } else if let Some(index) = session_index
+            .filter(|&index| session_matches && self.sessions[index].last_request_ms.is_some())
+        {
+            // A backward or far jump on the same open media (every loop wrap)
+            // rewinds the demuxer and flushes the decoder in place. Re-probing
+            // the file and recreating the hardware decoder stalled the output
+            // loop for ~100ms per wrap; other inputs' look-aheads stay running.
+            #[cfg(feature = "qa-native-frame-timing")]
+            trace.mark(demand_timing::DECODER_RESET);
+            self.session_counters.resets = self.session_counters.resets.saturating_add(1);
+            if let Some(frame) = self.sessions[index].take_wrapped(request.position_ms) {
+                #[cfg(feature = "qa-native-frame-timing")]
+                trace.mark(demand_timing::DECODER_PREFETCH);
+                self.session_counters.lookahead_hits =
+                    self.session_counters.lookahead_hits.saturating_add(1);
+                self.replace_layer_cache_entry(LibavFrameCacheEntry {
+                    key,
+                    layer_id: request.layer_id,
+                    path,
+                    width: request.width,
+                    height: request.height,
+                    position_ms: request.position_ms,
+                    signature,
+                    frame: Arc::clone(&frame),
+                    #[cfg(feature = "libav")]
+                    rgba_returns: Default::default(),
+                });
+                return LibavPrepared::Done(Ok(Some(frame)));
+            }
+            self.entries.retain(|entry| {
+                !render_input_cache_owner_matches(key, request.layer_id, entry.key, entry.layer_id)
+            });
+            let session = &mut self.sessions[index];
+            session.last_request_ms = None;
+            session.eof_sent = false;
+            session.decoder_drained = false;
+            session.next_frames.clear();
+            session.rewind_pending = true;
+            session.wrap = None;
+            session.wrap_attempted = false;
+            rewound = true;
+            self.touch_input(key, request.layer_id);
+        } else {
+            if session_index.is_some() {
+                #[cfg(feature = "qa-native-frame-timing")]
+                trace.mark(demand_timing::DECODER_RESET);
+                self.session_counters.resets = self.session_counters.resets.saturating_add(1);
+            }
+            self.release_input_key(key, request.layer_id);
+            self.touch_input(key, request.layer_id);
+            #[cfg(feature = "qa-native-frame-timing")]
+            trace.mark(demand_timing::DECODER_REOPEN);
+            let session = match open_libav_session_with_stop(
+                key,
+                request,
+                path.clone(),
+                signature.clone(),
+                self.hardware_enabled,
+                &self.stop,
+            ) {
+                Ok(session) => session,
+                Err(error) => {
+                    if error != VideoDecodeError::Cancelled {
+                        self.session_counters.errors =
+                            self.session_counters.errors.saturating_add(1);
+                    }
+                    self.release_input_key(key, request.layer_id);
+                    self.record_hardware_error(&error);
+                    return LibavPrepared::Done(Err(error));
+                }
+            };
+            self.sessions.push(session);
+            self.session_counters.opens = self.session_counters.opens.saturating_add(1);
+        }
+        #[cfg(feature = "qa-native-frame-timing")]
+        trace.mark(demand_timing::DECODER_SYNC);
+        LibavPrepared::Decode(LibavDecodeJob {
+            path,
+            signature,
+            seek_before_decode: decision == LibavSessionDecision::Reopen,
+            rewound,
+            terminal,
+        })
+    }
+
+    /// A live request may hold only across the same forward playback run.
+    /// Request strides already record every shared tick, including holds; the
+    /// canonical cache/session positions continue to describe exact coverage.
+    #[cfg(feature = "libav")]
+    fn live_request_continues(&self, input: &VideoRenderInput) -> bool {
+        self.request_strides
+            .iter()
+            .find(|stride| stride.owner.matches(input.key, input.layer_id()))
+            .is_none_or(|stride| {
+                input.request.position_ms >= stride.last_ms
+                    && input.request.position_ms - stride.last_ms <= LIBAV_SEQUENTIAL_REQUEST_GAP_MS
+            })
+    }
+
+    /// Reuse only the exact frame that the pending session looked past, under
+    /// the same identity and monotonic coverage policy as a joined session.
+    /// Never infer drained EOF or expose the speculative next frame here.
+    #[cfg(feature = "libav")]
+    fn reuse_pending_cached_frame(
+        &mut self,
+        input: &VideoRenderInput,
+        path: &std::path::Path,
+        signature: &StillImageSignature,
+        live: bool,
+    ) -> Option<Arc<VideoFrame>> {
+        if live && !self.live_request_continues(input) {
+            return None;
+        }
+        let request = &input.request;
+        let pending_index = self.lookaheads.iter().position(|pending| {
+            render_input_cache_owner_matches(
+                input.key,
+                request.layer_id,
+                pending.key,
+                pending.layer_id,
+            )
+        })?;
+        // A run that read to the clip end has streamed every frame it will:
+        // with none left to take, the owner is a drained session, answered
+        // by reuse while the run decodes the clip start ahead.
+        let streamed = self.lookaheads[pending_index].receive_streamed();
+        self.count_streamed_lookahead_frames(streamed);
+        let pending = &self.lookaheads[pending_index];
+        let drained = pending.ready.is_empty()
+            && pending
+                .control
+                .as_ref()
+                .is_some_and(|control| lock_run_control(control).clip_end);
+        let entry_index = self.entries.iter().position(|entry| {
+            entry.key == input.key
+                && entry.layer_id == request.layer_id
+                && entry.path == path
+                && entry.width == request.width
+                && entry.height == request.height
+                && entry.signature == *signature
+                && entry.frame.pts_ms == pending.served_pts_ms
+                && session_decision(
+                    pending.last_request_ms,
+                    Some(entry.frame.pts_ms),
+                    true,
+                    drained,
+                    request.position_ms,
+                ) == LibavSessionDecision::ReuseFrame
+        })?;
+        if self.stop.is_cancelled() {
+            return None;
+        }
+        let entry = &mut self.entries[entry_index];
+        entry.position_ms = request.position_ms;
+        let frame = Arc::clone(&entry.frame);
+        // join() restores this value after the worker has advanced its own
+        // session. Covered ticks must therefore advance the saved value too.
+        self.lookaheads[pending_index].last_request_ms = Some(request.position_ms);
+        self.touch_input(input.key, request.layer_id);
+        self.session_counters.frame_reuses = self.session_counters.frame_reuses.saturating_add(1);
+        Some(frame)
+    }
+
+    /// Answer a continuation from the frames a pending run already decoded,
+    /// under the same identity policy as `reuse_pending_cached_frame`. The
+    /// run's frames follow the served one without a gap, so the first one at
+    /// or after the request is exactly the frame continuing would return.
+    /// While the run may still stream the needed frame this waits for its
+    /// next frame only, never for the rest of the run; when the run has
+    /// nothing more to stream it returns `None` and the caller joins it.
+    #[cfg(feature = "libav")]
+    fn take_pending_ready_frame(
+        &mut self,
+        input: &VideoRenderInput,
+        path: &std::path::Path,
+        signature: &StillImageSignature,
+        live: bool,
+    ) -> Option<Arc<VideoFrame>> {
+        if live && !self.live_request_continues(input) {
+            return None;
+        }
+        let request = &input.request;
+        let pending_index = self.lookaheads.iter().position(|pending| {
+            render_input_cache_owner_matches(
+                input.key,
+                request.layer_id,
+                pending.key,
+                pending.layer_id,
+            )
+        })?;
+        let pending = &self.lookaheads[pending_index];
+        let entry_index = self.entries.iter().position(|entry| {
+            entry.key == input.key
+                && entry.layer_id == request.layer_id
+                && entry.path == path
+                && entry.width == request.width
+                && entry.height == request.height
+                && entry.signature == *signature
+                && entry.frame.pts_ms == pending.served_pts_ms
+                && session_decision(
+                    if live {
+                        self.request_strides
+                            .iter()
+                            .find(|stride| stride.owner.matches(input.key, input.layer_id()))
+                            .map(|stride| stride.last_ms)
+                            .or(pending.last_request_ms)
+                    } else {
+                        pending.last_request_ms
+                    },
+                    Some(entry.frame.pts_ms),
+                    true,
+                    false,
+                    request.position_ms,
+                ) == LibavSessionDecision::Continue
+                || (live
+                    && entry.key == input.key
+                    && entry.layer_id == request.layer_id
+                    && entry.path == path
+                    && entry.width == request.width
+                    && entry.height == request.height
+                    && entry.signature == *signature
+                    && entry.frame.pts_ms == pending.served_pts_ms
+                    && request.position_ms > entry.frame.pts_ms
+                    && pending
+                        .last_request_ms
+                        .is_some_and(|last| request.position_ms > last))
+        })?;
+        loop {
+            if self.stop.is_cancelled() {
+                return None;
+            }
+            let streamed = self.lookaheads[pending_index].receive_streamed();
+            self.count_streamed_lookahead_frames(streamed);
+            let pending = &mut self.lookaheads[pending_index];
+            let entry = &mut self.entries[entry_index];
+            if let Some(frame) = pending.take_ready(
+                request.position_ms,
+                &mut entry.frame,
+                (request.width, request.height),
+                &mut entry.rgba_returns,
+            ) {
+                pending.served_pts_ms = frame.pts_ms;
+                // join() restores this value, as for a covered tick.
+                pending.last_request_ms = Some(request.position_ms);
+                entry.position_ms = request.position_ms;
+                self.touch_input(input.key, request.layer_id);
+                self.session_counters.sequential_continues =
+                    self.session_counters.sequential_continues.saturating_add(1);
+                self.session_counters.lookahead_hits =
+                    self.session_counters.lookahead_hits.saturating_add(1);
+                return Some(frame);
+            }
+            // Only the explicit live resident caller may hold. Keep both the
+            // pending request and canonical exact coverage intact, so a later
+            // exact caller must still acquire its requested frame. No extra
+            // allocation, lock, timer or worker is introduced on the tick.
+            let frames = pending.frames.as_ref()?;
+            let next = if live {
+                match frames.try_recv() {
+                    Ok(frame) => Ok(frame),
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(()),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        if self.stop.is_cancelled() {
+                            return None;
+                        }
+                        let frame = Arc::clone(&entry.frame);
+                        self.session_counters.live_held_frames =
+                            self.session_counters.live_held_frames.saturating_add(1);
+                        self.touch_input(input.key, request.layer_id);
+                        return Some(frame);
+                    }
+                }
+            } else {
+                frames.recv().map_err(|_| ())
+            };
+            match next {
+                Ok(frame) => {
+                    pending.ready.push_back(frame);
+                    self.count_streamed_lookahead_frames(1);
+                }
+                Err(_) => {
+                    pending.frames = None;
+                    return None;
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "libav")]
+    fn count_streamed_lookahead_frames(&mut self, frames: u64) {
+        self.session_counters.lookahead_decodes = self
+            .session_counters
+            .lookahead_decodes
+            .saturating_add(frames);
+    }
+
+    /// The owner's next expected request is its last request plus its last
+    /// forward stride; records this request for the next one.
+    #[cfg(feature = "libav")]
+    fn note_request_stride(&mut self, input: &VideoRenderInput) -> u64 {
+        let owner = LibavRenderInputOwner::new(input.key, input.layer_id());
+        let position_ms = input.request.position_ms;
+        match self
+            .request_strides
+            .iter_mut()
+            .find(|stride| stride.owner == owner)
+        {
+            Some(stride) => {
+                stride.stride_ms = match position_ms.checked_sub(stride.last_ms) {
+                    Some(0) => stride.stride_ms,
+                    Some(forward) => forward.min(LIBAV_LOOKAHEAD_MAX_STRIDE_MS),
+                    // A backward jump (a loop wrap) keeps the owner's cadence:
+                    // resetting it made the first runs after every wrap a
+                    // single frame, which the next tick outran.
+                    None => stride.stride_ms,
+                };
+                stride.last_ms = position_ms;
+                stride.stride_ms
+            }
+            None => {
+                self.request_strides.push(LibavRequestStride {
+                    owner,
+                    last_ms: position_ms,
+                    stride_ms: 0,
+                });
+                0
+            }
+        }
+    }
+
+    /// Frames one run may hold for an owner: at most
+    /// `LIBAV_LOOKAHEAD_MAX_FRAMES`, and the working set's share of the
+    /// total budget, but always the single next frame.
+    #[cfg(feature = "libav")]
+    fn lookahead_frame_limit(&self, frame_bytes: usize) -> usize {
+        let owners = self.working_set_lru.len().max(1);
+        (LIBAV_LOOKAHEAD_BUDGET_BYTES / owners.saturating_mul(frame_bytes.max(1)))
+            .clamp(1, LIBAV_LOOKAHEAD_MAX_FRAMES)
+    }
+
+    /// Joins every look-ahead: its session comes back with the next frame,
+    /// or, if there is none (the clip ended) or it failed, is dropped so the
+    /// next request reopens it.
+    #[cfg(feature = "libav")]
+    fn join_lookaheads(&mut self) {
+        let lookaheads = std::mem::take(&mut self.lookaheads);
+        self.join(lookaheads);
+    }
+
+    /// Joins only the look-aheads of these inputs' owners, so one input's
+    /// request does not wait for another input's look-ahead.
+    #[cfg(feature = "libav")]
+    fn join_lookaheads_for(&mut self, inputs: &[VideoRenderInput]) {
+        if !self.lookaheads.iter().any(|pending| {
+            inputs.iter().any(|input| {
+                render_input_cache_owner_matches(
+                    input.key,
+                    input.layer_id(),
+                    pending.key,
+                    pending.layer_id,
+                )
+            })
+        }) {
+            return;
+        }
+        let (mine, others): (Vec<_>, Vec<_>) = std::mem::take(&mut self.lookaheads)
+            .into_iter()
+            .partition(|lookahead| {
+                inputs.iter().any(|input| {
+                    render_input_cache_owner_matches(
+                        input.key,
+                        input.layer_id(),
+                        lookahead.key,
+                        lookahead.layer_id,
+                    )
+                })
+            });
+        self.lookaheads = others;
+        self.join(mine);
+    }
+
+    /// Retention preserves active owners but acknowledges every removed owner
+    /// before returning. A stopped decoder must recover even active jobs.
+    #[cfg(feature = "libav")]
+    fn join_retired_lookaheads(&mut self) {
+        if !self.stop.is_cancelled()
+            && self.lookaheads.iter().all(|pending| {
+                self.working_set_lru
+                    .iter()
+                    .any(|owner| owner.matches(pending.key, pending.layer_id))
+            })
+        {
+            return;
+        }
+        let (retired, active): (Vec<_>, Vec<_>) = std::mem::take(&mut self.lookaheads)
+            .into_iter()
+            .partition(|pending| {
+                self.stop.is_cancelled()
+                    || !self
+                        .working_set_lru
+                        .iter()
+                        .any(|owner| owner.matches(pending.key, pending.layer_id))
+            });
+        self.lookaheads = active;
+        self.join(retired);
+    }
+
+    #[cfg(not(feature = "libav"))]
+    fn join_retired_lookaheads(&mut self) {}
+
+    #[cfg(feature = "libav")]
+    fn join(&mut self, lookaheads: Vec<LibavLookahead>) {
+        #[cfg(feature = "qa-native-frame-timing")]
+        let _native_join =
+            crate::native_frame_timing::span(crate::native_frame_timing::Phase::RetentionJoin);
+        for mut lookahead in lookaheads {
+            #[cfg(feature = "qa-native-frame-timing")]
+            crate::native_frame_timing::add_retired_owner_for_layer(lookahead.layer_id);
+            // A look-ahead that panicked lost its session.
+            #[cfg(feature = "qa-native-frame-timing")]
+            let native_recv =
+                crate::native_frame_timing::span(crate::native_frame_timing::Phase::RetentionRecv);
+            let received = lookahead.done.recv();
+            #[cfg(feature = "qa-native-frame-timing")]
+            drop(native_recv);
+            // The worker closed its stream before it sent `done` (or before
+            // it dropped its sender on a panic), so every streamed frame is
+            // here.
+            let streamed = lookahead.receive_streamed();
+            self.count_streamed_lookahead_frames(streamed);
+            let Ok(done) = received else {
+                self.session_counters.lookahead_discards =
+                    self.session_counters.lookahead_discards.saturating_add(1);
+                continue;
+            };
+            self.session_counters.hardware_frames = self
+                .session_counters
+                .hardware_frames
+                .saturating_add(done.hardware_frames);
+            let mut session = done.session;
+            // An owner evicted from the working set while its session was
+            // out does not get the session back.
+            let in_working_set = self
+                .working_set_lru
+                .iter()
+                .any(|owner| owner.matches(lookahead.key, lookahead.layer_id));
+            if !in_working_set {
+                self.session_counters.lookahead_discards =
+                    self.session_counters.lookahead_discards.saturating_add(1);
+                continue;
+            }
+            // The run's last decode looked past its latest frame: the last
+            // ready frame, or the served one.
+            let base_pts_ms = lookahead
+                .ready
+                .back()
+                .map_or(lookahead.served_pts_ms, |frame| frame.pts_ms);
+            match done.result {
+                // A frame without a timestamp is labelled with the target
+                // time (base + 1), which on demand it would not be: such a
+                // frame is not used ahead.
+                Some(Ok(frame)) if frame.pts_ms > base_pts_ms.saturating_add(1) => {
+                    session.last_request_ms = lookahead.last_request_ms;
+                    session.next_frames = std::mem::take(&mut lookahead.ready);
+                    session.next_frames.push_back(frame);
+                    self.sessions.push(session);
+                }
+                // The clip ended after the base frame (the fallback is the
+                // base frame itself): the drained session answers later
+                // requests from its queue, then by reuse, as on demand it
+                // would after reading to the end.
+                Some(Ok(frame)) if frame.pts_ms == base_pts_ms && session.decoder_drained => {
+                    session.last_request_ms = lookahead.last_request_ms;
+                    session.next_frames = std::mem::take(&mut lookahead.ready);
+                    let wrapped = session.wrap.as_ref().map_or(0, |wrap| wrap.frames.len());
+                    self.count_streamed_lookahead_frames(wrapped as u64);
+                    self.sessions.push(session);
+                }
+                // A clip-start job: the session is still drained at the end.
+                None if session.decoder_drained => {
+                    session.last_request_ms = lookahead.last_request_ms;
+                    session.next_frames = std::mem::take(&mut lookahead.ready);
+                    let wrapped = session.wrap.as_ref().map_or(0, |wrap| wrap.frames.len());
+                    self.count_streamed_lookahead_frames(wrapped as u64);
+                    self.sessions.push(session);
+                }
+                _ => {
+                    self.session_counters.lookahead_discards =
+                        self.session_counters.lookahead_discards.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(feature = "libav"))]
+    fn join_lookaheads(&mut self) {}
+
+    /// Starts decoding the frames after `served` (after any already queued)
+    /// for this input on the decode pool until they cover the next expected
+    /// request, `stride_ms` after this one, so that request is answered at
+    /// once. A stride within one source frame decodes exactly the next frame.
+    /// `held` marks a live tick answered by the owner's previous frame: it
+    /// keeps the pending run instead of joining it (see the caller).
+    #[cfg(feature = "libav")]
+    fn start_lookahead_with_hold(
+        &mut self,
+        input: &VideoRenderInput,
+        served: &Arc<VideoFrame>,
+        stride_ms: u64,
+        held: bool,
+    ) {
+        if self.stop.is_cancelled() {
+            return;
+        }
+        let Some(pool) = libav_decode_pool() else {
+            return;
+        };
+        // Only from the frame the owner's session last produced: the cached
+        // frame is this exact frame.
+        let current = self.entries.iter().any(|entry| {
+            render_input_cache_owner_matches(
+                input.key,
+                input.request.layer_id,
+                entry.key,
+                entry.layer_id,
+            ) && Arc::ptr_eq(&entry.frame, served)
+        });
+        if !current {
+            return;
+        }
+        let limit = self.lookahead_frame_limit(served.data.len());
+        // The run decodes until a frame reaches this time: one and a half
+        // strides past the request, so tick jitter still lands inside it,
+        // plus the slack, so the frames after the next are decoding while
+        // the next one is served.
+        let slack_ms = served
+            .duration_ms
+            .min(LIBAV_LOOKAHEAD_MAX_STRIDE_MS)
+            .saturating_mul(LIBAV_LOOKAHEAD_SLACK_FRAMES);
+        let window_ms = stride_ms
+            .saturating_add(stride_ms / 2)
+            .saturating_add(slack_ms);
+        let until_ms = input.request.position_ms.saturating_add(window_ms);
+        let wrap_until_ms = window_ms.max(1);
+        let wrap_cover_ms = stride_ms.saturating_add(stride_ms / 2).max(1);
+        // The owner's run is still out (this request was answered from it):
+        // widen its window while it decodes, or, once it has ended, take its
+        // session back and continue from its queue below.
+        if let Some(pending_index) = self.lookaheads.iter().position(|pending| {
+            render_input_cache_owner_matches(
+                input.key,
+                input.request.layer_id,
+                pending.key,
+                pending.layer_id,
+            )
+        }) {
+            let pending = &self.lookaheads[pending_index];
+            let Some(control) = pending.control.as_ref() else {
+                return;
+            };
+            {
+                let mut control = lock_run_control(control);
+                if !control.finished {
+                    control.until_ms = control.until_ms.max(until_ms);
+                    control.wrap_until_ms = control.wrap_until_ms.max(wrap_until_ms);
+                    control.wrap_cover_ms = control.wrap_cover_ms.max(wrap_cover_ms);
+                    control.limit = limit;
+                    return;
+                }
+            }
+            // A held tick cannot turn its zero-wait acquisition into a join.
+            // The next tick drains the stream or reclaims a closed owner.
+            if held {
+                return;
+            }
+            // An ended run sends `done` without decoding again.
+            let pending = self.lookaheads.swap_remove(pending_index);
+            self.join(vec![pending]);
+            if self.stop.is_cancelled() {
+                return;
+            }
+        }
+        let Some(index) = self.session_index(input.key, input.request.layer_id) else {
+            return;
+        };
+        let session = &self.sessions[index];
+        if session.decoder_drained || session.eof_sent {
+            if session.decoder_drained
+                && session.next_frames.is_empty()
+                && session.wrap.is_none()
+                && !session.wrap_attempted
+            {
+                self.start_clip_start_job(
+                    input,
+                    served,
+                    index,
+                    limit,
+                    (wrap_until_ms, wrap_cover_ms),
+                );
+            }
+            return;
+        }
+        let queued = session.next_frames.len();
+        let base = session
+            .next_frames
+            .back()
+            .cloned()
+            .unwrap_or_else(|| Arc::clone(served));
+        if queued >= limit || (queued > 0 && base.pts_ms >= until_ms) {
+            return;
+        }
+        let mut session = self.sessions.swap_remove(index);
+        let ready = std::mem::take(&mut session.next_frames);
+        let last_request_ms = session.last_request_ms;
+        let hardware = session.hardware;
+        let request = input.request.clone();
+        let control = Arc::new(std::sync::Mutex::new(LibavRunControl {
+            until_ms,
+            limit,
+            outstanding: queued,
+            finished: false,
+            clip_end: false,
+            wrap_until_ms,
+            wrap_cover_ms,
+            rgba_spare: None,
+            rgba_spare_in_decode: session.rgba_spare.is_some(),
+        }));
+        let worker_control = Arc::clone(&control);
+        let (frames_sender, frames) = std::sync::mpsc::channel();
+        let (sender, done) = std::sync::mpsc::sync_channel(1);
+        pool.spawn(move || {
+            let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_libav_lookahead(request, &mut session, base, &worker_control, frames_sender)
+            }));
+            if let Ok((result, hardware_frames)) = run {
+                let _ = sender.send(LibavLookaheadDone {
+                    session,
+                    result: Some(result),
+                    hardware_frames,
+                });
+            } else {
+                // A panicked run has ended: later requests join it instead
+                // of widening it.
+                lock_run_control(&worker_control).finished = true;
+                // Disconnect is the join acknowledgement. Finish native
+                // session cleanup before the captured sender can be dropped.
+                drop(session);
+            }
+        });
+        self.lookaheads.push(LibavLookahead {
+            key: input.key,
+            layer_id: input.request.layer_id,
+            served_pts_ms: served.pts_ms,
+            last_request_ms,
+            hardware,
+            ready,
+            frames: Some(frames),
+            control: Some(control),
+            done,
+        });
+        self.session_counters.lookahead_decodes =
+            self.session_counters.lookahead_decodes.saturating_add(1);
+    }
+
+    /// The caller's own decode read to the clip end (the run had stopped at
+    /// the clip's last frame): decode the clip start ahead on the decode pool
+    /// (`predecode_clip_start`), once per drained session. The owner is a
+    /// drained session meanwhile (`clip_end`), answered by reuse; only a
+    /// backward request (the loop wrap) joins it.
+    #[cfg(feature = "libav")]
+    fn start_clip_start_job(
+        &mut self,
+        input: &VideoRenderInput,
+        served: &Arc<VideoFrame>,
+        index: usize,
+        limit: usize,
+        (wrap_until_ms, wrap_cover_ms): (u64, u64),
+    ) {
+        let Some(pool) = libav_decode_pool() else {
+            return;
+        };
+        let mut session = self.sessions.swap_remove(index);
+        session.wrap_attempted = true;
+        let last_request_ms = session.last_request_ms;
+        let hardware = session.hardware;
+        let request = input.request.clone();
+        let control = Arc::new(std::sync::Mutex::new(LibavRunControl {
+            until_ms: 0,
+            limit,
+            outstanding: 0,
+            finished: false,
+            clip_end: true,
+            wrap_until_ms,
+            wrap_cover_ms,
+            rgba_spare: None,
+            rgba_spare_in_decode: session.rgba_spare.is_some(),
+        }));
+        let worker_control = Arc::clone(&control);
+        let (frames_sender, frames) = std::sync::mpsc::channel::<Arc<VideoFrame>>();
+        let (sender, done) = std::sync::mpsc::sync_channel(1);
+        pool.spawn(move || {
+            // Nothing is streamed: a request waiting for a frame joins.
+            drop(frames_sender);
+            let job = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut hardware_frames = 0;
+                let wrap = predecode_clip_start(
+                    &request,
+                    &mut session,
+                    &worker_control,
+                    &mut hardware_frames,
+                );
+                session.wrap = wrap;
+                hardware_frames
+            }));
+            lock_run_control(&worker_control).finished = true;
+            if let Ok(hardware_frames) = job {
+                let _ = sender.send(LibavLookaheadDone {
+                    session,
+                    result: None,
+                    hardware_frames,
+                });
+            } else {
+                // Disconnect is the join acknowledgement; the session is lost.
+                drop(session);
+            }
+        });
+        self.lookaheads.push(LibavLookahead {
+            key: input.key,
+            layer_id: input.request.layer_id,
+            served_pts_ms: served.pts_ms,
+            last_request_ms,
+            hardware,
+            ready: VecDeque::new(),
+            frames: Some(frames),
+            control: Some(control),
+            done,
+        });
+    }
+
+    /// One input, without look-ahead and without joining.
+    fn decode_one(
+        &mut self,
+        input: &VideoRenderInput,
+        live: bool,
+    ) -> Result<Option<Arc<VideoFrame>>, VideoDecodeError> {
+        if input.request.source.kind != VideoSourceKind::File {
+            self.release_input_key(input.key, input.layer_id());
+            return Ok(None);
+        }
+        #[cfg(feature = "libav")]
+        {
+            self.decode_enabled(input, live)
+        }
+        #[cfg(not(feature = "libav"))]
+        {
+            let _ = live;
+            Ok(None)
+        }
+    }
+
+    /// The inputs of one tick (in parallel when possible), and with
+    /// `look_ahead` each served input's next frame is started afterwards.
+    fn decode_tick(
+        &mut self,
+        inputs: &[VideoRenderInput],
+        look_ahead: bool,
+    ) -> Vec<Result<Option<Arc<VideoFrame>>, VideoDecodeError>> {
+        self.decode_tick_with_policy(inputs, look_ahead, false)
+    }
+
+    fn decode_tick_with_policy(
+        &mut self,
+        inputs: &[VideoRenderInput],
+        look_ahead: bool,
+        live: bool,
+    ) -> Vec<Result<Option<Arc<VideoFrame>>, VideoDecodeError>> {
+        if self.stop.check().is_err() {
+            // Still reap queued owners; returning does not detach pool jobs.
+            self.stop.cancel();
+            self.join_lookaheads();
+            return inputs
+                .iter()
+                .map(|_| Err(VideoDecodeError::Cancelled))
+                .collect();
+        }
+        let results = self.decode_tick_together_or_one_by_one(inputs, live);
+        if self.stop.is_cancelled() {
+            self.stop.cancel();
+            self.join_lookaheads();
+            return inputs
+                .iter()
+                .map(|_| Err(VideoDecodeError::Cancelled))
+                .collect();
+        }
+        #[cfg(feature = "libav")]
+        if look_ahead {
+            for (index, (input, result)) in inputs.iter().zip(&results).enumerate() {
+                // An owner requested more than once this tick (a
+                // transition's two clips on one legacy owner, or several
+                // positions) ends on whichever request came last, so it does
+                // not decode ahead.
+                let repeated = inputs.iter().enumerate().any(|(other, candidate)| {
+                    other != index
+                        && render_input_cache_owner_matches(
+                            input.key,
+                            input.layer_id(),
+                            candidate.key,
+                            candidate.layer_id(),
+                        )
+                });
+                if let (false, Ok(Some(frame))) = (repeated, result) {
+                    let stride_ms = self.note_request_stride(input);
+                    // A held tick must keep the pending owner. In particular,
+                    // do not join its finished-but-not-yet-ACKed run here.
+                    let held = live
+                        && self.entries.iter().any(|entry| {
+                            entry.key == input.key
+                                && entry.layer_id == input.layer_id()
+                                && entry.position_ms != input.request.position_ms
+                                && Arc::ptr_eq(&entry.frame, frame)
+                        });
+                    self.start_lookahead_with_hold(input, frame, stride_ms, held);
+                }
+            }
+            let working_set = &self.working_set_lru;
+            self.request_strides
+                .retain(|stride| working_set.contains(&stride.owner));
+        }
+        #[cfg(not(feature = "libav"))]
+        let _ = look_ahead;
+        results
+    }
+
+    /// Everything `decode_enabled` does after the frame decode: the reopen
+    /// fallback for a failed seek, error accounting and the cache update.
+    #[cfg(feature = "libav")]
+    fn finish_decode(
+        &mut self,
+        input: &VideoRenderInput,
+        job: LibavDecodeJob,
+        primary_decode: Result<Arc<VideoFrame>, VideoDecodeError>,
+        #[cfg(feature = "qa-native-frame-timing")] trace: demand_timing::DecoderRequest,
+    ) -> Result<Option<Arc<VideoFrame>>, VideoDecodeError> {
+        let key = input.key;
+        let request = &input.request;
+        let LibavDecodeJob {
+            path,
+            signature,
+            seek_before_decode,
+            rewound,
+            ..
+        } = job;
+        let primary_decode = if self.stop.is_cancelled() {
+            Err(VideoDecodeError::Cancelled)
+        } else {
+            primary_decode
+        };
+        let frame = match primary_decode {
+            Err(VideoDecodeError::Cancelled) => {
+                self.evict_input_state(key, request.layer_id);
+                self.working_set_lru
+                    .retain(|owner| !owner.matches(key, request.layer_id));
+                return Err(VideoDecodeError::Cancelled);
+            }
+            Ok(frame) => frame,
+            Err(ref error)
+                if !matches!(error, VideoDecodeError::HardwareDecode { .. })
+                    && seek_before_decode
+                    && (request.position_ms > 0 || rewound) =>
+            {
+                #[cfg(feature = "qa-native-frame-timing")]
+                trace.mark(demand_timing::DECODER_REOPEN);
+                let mut fallback_session = match open_libav_session_with_stop(
+                    key,
+                    request,
+                    path.clone(),
+                    signature.clone(),
+                    self.hardware_enabled,
+                    &self.stop,
+                ) {
+                    Ok(session) => session,
+                    Err(error) => {
+                        if error != VideoDecodeError::Cancelled {
+                            self.session_counters.errors =
+                                self.session_counters.errors.saturating_add(1);
+                        }
+                        self.release_input_key(key, request.layer_id);
+                        self.record_hardware_error(&error);
+                        return Err(error);
+                    }
+                };
+                self.session_counters.opens = self.session_counters.opens.saturating_add(1);
+                #[cfg(feature = "qa-native-frame-timing")]
+                let work = trace.queued().work();
+                let fallback_decode = decode_libav_session_frame(
+                    request,
+                    &mut fallback_session,
+                    false,
+                    None,
+                    &mut self.session_counters.hardware_frames,
+                );
+                #[cfg(feature = "qa-native-frame-timing")]
+                trace.record_work(work.finish());
+                match fallback_decode {
+                    Ok(frame) => {
+                        match self.session_index(key, request.layer_id) {
+                            Some(session_index) => self.sessions[session_index] = fallback_session,
+                            None => self.sessions.push(fallback_session),
+                        }
+                        frame
+                    }
+                    Err(error) => {
+                        if error != VideoDecodeError::Cancelled {
+                            self.session_counters.errors =
+                                self.session_counters.errors.saturating_add(1);
+                        }
+                        self.release_input_key(key, request.layer_id);
+                        self.record_hardware_error(&error);
+                        return Err(error);
+                    }
+                }
+            }
+            Err(error) => {
+                self.session_counters.errors = self.session_counters.errors.saturating_add(1);
+                self.release_input_key(key, request.layer_id);
+                self.record_hardware_error(&error);
+                return Err(error);
+            }
+        };
+        self.replace_layer_cache_entry(LibavFrameCacheEntry {
+            key,
+            layer_id: request.layer_id,
+            path,
+            width: request.width,
+            height: request.height,
+            position_ms: request.position_ms,
+            signature,
+            frame: Arc::clone(&frame),
+            #[cfg(feature = "libav")]
+            rgba_returns: Default::default(),
+        });
+        Ok(Some(frame))
+    }
+}
+
+impl Drop for LibavFrameDecoder {
+    fn drop(&mut self) {
+        // Queued jobs own native sessions. Signal first, then recover every
+        // owner before the renderer/thread may be considered retired.
+        self.stop.cancel();
+        self.join_lookaheads();
+    }
+}
+
+impl VideoFrameDecoder for LibavFrameDecoder {
+    fn retain_layers(&mut self, layer_ids: &[VideoLayerId]) {
+        self.entries
+            .retain(|entry| layer_ids.contains(&entry.layer_id));
+        let active_owners = self
+            .entries
+            .iter()
+            .map(|entry| LibavRenderInputOwner::new(entry.key, entry.layer_id))
+            .collect::<Vec<_>>();
+        self.working_set_lru
+            .retain(|owner| active_owners.contains(owner));
+        #[cfg(feature = "libav")]
+        self.sessions
+            .retain(|session| layer_ids.contains(&session.layer_id));
+        self.join_retired_lookaheads();
+    }
+
+    fn retain_inputs(&mut self, inputs: &[VideoRenderInput]) {
+        self.entries.retain(|entry| {
+            inputs.iter().any(|input| {
+                render_input_cache_owner_matches(
+                    input.key,
+                    input.layer_id(),
+                    entry.key,
+                    entry.layer_id,
+                )
+            })
+        });
+        self.working_set_lru.retain(|owner| {
+            inputs
+                .iter()
+                .any(|input| owner.matches(input.key, input.layer_id()))
+        });
+        #[cfg(feature = "libav")]
+        self.sessions.retain(|session| {
+            inputs.iter().any(|input| {
+                render_input_cache_owner_matches(
+                    input.key,
+                    input.layer_id(),
+                    session.key,
+                    session.layer_id,
+                )
+            })
+        });
+        self.join_retired_lookaheads();
+    }
+
+    fn release_layer(&mut self, layer_id: VideoLayerId) {
+        LibavFrameDecoder::release_layer(self, layer_id);
+    }
+
+    fn release_input(&mut self, input: &VideoRenderInput) {
+        self.release_input_key(input.key, input.layer_id());
+    }
+
+    fn decode_frame(
+        &mut self,
+        request: &VideoFrameRequest,
+    ) -> Result<Option<VideoFrame>, VideoDecodeError> {
+        self.decode_input_frame(&VideoRenderInput::legacy(request.clone()))
+    }
+
+    /// Owned frames are for callers outside the live path (recording), so
+    /// this never decodes ahead.
+    fn decode_input_frame(
+        &mut self,
+        input: &VideoRenderInput,
+    ) -> Result<Option<VideoFrame>, VideoDecodeError> {
+        self.decode_tick(std::slice::from_ref(input), false)
+            .pop()
+            .expect("one input decodes to one result")
+            .map(|frame| frame.map(Arc::unwrap_or_clone))
+    }
+
+    /// The live path: after serving, the input's next frame is decoded ahead.
+    fn decode_input_frame_shared(
+        &mut self,
+        input: &VideoRenderInput,
+    ) -> Result<Option<Arc<VideoFrame>>, VideoDecodeError> {
+        self.decode_tick(std::slice::from_ref(input), true)
+            .pop()
+            .expect("one input decodes to one result")
+    }
+
+    /// The cancellable live path: the shared frame and its look-ahead, with
+    /// the caller's cancellation observed at the same boundaries as the owned
+    /// cancellable decode.
+    fn decode_input_frame_shared_with_cancellation(
+        &mut self,
+        input: &VideoRenderInput,
+        cancellation: &dyn super::VideoRenderCancellation,
+    ) -> Result<Option<Arc<VideoFrame>>, VideoDecodeError> {
+        if cancellation.is_cancelled() {
+            return Err(VideoDecodeError::Cancelled);
+        }
+        let frame = self.decode_input_frame_shared(input)?;
+        if cancellation.is_cancelled() {
+            return Err(VideoDecodeError::Cancelled);
+        }
+        Ok(frame)
+    }
+
+    fn decode_input_frame_shared_live(
+        &mut self,
+        input: &VideoRenderInput,
+    ) -> Result<Option<Arc<VideoFrame>>, VideoDecodeError> {
+        self.decode_tick_with_policy(std::slice::from_ref(input), true, true)
+            .pop()
+            .expect("one input decodes to one result")
+    }
+
+    fn decode_input_frame_shared_live_with_cancellation(
+        &mut self,
+        input: &VideoRenderInput,
+        cancellation: &dyn super::VideoRenderCancellation,
+    ) -> Result<Option<Arc<VideoFrame>>, VideoDecodeError> {
+        if cancellation.is_cancelled() {
+            return Err(VideoDecodeError::Cancelled);
+        }
+        let frame = self.decode_input_frame_shared_live(input)?;
+        if cancellation.is_cancelled() {
+            return Err(VideoDecodeError::Cancelled);
+        }
+        Ok(frame)
+    }
+
+    fn decode_input_frames(
+        &mut self,
+        inputs: &[VideoRenderInput],
+    ) -> Vec<Result<Option<VideoFrame>, VideoDecodeError>> {
+        self.decode_tick(inputs, false)
+            .into_iter()
+            .map(|decoded| decoded.map(|frame| frame.map(Arc::unwrap_or_clone)))
+            .collect()
+    }
+
+    fn decode_input_frames_shared(
+        &mut self,
+        inputs: &[VideoRenderInput],
+    ) -> Vec<Result<Option<Arc<VideoFrame>>, VideoDecodeError>> {
+        self.decode_tick(inputs, true)
+    }
+}
+
+impl LibavFrameDecoder {
+    /// Distinct file inputs decode their frames in parallel when the batch
+    /// cannot evict anything from the working set; anything else decodes one
+    /// by one.
+    fn decode_tick_together_or_one_by_one(
+        &mut self,
+        inputs: &[VideoRenderInput],
+        live: bool,
+    ) -> Vec<Result<Option<Arc<VideoFrame>>, VideoDecodeError>> {
+        #[cfg(feature = "libav")]
+        {
+            let distinct = inputs.iter().enumerate().all(|(index, input)| {
+                inputs[..index].iter().all(|earlier| {
+                    !render_input_cache_owner_matches(
+                        input.key,
+                        input.layer_id(),
+                        earlier.key,
+                        earlier.layer_id(),
+                    )
+                })
+            });
+            let new_owners = inputs
+                .iter()
+                .filter(|input| {
+                    !self
+                        .working_set_lru
+                        .iter()
+                        .any(|owner| owner.matches(input.key, input.layer_id()))
+                })
+                .count();
+            let cannot_evict =
+                self.working_set_lru.len() + new_owners <= LIBAV_WORKING_SET_CAPACITY;
+            if inputs.len() >= 2
+                && distinct
+                && cannot_evict
+                && inputs
+                    .iter()
+                    .all(|input| input.request.source.kind == VideoSourceKind::File)
+            {
+                if let Some(pool) = libav_decode_pool() {
+                    return self.decode_enabled_together(inputs, pool, live);
+                }
+            }
+        }
+        inputs
+            .iter()
+            .map(|input| self.decode_one(input, live))
+            .collect()
+    }
+}
+
+#[cfg(feature = "libav")]
+impl LibavDecodeSession {
+    fn matches(
+        &self,
+        request: &VideoFrameRequest,
+        path: &std::path::Path,
+        signature: &StillImageSignature,
+    ) -> bool {
+        self.layer_id == request.layer_id
+            && self.path == path
+            && self.width == request.width
+            && self.height == request.height
+            && self.signature == *signature
+    }
+}
+
+#[cfg(feature = "libav")]
+fn session_decision(
+    last_request_ms: Option<u64>,
+    cached_frame_pts_ms: Option<u64>,
+    has_cached_frame: bool,
+    decoder_drained: bool,
+    target_ms: u64,
+) -> LibavSessionDecision {
+    let Some(last_request_ms) = last_request_ms else {
+        return LibavSessionDecision::Reopen;
+    };
+    if !has_cached_frame {
+        return LibavSessionDecision::Reopen;
+    }
+    if target_ms == last_request_ms
+        || (target_ms > last_request_ms
+            && cached_frame_pts_ms.is_some_and(|pts_ms| target_ms <= pts_ms))
+        || (target_ms > last_request_ms && decoder_drained)
+    {
+        return LibavSessionDecision::ReuseFrame;
+    }
+    if target_ms > last_request_ms
+        && target_ms.saturating_sub(last_request_ms) <= LIBAV_SEQUENTIAL_REQUEST_GAP_MS
+    {
+        return LibavSessionDecision::Continue;
+    }
+    LibavSessionDecision::Reopen
+}
+
+#[cfg(feature = "libav")]
+#[cfg(test)]
+fn open_libav_session(
+    key: protocol::VideoRenderInputKey,
+    request: &VideoFrameRequest,
+    path: PathBuf,
+    signature: StillImageSignature,
+    hardware_enabled: bool,
+) -> Result<LibavDecodeSession, VideoDecodeError> {
+    open_libav_session_with_stop(
+        key,
+        request,
+        path,
+        signature,
+        hardware_enabled,
+        &StopState::new(None),
+    )
+}
+
+#[cfg(feature = "libav")]
+fn open_libav_session_with_stop(
+    key: protocol::VideoRenderInputKey,
+    request: &VideoFrameRequest,
+    path: PathBuf,
+    signature: StillImageSignature,
+    hardware_enabled: bool,
+    stop: &StopState,
+) -> Result<LibavDecodeSession, VideoDecodeError> {
+    stop.check()?;
+    use ffmpeg::media::Type;
+    ffmpeg::init().map_err(|error| decode_error(request, error))?;
+    let input = InterruptInput::open(&path, stop).map_err(|error| {
+        if stop.is_cancelled() {
+            VideoDecodeError::Cancelled
+        } else {
+            decode_error(request, error)
+        }
+    })?;
+    stop.check()?;
+    let stream = input
+        .streams()
+        .best(Type::Video)
+        .ok_or_else(|| decode_message(request, "video stream not found"))?;
+    let stream_index = stream.index();
+    let time_base = stream.time_base();
+    let timestamp_origin = match stream.start_time() {
+        ffmpeg::ffi::AV_NOPTS_VALUE => 0,
+        timestamp => timestamp,
+    };
+    // The stream's own duration, else the container's (microseconds).
+    let end_ms = (stream.duration() > 0 && time_base.denominator() > 0)
+        .then(|| {
+            i128::from(stream.duration()) * i128::from(time_base.numerator()) * 1_000
+                / i128::from(time_base.denominator())
+        })
+        .or_else(|| (input.duration() > 0).then(|| i128::from(input.duration()) / 1_000))
+        .and_then(|end| u64::try_from(end).ok());
+    let mut context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
+        .map_err(|error| decode_error(request, error))?;
+    let hardware = hardware::configure(&mut context, request, hardware_enabled)?;
+    stop.check()?;
+    let mut decoder = context
+        .decoder()
+        .video()
+        .map_err(|error| hardware::classify(request, hardware, decode_error(request, error)))?;
+    decoder.flush();
+    stop.check()?;
+    Ok(LibavDecodeSession {
+        key,
+        layer_id: request.layer_id,
+        path,
+        width: request.width,
+        height: request.height,
+        signature,
+        input,
+        stop: stop.clone(),
+        decoder,
+        hardware,
+        stream_index,
+        time_base,
+        timestamp_origin,
+        last_request_ms: None,
+        eof_sent: false,
+        decoder_drained: false,
+        next_frames: VecDeque::new(),
+        rewind_pending: false,
+        last_key_frame: false,
+        wrap: None,
+        wrap_attempted: false,
+        end_ms,
+        rgba_spare: None,
+    })
+}
+
+#[cfg(feature = "libav")]
+struct LibavScalerLease {
+    source_format: ffmpeg::format::Pixel,
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    target_height: u32,
+    scaler: Option<scaler::RgbaScaler>,
+}
+
+#[cfg(feature = "libav")]
+impl LibavScalerLease {
+    /// Run the conversion while retaining ownership of the cache lease.
+    ///
+    /// A failed native conversion can leave the underlying scaler in an
+    /// unusable state. Do not return that context to the thread-local cache;
+    /// the next request for this geometry must create a fresh conversion
+    /// context instead.
+    fn run(
+        &mut self,
+        input: &ffmpeg_next::util::frame::video::Video,
+        output: &mut ffmpeg_next::util::frame::video::Video,
+    ) -> Result<(), ffmpeg_next::Error> {
+        let result = self.scaler().run(input, output);
+        if result.is_err() {
+            self.scaler = None;
+        }
+        result
+    }
+
+    /// As `run`, writing straight into a packed RGBA buffer that
+    /// `writes_in_place` accepted.
+    fn run_into(
+        &mut self,
+        input: &ffmpeg_next::util::frame::video::Video,
+        output: &mut [u8],
+    ) -> Result<(), ffmpeg_next::Error> {
+        let result = self.scaler().run_into(input, output);
+        if result.is_err() {
+            self.scaler = None;
+        }
+        result
+    }
+
+    fn packed_rows_aligned(&self) -> bool {
+        self.scaler
+            .as_ref()
+            .is_some_and(scaler::RgbaScaler::packed_rows_aligned)
+    }
+
+    fn writes_in_place(&self, output: &[u8]) -> bool {
+        self.scaler
+            .as_ref()
+            .is_some_and(|scaler| scaler.writes_in_place(output))
+    }
+
+    fn scaler(&mut self) -> &mut scaler::RgbaScaler {
+        self.scaler
+            .as_mut()
+            .expect("scaler lease must own a scaler until drop")
+    }
+}
+
+#[cfg(feature = "libav")]
+impl Drop for LibavScalerLease {
+    fn drop(&mut self) {
+        let Some(scaler) = self.scaler.take() else {
+            return;
+        };
+        LIBAV_SCALER_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.retain(|entry| {
+                entry.source_format != self.source_format
+                    || entry.source_width != self.source_width
+                    || entry.source_height != self.source_height
+                    || entry.target_width != self.target_width
+                    || entry.target_height != self.target_height
+            });
+            if cache.len() >= LIBAV_SCALER_CACHE_CAPACITY {
+                cache.remove(0);
+            }
+            cache.push(LibavScalerCacheEntry {
+                source_format: self.source_format,
+                source_width: self.source_width,
+                source_height: self.source_height,
+                target_width: self.target_width,
+                target_height: self.target_height,
+                scaler,
+            });
+        });
+    }
+}
+
+#[cfg(feature = "libav")]
+fn acquire_cached_libav_scaler(
+    request: &VideoFrameRequest,
+    source_format: ffmpeg::format::Pixel,
+    source_width: u32,
+    source_height: u32,
+) -> Result<LibavScalerLease, VideoDecodeError> {
+    LIBAV_SCALER_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let target_width = request.width;
+        let target_height = request.height;
+        let scaler = if let Some(cache_index) = cache.iter().position(|entry| {
+            entry.source_format == source_format
+                && entry.source_width == source_width
+                && entry.source_height == source_height
+                && entry.target_width == target_width
+                && entry.target_height == target_height
+        }) {
+            cache.remove(cache_index).scaler
+        } else {
+            #[cfg(all(feature = "libav", test))]
+            LIBAV_SCALER_CREATION_COUNT.with(|count| count.set(count.get() + 1));
+            scaler::RgbaScaler::new(
+                source_format,
+                source_width,
+                source_height,
+                target_width,
+                target_height,
+            )
+            .map_err(|error| decode_error(request, error))?
+        };
+        Ok(LibavScalerLease {
+            source_format,
+            source_width,
+            source_height,
+            target_width,
+            target_height,
+            scaler: Some(scaler),
+        })
+    })
+}
+
+/// One look-ahead run on the decode pool: consecutive frames after `base`,
+/// each decoded exactly as an on-demand continuation one millisecond past the
+/// previous frame would decode it. A frame is streamed, and the run goes on,
+/// while it is before the run's window and the owner's allowance has room;
+/// otherwise the run ends with it (or at the clip end, or on any failure) and
+/// returns that last decode's result for `join` to validate. The decision and
+/// `finished` are taken under the control lock, and the stream is closed
+/// before this returns.
+#[cfg(feature = "libav")]
+fn run_libav_lookahead(
+    mut request: VideoFrameRequest,
+    session: &mut LibavDecodeSession,
+    mut base: Arc<VideoFrame>,
+    control: &std::sync::Mutex<LibavRunControl>,
+    frames: std::sync::mpsc::Sender<Arc<VideoFrame>>,
+) -> (Result<Arc<VideoFrame>, VideoDecodeError>, u64) {
+    let mut hardware_frames = 0;
+    loop {
+        request.position_ms = base.pts_ms.saturating_add(1);
+        let result =
+            decode_libav_session_frame(&request, session, false, Some(&base), &mut hardware_frames);
+        // The clip ended after the base frame (the fallback is the base).
+        let clip_end = session.decoder_drained
+            && result
+                .as_ref()
+                .is_ok_and(|frame| frame.pts_ms == base.pts_ms);
+        let continues = {
+            let mut control = lock_run_control(control);
+            if session.rgba_spare.is_none() {
+                session.rgba_spare = control.rgba_spare.take();
+            }
+            control.rgba_spare_in_decode = session.rgba_spare.is_some();
+            // Only a timestamped frame past the base continues the run (a
+            // frame without one is labelled base + 1 and is rejected).
+            // A frame near the stream's declared end reads on to the real end
+            // (within the allowance), whose clip start is then decoded ahead
+            // before the loop wrap needs it.
+            let declared_end = |frame: &VideoFrame| {
+                session.end_ms.is_some_and(|end| {
+                    frame
+                        .pts_ms
+                        .saturating_add(frame.duration_ms.max(1))
+                        .saturating_add(LIBAV_LOOKAHEAD_END_MARGIN_MS)
+                        >= end.saturating_sub(1)
+                })
+            };
+            let continues = result.as_ref().is_ok_and(|frame| {
+                frame.pts_ms > base.pts_ms.saturating_add(1)
+                    && (frame.pts_ms < control.until_ms || declared_end(frame))
+                    && control.outstanding + 1 < control.limit
+            }) && !session.decoder_drained;
+            if continues {
+                control.outstanding += 1;
+            } else if clip_end {
+                control.clip_end = true;
+            } else {
+                control.finished = true;
+            }
+            continues
+        };
+        if !continues {
+            if clip_end {
+                // The owner is answered by reuse meanwhile (`clip_end`); the
+                // stream closes only when this returns.
+                let wrap = predecode_clip_start(&request, session, control, &mut hardware_frames);
+                session.wrap = wrap;
+                session.wrap_attempted = true;
+                lock_run_control(control).finished = true;
+            }
+            return (result, hardware_frames);
+        }
+        let frame = result.expect("a continuing run frame decoded");
+        if frames.send(Arc::clone(&frame)).is_err() {
+            // The owner no longer listens; end the run on this frame.
+            lock_run_control(control).finished = true;
+            return (Ok(frame), hardware_frames);
+        }
+        base = frame;
+    }
+}
+
+/// At the clip end, decode the clip start ahead for a loop wrap: the rewind an
+/// on-demand request at position 0 performs, then consecutive frames exactly
+/// as continuations (one millisecond past the previous frame), until a frame
+/// reaches the run's wrap window or the owner's allowance is used. The
+/// session's logical end-of-clip state is restored, so requests at the end
+/// keep being answered by reuse; the physical decoder state moves into the
+/// returned queue. Any failure, stop or clip shorter than the queue returns
+/// nothing; the session then rewinds or re-opens on demand exactly as before
+/// (a logically drained session never continues its decoder, and the rewind
+/// seeks and flushes it).
+#[cfg(feature = "libav")]
+fn predecode_clip_start(
+    request: &VideoFrameRequest,
+    session: &mut LibavDecodeSession,
+    control: &std::sync::Mutex<LibavRunControl>,
+    hardware_frames: &mut u64,
+) -> Option<LibavWrapAhead> {
+    {
+        let mut control = lock_run_control(control);
+        if session.rgba_spare.is_none() {
+            session.rgba_spare = control.rgba_spare.take();
+        }
+        control.rgba_spare_in_decode = session.rgba_spare.is_some();
+    }
+    let logical = (
+        session.eof_sent,
+        session.decoder_drained,
+        session.last_request_ms,
+    );
+    let mut request = request.clone();
+    request.position_ms = 0;
+    // Exactly the on-demand rewind's state change (prepare_decode).
+    session.eof_sent = false;
+    session.decoder_drained = false;
+    session.rewind_pending = true;
+    let mut frames: VecDeque<(Arc<VideoFrame>, bool)> = VecDeque::new();
+    let mut decoded = decode_libav_session_frame(&request, session, false, None, hardware_frames);
+    let complete = loop {
+        let Ok(frame) = decoded else {
+            break false;
+        };
+        // A clip end within the queue, or a frame without a timestamp
+        // (labelled with its target), is not decoded ahead.
+        let previous = frames.back().map(|(previous, _)| previous.pts_ms);
+        if session.decoder_drained
+            || previous.is_some_and(|previous| frame.pts_ms <= previous.saturating_add(1))
+        {
+            break false;
+        }
+        frames.push_back((Arc::clone(&frame), session.last_key_frame));
+        #[cfg(test)]
+        LIBAV_WRAP_FRAME_HOOK.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().as_mut() {
+                hook(frames.len());
+            }
+        });
+        // The owner may widen the stride while this worker is decoding.
+        // Read the window and shared allowance together at each decision.
+        let complete = {
+            let mut control = lock_run_control(control);
+            let complete = frame.pts_ms >= control.wrap_until_ms
+                || frames.len() >= control.limit.max(1)
+                || (frame.pts_ms >= control.wrap_cover_ms
+                    && frames.len().saturating_add(control.outstanding) >= control.limit);
+            // A later extension must join this ended run, not widen a window
+            // the worker has already stopped decoding.
+            if complete {
+                control.finished = true;
+            }
+            complete
+        };
+        if complete {
+            break true;
+        }
+        request.position_ms = frame.pts_ms.saturating_add(1);
+        decoded =
+            decode_libav_session_frame(&request, session, false, Some(&frame), hardware_frames);
+    };
+    let physical = (session.eof_sent, session.decoder_drained);
+    (
+        session.eof_sent,
+        session.decoder_drained,
+        session.last_request_ms,
+    ) = logical;
+    if !complete || session.stop.is_cancelled() {
+        // The decoder may stand anywhere in the clip; the next backward
+        // request must seek it again.
+        session.rewind_pending = true;
+        return None;
+    }
+    Some(LibavWrapAhead {
+        frames,
+        eof_sent: physical.0,
+        decoder_drained: physical.1,
+    })
+}
+
+#[cfg(feature = "libav")]
+fn decode_libav_session_frame(
+    request: &VideoFrameRequest,
+    session: &mut LibavDecodeSession,
+    seek_before_decode: bool,
+    terminal_frame: Option<&Arc<VideoFrame>>,
+    hardware_frames: &mut u64,
+) -> Result<Arc<VideoFrame>, VideoDecodeError> {
+    session.stop.check()?;
+    let hardware = session.hardware;
+    // A rewound session must really be rewound: if the container cannot seek
+    // (raw elementary streams, image sequences, unseekable inputs) it would keep
+    // serving the old position or an already-drained decoder. Fail explicitly,
+    // unclassified, so `finish_decode` re-opens the file as it did before the
+    // in-place rewind existed, hardware or not.
+    let mut seek_before_decode = seek_before_decode;
+    if std::mem::take(&mut session.rewind_pending) {
+        // Consumed here so a failed rewind cannot leave the flag set.
+        let target_us = request
+            .position_ms
+            .saturating_mul(1_000)
+            .min(i64::MAX as u64) as i64;
+        #[cfg(test)]
+        let forced_failure = FORCE_REWIND_SEEK_FAILURE.with(Cell::get);
+        #[cfg(not(test))]
+        let forced_failure = false;
+        let failed = forced_failure || session.input.seek(target_us, ..).is_err();
+        session.stop.check()?;
+        if failed {
+            return Err(decode_message(
+                request,
+                "rewinding the open session failed; re-opening the media",
+            ));
+        }
+        session.decoder.flush();
+        seek_before_decode = false;
+    }
+    decode_libav_session_frame_inner(
+        request,
+        session,
+        seek_before_decode,
+        terminal_frame,
+        hardware_frames,
+    )
+    .and_then(|frame| {
+        session.stop.check()?;
+        Ok(frame)
+    })
+    .map_err(|error| {
+        if session.stop.is_cancelled() {
+            VideoDecodeError::Cancelled
+        } else {
+            hardware::classify(request, hardware, error)
+        }
+    })
+}
+
+#[cfg(feature = "libav")]
+fn decode_libav_session_frame_inner(
+    request: &VideoFrameRequest,
+    session: &mut LibavDecodeSession,
+    seek_before_decode: bool,
+    terminal_frame: Option<&Arc<VideoFrame>>,
+    hardware_frames: &mut u64,
+) -> Result<Arc<VideoFrame>, VideoDecodeError> {
+    session.stop.check()?;
+    let target_offset_us = request
+        .position_ms
+        .saturating_mul(1_000)
+        .min(i64::MAX as u64) as i64;
+    let target_us = target_offset_us;
+    if seek_before_decode && request.position_ms > 0 && session.input.seek(target_us, ..).is_ok() {
+        session.decoder.flush();
+    }
+    session.stop.check()?;
+    let mut candidate = None;
+
+    let received = receive_target_frame(
+        request,
+        &mut session.decoder,
+        session.hardware,
+        hardware_frames,
+        session.time_base,
+        session.timestamp_origin,
+        &mut candidate,
+        &session.stop,
+        &mut session.last_key_frame,
+        &mut session.rgba_spare,
+    )?;
+    session.decoder_drained = received.decoder_drained;
+    if let Some(frame) = received.frame {
+        session.last_request_ms = Some(request.position_ms);
+        return Ok(Arc::new(frame));
+    }
+    if session.decoder_drained {
+        let frame = finish_decoded_candidate_with_spare(
+            request,
+            candidate,
+            terminal_frame,
+            session.hardware,
+            hardware_frames,
+            &session.stop,
+            &mut session.rgba_spare,
+        )?;
+        session.last_request_ms = Some(request.position_ms);
+        return Ok(frame);
+    }
+
+    loop {
+        session.stop.check()?;
+        // ffmpeg-next's packets() silently retries every non-EOF read error,
+        // including AVERROR_EXIT from an interrupt. Read explicitly so a stop
+        // cannot spin forever inside its iterator.
+        let mut packet = ffmpeg::Packet::empty();
+        let read = packet.read(&mut session.input);
+        #[cfg(test)]
+        cancellation_tests::cancel_after_packet_read(&session.stop);
+        session.stop.check()?;
+        match read {
+            Ok(()) => {}
+            Err(ffmpeg::Error::Eof) => break,
+            Err(error) => return Err(decode_error(request, error)),
+        }
+        if packet.stream() != session.stream_index {
+            continue;
+        }
+        session
+            .decoder
+            .send_packet(&packet)
+            .map_err(|error| decode_error(request, error))?;
+        let received = receive_target_frame(
+            request,
+            &mut session.decoder,
+            session.hardware,
+            hardware_frames,
+            session.time_base,
+            session.timestamp_origin,
+            &mut candidate,
+            &session.stop,
+            &mut session.last_key_frame,
+            &mut session.rgba_spare,
+        )?;
+        session.decoder_drained = received.decoder_drained;
+        if let Some(frame) = received.frame {
+            session.last_request_ms = Some(request.position_ms);
+            return Ok(Arc::new(frame));
+        }
+    }
+    if !session.eof_sent {
+        session
+            .decoder
+            .send_eof()
+            .map_err(|error| decode_error(request, error))?;
+        session.eof_sent = true;
+    }
+    let received = receive_target_frame(
+        request,
+        &mut session.decoder,
+        session.hardware,
+        hardware_frames,
+        session.time_base,
+        session.timestamp_origin,
+        &mut candidate,
+        &session.stop,
+        &mut session.last_key_frame,
+        &mut session.rgba_spare,
+    )?;
+    session.decoder_drained = received.decoder_drained;
+    if let Some(frame) = received.frame {
+        session.last_request_ms = Some(request.position_ms);
+        return Ok(Arc::new(frame));
+    }
+    let frame = finish_decoded_candidate_with_spare(
+        request,
+        candidate,
+        terminal_frame,
+        session.hardware,
+        hardware_frames,
+        &session.stop,
+        &mut session.rgba_spare,
+    )?;
+    session.last_request_ms = Some(request.position_ms);
+    Ok(frame)
+}
+
+#[cfg(feature = "libav")]
+struct DecodedCandidate {
+    frame: ffmpeg::util::frame::video::Video,
+    pts_ms: u64,
+}
+
+#[cfg(feature = "libav")]
+fn project_decoded_frame(
+    request: &VideoFrameRequest,
+    decoded: &ffmpeg::util::frame::video::Video,
+    pts_ms: u64,
+    hardware: bool,
+    hardware_frames: &mut u64,
+    stop: &StopState,
+    rgba_spare: &mut Option<ReturnedRgba>,
+) -> Result<VideoFrame, VideoDecodeError> {
+    stop.check()?;
+    let transferred = hardware::transfer(request, hardware, decoded)?;
+    stop.check()?;
+    if hardware {
+        *hardware_frames = hardware_frames.saturating_add(1);
+    }
+    let source = transferred.as_ref().unwrap_or(decoded);
+    let mut scaler =
+        acquire_cached_libav_scaler(request, source.format(), source.width(), source.height())?;
+    // Convert straight into the frame's own buffer when its packed rows have
+    // an FFmpeg frame's alignment (every output-sized geometry); otherwise
+    // into an FFmpeg frame, then copied row by row as before.
+    if scaler.packed_rows_aligned() {
+        #[cfg(feature = "qa-native-frame-timing")]
+        let alloc_work = demand_timing::work_phase(demand_timing::DecoderWorkPhase::AllocCopy);
+        let mut data = rgba_reuse::destination(
+            rgba_spare,
+            (request.width, request.height),
+            rgba_frame_len(request)?,
+        );
+        #[cfg(feature = "qa-native-frame-timing")]
+        drop(alloc_work);
+        if scaler.writes_in_place(&data) {
+            #[cfg(feature = "qa-native-frame-timing")]
+            let scale_work = demand_timing::work_phase(demand_timing::DecoderWorkPhase::Swscale);
+            scaler
+                .run_into(source, &mut data)
+                .map_err(|error| decode_error(request, error))?;
+            #[cfg(feature = "qa-native-frame-timing")]
+            drop(scale_work);
+            stop.check()?;
+            return Ok(rgba_video_frame(request, pts_ms, data));
+        }
+        // Keep the same initialized allocation for the row-copy fallback.
+        *rgba_spare = Some(ReturnedRgba::from_buffer(
+            data,
+            (request.width, request.height),
+        ));
+    }
+    #[cfg(feature = "qa-native-frame-timing")]
+    let scale_work = demand_timing::work_phase(demand_timing::DecoderWorkPhase::Swscale);
+    let mut rgba = ffmpeg::util::frame::video::Video::empty();
+    scaler
+        .run(source, &mut rgba)
+        .map_err(|error| decode_error(request, error))?;
+    #[cfg(feature = "qa-native-frame-timing")]
+    drop(scale_work);
+    stop.check()?;
+    copy_rgba_frame_with_stop(request, &rgba, pts_ms, stop, rgba_spare)
+}
+
+#[cfg(all(feature = "libav", test))]
+fn finish_decoded_candidate(
+    request: &VideoFrameRequest,
+    candidate: Option<DecodedCandidate>,
+    terminal_frame: Option<&VideoFrame>,
+    hardware: bool,
+    hardware_frames: &mut u64,
+) -> Result<VideoFrame, VideoDecodeError> {
+    let terminal_frame = terminal_frame.cloned().map(Arc::new);
+    finish_decoded_candidate_with_spare(
+        request,
+        candidate,
+        terminal_frame.as_ref(),
+        hardware,
+        hardware_frames,
+        &StopState::new(None),
+        &mut None,
+    )
+    .map(Arc::unwrap_or_clone)
+}
+
+/// Existing EOF ownership tests use the no-spare form of the same policy.
+#[cfg(all(feature = "libav", test))]
+fn finish_decoded_candidate_with_stop(
+    request: &VideoFrameRequest,
+    candidate: Option<DecodedCandidate>,
+    terminal_frame: Option<&Arc<VideoFrame>>,
+    hardware: bool,
+    hardware_frames: &mut u64,
+    stop: &StopState,
+) -> Result<Arc<VideoFrame>, VideoDecodeError> {
+    finish_decoded_candidate_with_spare(
+        request,
+        candidate,
+        terminal_frame,
+        hardware,
+        hardware_frames,
+        stop,
+        &mut None,
+    )
+}
+
+#[cfg(feature = "libav")]
+fn finish_decoded_candidate_with_spare(
+    request: &VideoFrameRequest,
+    candidate: Option<DecodedCandidate>,
+    terminal_frame: Option<&Arc<VideoFrame>>,
+    hardware: bool,
+    hardware_frames: &mut u64,
+    stop: &StopState,
+    rgba_spare: &mut Option<ReturnedRgba>,
+) -> Result<Arc<VideoFrame>, VideoDecodeError> {
+    stop.check()?;
+    match candidate {
+        Some(candidate) => project_decoded_frame(
+            request,
+            &candidate.frame,
+            candidate.pts_ms,
+            hardware,
+            hardware_frames,
+            stop,
+            rgba_spare,
+        )
+        .map(Arc::new),
+        // EOF reuses the exact immutable frame. In particular, a look-ahead
+        // run retains this result while predecoding the next pass; copying
+        // its pixels here added one full output frame per input every wrap.
+        None => terminal_frame
+            .cloned()
+            .ok_or_else(|| decode_message(request, "decoder produced no video frame")),
+    }
+}
+
+#[cfg(feature = "libav")]
+fn receive_target_frame(
+    request: &VideoFrameRequest,
+    decoder: &mut ffmpeg_next::decoder::Video,
+    hardware: bool,
+    hardware_frames: &mut u64,
+    time_base: ffmpeg_next::Rational,
+    timestamp_origin: i64,
+    candidate: &mut Option<DecodedCandidate>,
+    stop: &StopState,
+    key_frame: &mut bool,
+    rgba_spare: &mut Option<ReturnedRgba>,
+) -> Result<LibavReceiveResult, VideoDecodeError> {
+    use ffmpeg_next::error::EAGAIN;
+    use ffmpeg_next::util::frame::video::Video;
+
+    let mut decoded = Video::empty();
+    loop {
+        stop.check()?;
+        let received = decoder.receive_frame(&mut decoded);
+        stop.check()?;
+        match received {
+            Ok(()) => {
+                let pts_ms = match decoded.timestamp().and_then(|timestamp| {
+                    normalized_timestamp_ms(timestamp, timestamp_origin, time_base)
+                }) {
+                    Some(pts_ms) if pts_ms >= 0 => pts_ms as u64,
+                    Some(_) => continue,
+                    None => request.position_ms,
+                };
+                // Even discarded frames must honor the selected HW format.
+                if hardware && decoded.format() != ffmpeg::format::Pixel::D3D11 {
+                    return Err(hardware::classify(
+                        request,
+                        true,
+                        decode_message(request, "decoder returned a non-D3D11 frame"),
+                    ));
+                }
+                if pts_ms >= request.position_ms {
+                    *key_frame = decoded.is_key();
+                    let frame = project_decoded_frame(
+                        request,
+                        &decoded,
+                        pts_ms,
+                        hardware,
+                        hardware_frames,
+                        stop,
+                        rgba_spare,
+                    )?;
+                    return Ok(LibavReceiveResult {
+                        frame: Some(frame),
+                        decoder_drained: false,
+                    });
+                }
+                // Keep only the latest decoder-owned frame as the EOF fallback.
+                // Moving its AVFrame retains one surface, not a CPU pixel copy;
+                // replaced candidates are released on each iteration.
+                *candidate = Some(DecodedCandidate {
+                    frame: std::mem::replace(&mut decoded, Video::empty()),
+                    pts_ms,
+                });
+            }
+            Err(ffmpeg_next::Error::Eof) => {
+                return Ok(LibavReceiveResult {
+                    frame: None,
+                    decoder_drained: true,
+                });
+            }
+            Err(ffmpeg_next::Error::Other { errno }) if errno == EAGAIN => {
+                return Ok(LibavReceiveResult {
+                    frame: None,
+                    decoder_drained: false,
+                });
+            }
+            Err(error) => return Err(decode_error(request, error)),
+        }
+    }
+}
+
+#[cfg(feature = "libav")]
+#[cfg(test)]
+fn copy_rgba_frame(
+    request: &VideoFrameRequest,
+    frame: &ffmpeg_next::util::frame::video::Video,
+    pts_ms: u64,
+) -> Result<VideoFrame, VideoDecodeError> {
+    copy_rgba_frame_with_stop(request, frame, pts_ms, &StopState::new(None), &mut None)
+}
+
+#[cfg(feature = "libav")]
+fn copy_rgba_frame_with_stop(
+    request: &VideoFrameRequest,
+    frame: &ffmpeg_next::util::frame::video::Video,
+    pts_ms: u64,
+    stop: &StopState,
+    rgba_spare: &mut Option<ReturnedRgba>,
+) -> Result<VideoFrame, VideoDecodeError> {
+    stop.check()?;
+    #[cfg(feature = "qa-native-frame-timing")]
+    let _copy_work = demand_timing::work_phase(demand_timing::DecoderWorkPhase::AllocCopy);
+    #[cfg(test)]
+    LIBAV_RGBA_ROW_COPIES.with(|copies| copies.set(copies.get() + 1));
+    let row_bytes = (request.width as usize)
+        .checked_mul(4)
+        .ok_or_else(|| decode_message(request, "RGBA row size overflow"))?;
+    let data_len = rgba_frame_len(request)?;
+    let source = frame.data(0);
+    let stride = frame.stride(0);
+    let mut data = rgba_reuse::destination(rgba_spare, (request.width, request.height), data_len);
+    for row in 0..request.height as usize {
+        stop.check()?;
+        let source_start = row
+            .checked_mul(stride)
+            .ok_or_else(|| decode_message(request, "RGBA source offset overflow"))?;
+        let source_end = source_start
+            .checked_add(row_bytes)
+            .ok_or_else(|| decode_message(request, "RGBA source row overflow"))?;
+        let destination_start = row * row_bytes;
+        let source_row = source
+            .get(source_start..source_end)
+            .ok_or_else(|| decode_message(request, "RGBA source stride is too small"))?;
+        data[destination_start..destination_start + row_bytes].copy_from_slice(source_row);
+    }
+    Ok(rgba_video_frame(request, pts_ms, data))
+}
+
+#[cfg(feature = "libav")]
+fn rgba_frame_len(request: &VideoFrameRequest) -> Result<usize, VideoDecodeError> {
+    (request.width as usize)
+        .checked_mul(4)
+        .and_then(|row| row.checked_mul(request.height as usize))
+        .ok_or_else(|| decode_message(request, "RGBA frame size overflow"))
+}
+
+#[cfg(feature = "libav")]
+fn rgba_video_frame(request: &VideoFrameRequest, pts_ms: u64, data: Vec<u8>) -> VideoFrame {
+    let duration_ms = request
+        .source
+        .metadata
+        .and_then(|metadata| metadata.frame_rate)
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
+        .map(|rate| (1_000.0 / rate).round().max(1.0) as u64)
+        .unwrap_or(33);
+    VideoFrame {
+        layer_id: request.layer_id,
+        width: request.width,
+        height: request.height,
+        pts_ms,
+        duration_ms,
+        format: VideoPixelFormat::Rgba8,
+        data,
+    }
+}
+
+#[cfg(feature = "libav")]
+fn normalized_timestamp_ms(
+    timestamp: i64,
+    timestamp_origin: i64,
+    time_base: ffmpeg_next::Rational,
+) -> Option<i64> {
+    let normalized = timestamp.checked_sub(timestamp_origin)?;
+    rescale_timestamp(normalized, time_base, 1_000)
+}
+
+#[cfg(feature = "libav")]
+fn rescale_timestamp(
+    timestamp: i64,
+    time_base: ffmpeg_next::Rational,
+    units_per_second: i128,
+) -> Option<i64> {
+    let numerator = i128::from(time_base.numerator());
+    let denominator = i128::from(time_base.denominator());
+    if numerator <= 0 || denominator <= 0 {
+        return None;
+    }
+    let value = i128::from(timestamp)
+        .checked_mul(numerator)?
+        .checked_mul(units_per_second)?
+        .checked_div_euclid(denominator)?;
+    i64::try_from(value).ok()
+}
+
+#[cfg(feature = "libav")]
+fn decode_error(request: &VideoFrameRequest, error: impl std::fmt::Display) -> VideoDecodeError {
+    decode_message(request, error.to_string())
+}
+
+#[cfg(feature = "libav")]
+fn decode_message(request: &VideoFrameRequest, message: impl Into<String>) -> VideoDecodeError {
+    VideoDecodeError::Decode {
+        layer_id: request.layer_id,
+        label: request.label.clone(),
+        message: message.into(),
+    }
+}
+
+#[cfg(all(test, feature = "libav"))]
+thread_local! {
+    /// Test-only injected failure of the in-place rewind seek.
+    static FORCE_REWIND_SEEK_FAILURE: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+mod tests {
+    use protocol::{VideoSourceKind, VideoSourceSummary};
+
+    use super::*;
+    #[cfg(feature = "libav")]
+    use crate::{FfmpegCliFrameDecoder, PreferredVideoFrameDecoder, VideoDecoderDiagnostics};
+
+    fn request() -> VideoFrameRequest {
+        VideoFrameRequest {
+            layer_id: 1,
+            label: "General codec".to_string(),
+            source: VideoSourceSummary {
+                kind: VideoSourceKind::File,
+                path: Some("clip.mp4".to_string()),
+                name: None,
+                codec: Some("h264".to_string()),
+                metadata: None,
+            },
+            position_ms: 0,
+            width: 16,
+            height: 16,
+        }
+    }
+
+    fn signature(token: u64) -> StillImageSignature {
+        StillImageSignature {
+            len: Some(token),
+            modified: None,
+        }
+    }
+
+    fn cache_entry(
+        request: &VideoFrameRequest,
+        path: impl Into<PathBuf>,
+        signature: StillImageSignature,
+        token: u8,
+    ) -> LibavFrameCacheEntry {
+        LibavFrameCacheEntry {
+            key: protocol::VideoRenderInputKey::LEGACY,
+            layer_id: request.layer_id,
+            path: path.into(),
+            width: request.width,
+            height: request.height,
+            position_ms: request.position_ms,
+            signature,
+            frame: Arc::new(VideoFrame {
+                layer_id: request.layer_id,
+                width: request.width,
+                height: request.height,
+                pts_ms: request.position_ms,
+                duration_ms: 33,
+                format: crate::VideoPixelFormat::Rgba8,
+                data: vec![token],
+            }),
+            #[cfg(feature = "libav")]
+            rgba_returns: Default::default(),
+        }
+    }
+
+    #[cfg(feature = "libav")]
+    fn assert_seek_parity(actual: &VideoFrame, expected: &VideoFrame, context: &str) {
+        assert_eq!(actual.layer_id, expected.layer_id, "{context}: layer");
+        assert_eq!(actual.width, expected.width, "{context}: width");
+        assert_eq!(actual.height, expected.height, "{context}: height");
+        assert_eq!(actual.pts_ms, expected.pts_ms, "{context}: PTS");
+        assert_eq!(
+            actual.duration_ms, expected.duration_ms,
+            "{context}: duration"
+        );
+        assert_eq!(actual.format, expected.format, "{context}: format");
+        assert_eq!(
+            actual.data.len(),
+            expected.data.len(),
+            "{context}: data length"
+        );
+        let mut max_rgb_delta = 0_u8;
+        let mut rgb_delta_total = 0_u64;
+        let mut changed_rgb_bytes = 0_usize;
+        for (index, (actual, expected)) in actual.data.iter().zip(&expected.data).enumerate() {
+            let delta = actual.abs_diff(*expected);
+            if index % 4 == 3 {
+                assert_eq!(delta, 0, "{context}: alpha differs at byte {index}");
+            } else {
+                max_rgb_delta = max_rgb_delta.max(delta);
+                rgb_delta_total += u64::from(delta);
+                changed_rgb_bytes += usize::from(delta > 0);
+            }
+        }
+        let rgb_bytes = actual.data.len() / 4 * 3;
+        let mean_rgb_delta = rgb_delta_total as f64 / rgb_bytes as f64;
+        assert!(
+            max_rgb_delta <= 2 && mean_rgb_delta <= 0.1 && changed_rgb_bytes * 20 <= rgb_bytes,
+            "{context}: max RGB delta {max_rgb_delta}, mean {mean_rgb_delta:.4}, changed {changed_rgb_bytes}/{rgb_bytes}"
+        );
+    }
+
+    #[cfg(feature = "libav")]
+    fn assert_rgba_reference_parity(actual: &VideoFrame, expected: &[u8], context: &str) {
+        assert_eq!(actual.data.len(), expected.len(), "{context}: data length");
+        let mut max_rgb_delta = 0_u8;
+        let mut rgb_delta_total = 0_u64;
+        let mut changed_rgb_bytes = 0_usize;
+        for (index, (actual, expected)) in actual.data.iter().zip(expected).enumerate() {
+            let delta = actual.abs_diff(*expected);
+            if index % 4 == 3 {
+                assert_eq!(delta, 0, "{context}: alpha differs at byte {index}");
+            } else {
+                max_rgb_delta = max_rgb_delta.max(delta);
+                rgb_delta_total += u64::from(delta);
+                changed_rgb_bytes += usize::from(delta > 0);
+            }
+        }
+        let rgb_bytes = actual.data.len() / 4 * 3;
+        let mean_rgb_delta = rgb_delta_total as f64 / rgb_bytes as f64;
+        assert!(
+            max_rgb_delta <= 2 && mean_rgb_delta <= 0.1 && changed_rgb_bytes * 20 <= rgb_bytes,
+            "{context}: reference max RGB delta {max_rgb_delta}, mean {mean_rgb_delta:.4}, changed {changed_rgb_bytes}/{rgb_bytes}"
+        );
+    }
+
+    #[test]
+    fn cache_replaces_a_layers_entry_when_request_identity_changes() {
+        let mut decoder = LibavFrameDecoder::software_for_tests();
+        let mut request = request();
+        let mut path = PathBuf::from("first.mp4");
+        let mut file_signature = signature(1);
+
+        decoder.replace_layer_cache_entry(cache_entry(&request, &path, file_signature.clone(), 1));
+        assert_eq!(decoder.cache_len(), 1);
+        assert_eq!(
+            decoder
+                .cached_frame(
+                    protocol::VideoRenderInputKey::LEGACY,
+                    &request,
+                    &path,
+                    &file_signature
+                )
+                .unwrap()
+                .data,
+            vec![1]
+        );
+
+        request.position_ms = 33;
+        assert!(decoder
+            .cached_frame(
+                protocol::VideoRenderInputKey::LEGACY,
+                &request,
+                &path,
+                &file_signature
+            )
+            .is_none());
+        decoder.replace_layer_cache_entry(cache_entry(&request, &path, file_signature.clone(), 2));
+        assert_eq!(decoder.cache_len(), 1);
+
+        request.width = 32;
+        assert!(decoder
+            .cached_frame(
+                protocol::VideoRenderInputKey::LEGACY,
+                &request,
+                &path,
+                &file_signature
+            )
+            .is_none());
+        decoder.replace_layer_cache_entry(cache_entry(&request, &path, file_signature.clone(), 3));
+        assert_eq!(decoder.cache_len(), 1);
+
+        path = PathBuf::from("second.mp4");
+        assert!(decoder
+            .cached_frame(
+                protocol::VideoRenderInputKey::LEGACY,
+                &request,
+                &path,
+                &file_signature
+            )
+            .is_none());
+        decoder.replace_layer_cache_entry(cache_entry(&request, &path, file_signature.clone(), 4));
+        assert_eq!(decoder.cache_len(), 1);
+
+        file_signature = signature(2);
+        assert!(decoder
+            .cached_frame(
+                protocol::VideoRenderInputKey::LEGACY,
+                &request,
+                &path,
+                &file_signature
+            )
+            .is_none());
+        decoder.replace_layer_cache_entry(cache_entry(&request, &path, file_signature.clone(), 5));
+        assert_eq!(decoder.cache_len(), 1);
+        assert_eq!(decoder.entries[0].position_ms, 33);
+        assert_eq!(decoder.entries[0].width, 32);
+        assert_eq!(decoder.entries[0].path, path);
+        assert_eq!(decoder.entries[0].signature, file_signature);
+        assert_eq!(decoder.entries[0].frame.data, vec![5]);
+        assert_eq!(
+            decoder
+                .cached_frame(
+                    protocol::VideoRenderInputKey::LEGACY,
+                    &request,
+                    &path,
+                    &file_signature
+                )
+                .unwrap()
+                .data,
+            vec![5]
+        );
+    }
+
+    #[test]
+    fn retain_layers_prunes_the_bounded_layer_cache() {
+        let mut decoder = LibavFrameDecoder::software_for_tests();
+        let first = request();
+        let mut second = request();
+        second.layer_id = 2;
+        decoder.replace_layer_cache_entry(cache_entry(&first, "first.mp4", signature(1), 1));
+        decoder.replace_layer_cache_entry(cache_entry(&second, "second.mp4", signature(2), 2));
+        assert_eq!(decoder.cache_len(), 2);
+
+        decoder.retain_layers(&[second.layer_id]);
+
+        assert_eq!(decoder.cache_len(), 1);
+        assert_eq!(decoder.entries[0].layer_id, second.layer_id);
+        assert_eq!(decoder.entries[0].frame.data, vec![2]);
+    }
+
+    #[cfg(feature = "libav")]
+    #[test]
+    fn session_decision_reuses_only_cached_or_fully_drained_frames() {
+        assert_eq!(
+            session_decision(None, None, false, false, 0),
+            LibavSessionDecision::Reopen
+        );
+        assert_eq!(
+            session_decision(Some(100), Some(133), true, false, 100),
+            LibavSessionDecision::ReuseFrame
+        );
+        assert_eq!(
+            session_decision(Some(100), Some(133), true, false, 120),
+            LibavSessionDecision::ReuseFrame
+        );
+        assert_eq!(
+            session_decision(Some(100), Some(100), true, false, 133),
+            LibavSessionDecision::Continue
+        );
+        assert_eq!(
+            session_decision(Some(100), Some(100), true, true, 133),
+            LibavSessionDecision::ReuseFrame
+        );
+        assert_eq!(
+            session_decision(Some(100), Some(100), true, false, 1_101),
+            LibavSessionDecision::Reopen
+        );
+        assert_eq!(
+            session_decision(Some(100), Some(100), true, false, 99),
+            LibavSessionDecision::Reopen
+        );
+        assert_eq!(
+            session_decision(Some(100), Some(133), false, true, 120),
+            LibavSessionDecision::Reopen
+        );
+    }
+
+    #[cfg(feature = "libav")]
+    #[test]
+    fn persistent_decoder_remains_send_without_storing_a_scaler() {
+        fn assert_send<T: Send>() {}
+        assert_send::<LibavFrameDecoder>();
+    }
+
+    #[cfg(feature = "libav")]
+    #[test]
+    fn fixed_video_decode_reuses_one_bounded_scaler_at_frame_cadence() {
+        use std::process::Command;
+
+        LIBAV_SCALER_CACHE.with(|cache| cache.borrow_mut().clear());
+        LIBAV_SCALER_CREATION_COUNT.with(|count| count.set(0));
+        let ffmpeg = std::env::var_os("SYNDOCAL_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
+        let path = std::env::temp_dir().join(format!(
+            "syndocal-libav-scaler-reuse-{}.mp4",
+            std::process::id()
+        ));
+        let generated = Command::new(&ffmpeg)
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=32x18:rate=30:duration=1",
+                "-c:v",
+                "mpeg4",
+                "-pix_fmt",
+                "yuv420p",
+                "-y",
+            ])
+            .arg(&path)
+            .output()
+            .expect("FFmpeg fixed-video fixture generator must be available");
+        assert!(
+            generated.status.success(),
+            "fixed-video fixture generation failed: {}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+
+        let mut request = request();
+        request.source.path = Some(path.to_string_lossy().into_owned());
+        request.source.codec = Some("mpeg4".to_string());
+        request.source.metadata = Some(protocol::VideoMediaMetadata {
+            duration_ms: Some(1_000),
+            width: Some(32),
+            height: Some(18),
+            frame_rate: Some(30.0),
+            has_audio: false,
+        });
+        request.width = 64;
+        request.height = 36;
+
+        let mut decoder = LibavFrameDecoder::software_for_tests();
+        for target_ms in [0, 33, 66, 99, 0, 33] {
+            request.position_ms = target_ms;
+            let frame = decoder
+                .decode_frame(&request)
+                .unwrap()
+                .expect("fixed-video fixture must decode");
+            assert_eq!((frame.width, frame.height), (64, 36));
+            assert_eq!(frame.format, VideoPixelFormat::Rgba8);
+            assert_eq!(
+                decoder.decode_frame(&request).unwrap().unwrap(),
+                frame,
+                "same request should reuse the cached frame at {target_ms}ms"
+            );
+        }
+
+        let scaler_entries = LIBAV_SCALER_CACHE.with(|cache| cache.borrow().len());
+        let scaler_creations = LIBAV_SCALER_CREATION_COUNT.with(Cell::get);
+        assert_eq!(
+            scaler_entries, 1,
+            "one source/target conversion should keep one reusable scaler"
+        );
+        assert_eq!(
+            scaler_creations, 1,
+            "repeated frame requests should create the scaler only once"
+        );
+        assert_eq!(decoder.sessions.len(), 1);
+        // The backward jump (loop wrap) rewinds the open session in place.
+        assert_eq!(decoder.session_counters.opens, 1);
+        assert_eq!(decoder.session_counters.resets, 1);
+        assert!(decoder.session_counters.sequential_continues > 0);
+        assert!(decoder.session_counters.frame_reuses >= 6);
+
+        LIBAV_SCALER_CACHE.with(|cache| cache.borrow_mut().clear());
+        LIBAV_SCALER_CREATION_COUNT.with(|count| count.set(0));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "libav")]
+    #[test]
+    fn failed_scaler_run_discards_context_before_recovery() {
+        use ffmpeg::format::Pixel;
+        use ffmpeg::util::frame::video::Video;
+
+        LIBAV_SCALER_CACHE.with(|cache| cache.borrow_mut().clear());
+        LIBAV_SCALER_CREATION_COUNT.with(|count| count.set(0));
+
+        let request = request();
+        let mut failed_lease =
+            acquire_cached_libav_scaler(&request, Pixel::YUV420P, 16, 16).unwrap();
+        let invalid_source = Video::new(Pixel::RGBA, 16, 16);
+        let mut invalid_target = Video::empty();
+        assert!(
+            failed_lease
+                .run(&invalid_source, &mut invalid_target)
+                .is_err(),
+            "a source-format change must fail the scaler run"
+        );
+        drop(failed_lease);
+        assert_eq!(
+            LIBAV_SCALER_CACHE.with(|cache| cache.borrow().len()),
+            0,
+            "a failed native run must not poison the reusable cache"
+        );
+        assert_eq!(LIBAV_SCALER_CREATION_COUNT.with(Cell::get), 1);
+
+        let mut recovered_lease =
+            acquire_cached_libav_scaler(&request, Pixel::YUV420P, 16, 16).unwrap();
+        assert_eq!(
+            LIBAV_SCALER_CREATION_COUNT.with(Cell::get),
+            2,
+            "recovery must create a fresh context rather than reuse the failed one"
+        );
+        let valid_source = Video::new(Pixel::YUV420P, 16, 16);
+        let mut valid_target = Video::empty();
+        assert!(recovered_lease
+            .run(&valid_source, &mut valid_target)
+            .is_ok());
+        drop(recovered_lease);
+        assert_eq!(
+            LIBAV_SCALER_CACHE.with(|cache| cache.borrow().len()),
+            1,
+            "a successful replacement context remains reusable"
+        );
+
+        LIBAV_SCALER_CACHE.with(|cache| cache.borrow_mut().clear());
+        LIBAV_SCALER_CREATION_COUNT.with(|count| count.set(0));
+    }
+
+    /// C4R12: an output whose packed rows have FFmpeg-frame alignment (every
+    /// output-sized geometry) is converted straight into the frame's buffer;
+    /// only an unaligned width still goes through an FFmpeg frame and a row
+    /// copy. Both produce the same pixels as the previous path
+    /// (`scaler::tests` proves bit-exact parity).
+    #[cfg(feature = "libav")]
+    #[test]
+    fn decoded_frames_are_converted_in_place_without_an_rgba_row_copy() {
+        use std::process::Command;
+
+        LIBAV_SCALER_CACHE.with(|cache| cache.borrow_mut().clear());
+        let ffmpeg = std::env::var_os("SYNDOCAL_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
+        let path = std::env::temp_dir().join(format!(
+            "syndocal-libav-in-place-{}.mp4",
+            std::process::id()
+        ));
+        let generated = Command::new(&ffmpeg)
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=32x18:rate=30:duration=1",
+                "-c:v",
+                "mpeg4",
+                "-pix_fmt",
+                "yuv420p",
+                "-y",
+            ])
+            .arg(&path)
+            .output()
+            .expect("FFmpeg in-place fixture generator must be available");
+        assert!(
+            generated.status.success(),
+            "in-place fixture generation failed: {}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let mut request = request();
+        request.source.path = Some(path.to_string_lossy().into_owned());
+        request.source.codec = Some("mpeg4".to_string());
+        request.source.metadata = Some(protocol::VideoMediaMetadata {
+            duration_ms: Some(1_000),
+            width: Some(32),
+            height: Some(18),
+            frame_rate: Some(30.0),
+            has_audio: false,
+        });
+        for ((width, height), in_place) in [((64, 36), true), ((66, 38), false)] {
+            request.width = width;
+            request.height = height;
+            let mut decoder = LibavFrameDecoder::software_for_tests();
+            LIBAV_RGBA_ROW_COPIES.with(|copies| copies.set(0));
+            for target_ms in [0, 34, 67, 100] {
+                request.position_ms = target_ms;
+                let frame = decoder
+                    .decode_frame(&request)
+                    .unwrap()
+                    .expect("in-place fixture must decode");
+                assert_eq!((frame.width, frame.height), (width, height));
+                assert_eq!(frame.data.len(), width as usize * height as usize * 4);
+                assert!(frame.data.chunks_exact(4).all(|pixel| pixel[3] == 255));
+            }
+            let copies = LIBAV_RGBA_ROW_COPIES.with(Cell::get);
+            assert_eq!(
+                copies == 0,
+                in_place,
+                "{width}x{height}: {copies} RGBA row copies"
+            );
+        }
+        LIBAV_SCALER_CACHE.with(|cache| cache.borrow_mut().clear());
+        LIBAV_SCALER_CREATION_COUNT.with(|count| count.set(0));
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// C4R12: the scaler cache is thread-local and freed in TLS destructors.
+    /// A thread outside the decode pool that converted an output-sized frame
+    /// must still exit: freeing a slice-threaded context there would join its
+    /// workers under the Windows loader lock and never return. Pool workers,
+    /// which live for the process, are the only owners of threaded contexts.
+    #[cfg(feature = "libav")]
+    #[test]
+    fn a_thread_that_converted_an_output_sized_frame_exits_promptly() {
+        use ffmpeg::format::Pixel;
+        use ffmpeg::util::frame::video::Video;
+
+        let converter = std::thread::spawn(|| {
+            let mut request = request();
+            request.width = 2560;
+            request.height = 1600;
+            let source = Video::new(Pixel::NV12, 1920, 1080);
+            let mut lease = acquire_cached_libav_scaler(&request, Pixel::NV12, 1920, 1080).unwrap();
+            let mut data = vec![0; 2560 * 1600 * 4];
+            assert!(lease.writes_in_place(&data));
+            lease.run_into(&source, &mut data).unwrap();
+            drop(lease);
+            // The scaler stays cached until this thread's TLS destructor.
+            LIBAV_SCALER_CACHE.with(|cache| cache.borrow().len())
+        });
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(converter.join());
+        });
+        let joined = receiver
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("a converting thread did not exit (scaler freed under the loader lock)");
+        assert_eq!(joined.unwrap(), 1);
+
+        let pooled = libav_decode_pool().expect("decode pool").install(|| {
+            let mut request = request();
+            request.width = 2560;
+            request.height = 1600;
+            let lease = acquire_cached_libav_scaler(&request, Pixel::NV12, 1920, 1080).unwrap();
+            let threads = lease.scaler.as_ref().unwrap().threads();
+            drop(lease);
+            LIBAV_SCALER_CACHE.with(|cache| cache.borrow_mut().clear());
+            threads
+        });
+        assert_eq!(pooled, i64::from(scaler::SLICE_THREADS));
+    }
+
+    #[cfg(feature = "libav")]
+    #[test]
+    fn scaler_cache_evicts_old_geometry_with_bounded_capacity() {
+        use ffmpeg::format::Pixel;
+
+        LIBAV_SCALER_CACHE.with(|cache| cache.borrow_mut().clear());
+        LIBAV_SCALER_CREATION_COUNT.with(|count| count.set(0));
+
+        let base_request = request();
+        for width in 16..(16 + LIBAV_SCALER_CACHE_CAPACITY as u32 + 1) {
+            let mut request = base_request.clone();
+            request.width = width;
+            let lease = acquire_cached_libav_scaler(&request, Pixel::YUV420P, 16, 16).unwrap();
+            drop(lease);
+        }
+        assert_eq!(
+            LIBAV_SCALER_CACHE.with(|cache| cache.borrow().len()),
+            LIBAV_SCALER_CACHE_CAPACITY
+        );
+        assert_eq!(
+            LIBAV_SCALER_CREATION_COUNT.with(Cell::get),
+            LIBAV_SCALER_CACHE_CAPACITY + 1
+        );
+
+        let mut retained_request = base_request.clone();
+        retained_request.width = 16 + LIBAV_SCALER_CACHE_CAPACITY as u32;
+        let retained =
+            acquire_cached_libav_scaler(&retained_request, Pixel::YUV420P, 16, 16).unwrap();
+        drop(retained);
+        assert_eq!(
+            LIBAV_SCALER_CREATION_COUNT.with(Cell::get),
+            LIBAV_SCALER_CACHE_CAPACITY + 1,
+            "the newest geometry should remain cached"
+        );
+
+        let evicted = acquire_cached_libav_scaler(&base_request, Pixel::YUV420P, 16, 16).unwrap();
+        drop(evicted);
+        assert_eq!(
+            LIBAV_SCALER_CREATION_COUNT.with(Cell::get),
+            LIBAV_SCALER_CACHE_CAPACITY + 2,
+            "the oldest geometry should be recreated after eviction"
+        );
+
+        LIBAV_SCALER_CACHE.with(|cache| cache.borrow_mut().clear());
+        LIBAV_SCALER_CREATION_COUNT.with(|count| count.set(0));
+    }
+
+    #[cfg(feature = "libav")]
+    #[test]
+    fn ten_bit_yuv444_decode_reuses_scaler_across_seek_and_loop() {
+        use std::process::Command;
+
+        LIBAV_SCALER_CACHE.with(|cache| cache.borrow_mut().clear());
+        LIBAV_SCALER_CREATION_COUNT.with(|count| count.set(0));
+        let ffmpeg = std::env::var_os("SYNDOCAL_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
+        let path = std::env::temp_dir().join(format!(
+            "syndocal-libav-yuv444p10-{}-{}.mkv",
+            std::process::id(),
+            request().layer_id
+        ));
+        let generated = Command::new(&ffmpeg)
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=32x18:rate=30:duration=1",
+                "-vf",
+                "format=yuv444p10le",
+                "-c:v",
+                "ffv1",
+                "-level",
+                "3",
+                "-g",
+                "1",
+                "-pix_fmt",
+                "yuv444p10le",
+                "-y",
+            ])
+            .arg(&path)
+            .output()
+            .expect("FFmpeg 10-bit yuv444 fixture generator must be available");
+        assert!(
+            generated.status.success(),
+            "10-bit yuv444 fixture generation failed: {}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let reference = Command::new(&ffmpeg)
+            .args(["-v", "error", "-i"])
+            .arg(&path)
+            .args([
+                "-vf",
+                "scale=64:36:flags=bilinear,format=rgba",
+                "-pix_fmt",
+                "rgba",
+                "-f",
+                "rawvideo",
+                "pipe:1",
+            ])
+            .output()
+            .expect("FFmpeg 10-bit yuv444 reference decoder must be available");
+        assert!(
+            reference.status.success(),
+            "10-bit yuv444 reference decode failed: {}",
+            String::from_utf8_lossy(&reference.stderr)
+        );
+        const FRAME_BYTES: usize = 64 * 36 * 4;
+        assert_eq!(reference.stdout.len(), 30 * FRAME_BYTES);
+
+        let mut request = request();
+        request.source.path = Some(path.to_string_lossy().into_owned());
+        request.source.codec = Some("ffv1".to_string());
+        request.source.metadata = Some(protocol::VideoMediaMetadata {
+            duration_ms: Some(1_000),
+            width: Some(32),
+            height: Some(18),
+            frame_rate: Some(30.0),
+            has_audio: false,
+        });
+        request.width = 64;
+        request.height = 36;
+
+        let mut decoder = LibavFrameDecoder::software_for_tests();
+        for target_ms in [0, 0, 33, 33, 66, 500, 0, 33] {
+            request.position_ms = target_ms;
+            let frame = decoder
+                .decode_frame(&request)
+                .unwrap()
+                .expect("10-bit yuv444 fixture must decode");
+            let frame_index = ((frame.pts_ms * 30 + 500) / 1_000) as usize;
+            assert_rgba_reference_parity(
+                &frame,
+                &reference.stdout[frame_index * FRAME_BYTES..(frame_index + 1) * FRAME_BYTES],
+                &format!("10-bit yuv444 at {target_ms}ms / pts {}ms", frame.pts_ms),
+            );
+            assert_eq!((frame.width, frame.height), (64, 36));
+            assert_eq!(frame.format, VideoPixelFormat::Rgba8);
+        }
+
+        assert_eq!(
+            LIBAV_SCALER_CACHE.with(|cache| cache.borrow().len()),
+            1,
+            "one 10-bit source/target conversion should remain reusable"
+        );
+        assert_eq!(LIBAV_SCALER_CREATION_COUNT.with(Cell::get), 1);
+        assert_eq!(decoder.sessions.len(), 1);
+        assert!(decoder.session_counters.sequential_continues > 0);
+        assert!(decoder.session_counters.frame_reuses >= 2);
+
+        LIBAV_SCALER_CACHE.with(|cache| cache.borrow_mut().clear());
+        LIBAV_SCALER_CREATION_COUNT.with(|count| count.set(0));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(not(feature = "libav"))]
+    #[test]
+    fn disabled_backend_defers_to_compatibility_decoder() {
+        let mut decoder = LibavFrameDecoder::software_for_tests();
+        assert!(!LibavFrameDecoder::is_built());
+        assert_eq!(decoder.decode_frame(&request()), Ok(None));
+    }
+
+    #[cfg(feature = "libav")]
+    #[test]
+    fn decodes_h264_h265_and_prores_in_process() {
+        use std::process::Command;
+
+        let ffmpeg = std::env::var_os("SYNDOCAL_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
+        let encoder_output = Command::new(&ffmpeg)
+            .args(["-hide_banner", "-encoders"])
+            .output()
+            .expect("FFmpeg encoder inventory must be available");
+        assert!(encoder_output.status.success());
+        let encoder_inventory = String::from_utf8_lossy(&encoder_output.stdout);
+        let available_encoders = encoder_inventory
+            .lines()
+            .filter_map(|line| line.split_whitespace().nth(1))
+            .collect::<std::collections::HashSet<_>>();
+        assert!(LibavFrameDecoder::is_built());
+        for (codec, encoder_candidates, extension, pixel_format) in [
+            (
+                "h264",
+                &["libx264", "libopenh264"] as &[&str],
+                "mp4",
+                "yuv420p",
+            ),
+            (
+                "hevc",
+                &["libx265", "libkvazaar"] as &[&str],
+                "mp4",
+                "yuv420p",
+            ),
+            ("prores", &["prores_ks"] as &[&str], "mov", "yuv422p10le"),
+        ] {
+            let encoder = encoder_candidates
+                .iter()
+                .find(|candidate| available_encoders.contains(**candidate))
+                .unwrap_or_else(|| panic!("no QA encoder is available for {codec}"));
+            let path = std::env::temp_dir().join(format!(
+                "syndocal-libav-{codec}-{}-{}.{}",
+                std::process::id(),
+                request().layer_id,
+                extension
+            ));
+            let mut command = Command::new(&ffmpeg);
+            command.args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=16x16:d=1:r=2",
+                "-c:v",
+                encoder,
+                "-pix_fmt",
+                pixel_format,
+            ]);
+            if *encoder == "libx265" {
+                command.args(["-x265-params", "pools=1:frame-threads=1"]);
+            }
+            command.arg("-y").arg(&path);
+            let output = command
+                .output()
+                .expect("FFmpeg QA fixture generator must be available");
+            assert!(
+                output.status.success(),
+                "{codec} fixture generation failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let mut request = request();
+            request.source.path = Some(path.to_string_lossy().into_owned());
+            request.source.codec = Some(codec.to_string());
+            request.position_ms = 500;
+            request.source.metadata = Some(protocol::VideoMediaMetadata {
+                duration_ms: Some(1_000),
+                width: Some(16),
+                height: Some(16),
+                frame_rate: Some(2.0),
+                has_audio: false,
+            });
+            let mut decoder = LibavFrameDecoder::software_for_tests();
+
+            let frame = decoder.decode_frame(&request).unwrap().unwrap();
+
+            assert_eq!(frame.format, VideoPixelFormat::Rgba8, "{codec}");
+            assert_eq!((frame.width, frame.height), (16, 16), "{codec}");
+            assert_eq!(frame.data.len(), 16 * 16 * 4, "{codec}");
+            assert!(frame.pts_ms >= 500, "{codec}: pts {}", frame.pts_ms);
+            assert!(frame.data[0] > 200, "{codec}");
+            assert!(frame.data[1] < 40, "{codec}");
+            assert!(frame.data[2] < 40, "{codec}");
+            assert_eq!(decoder.cache_len(), 1, "{codec}");
+            assert_eq!(decoder.decode_frame(&request).unwrap().unwrap(), frame);
+            assert_eq!(decoder.session_counters.frame_reuses, 1, "{codec}");
+
+            let missing_ffmpeg = std::env::temp_dir().join(format!(
+                "syndocal-missing-ffmpeg-{codec}-{}",
+                std::process::id()
+            ));
+            let mut preferred = PreferredVideoFrameDecoder::with_software_libav_for_tests(
+                FfmpegCliFrameDecoder::new(missing_ffmpeg),
+            );
+            assert_eq!(preferred.decode_frame(&request).unwrap().unwrap(), frame);
+            assert_eq!(
+                VideoDecoderDiagnostics {
+                    decode_wall_us: 0,
+                    ..preferred.diagnostics()
+                },
+                VideoDecoderDiagnostics {
+                    decode_call_count: 1,
+                    total_requests: 1,
+                    libav_requests: 1,
+                    libav_successes: 1,
+                    libav_cache_len: 1,
+                    libav_session_count: 1,
+                    libav_session_open_count: 1,
+                    ..VideoDecoderDiagnostics::default()
+                },
+                "{codec}"
+            );
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[cfg(feature = "libav")]
+    #[test]
+    fn sequential_b_frame_session_matches_reference_and_drains_eof() {
+        use std::process::Command;
+
+        let ffmpeg = std::env::var_os("SYNDOCAL_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
+        let path = std::env::temp_dir().join(format!(
+            "syndocal-libav-sequential-bframes-{}.mp4",
+            std::process::id()
+        ));
+        let output = Command::new(&ffmpeg)
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=32x18:rate=30:duration=3",
+                "-c:v",
+                "mpeg4",
+                "-pix_fmt",
+                "yuv420p",
+                "-bf",
+                "2",
+                "-g",
+                "30",
+                "-q:v",
+                "2",
+                "-y",
+            ])
+            .arg(&path)
+            .output()
+            .expect("FFmpeg B-frame fixture generator must be available");
+        assert!(
+            output.status.success(),
+            "B-frame fixture generation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let reference = Command::new(&ffmpeg)
+            .args(["-v", "error", "-i"])
+            .arg(&path)
+            .args([
+                "-vf",
+                "format=rgba",
+                "-pix_fmt",
+                "rgba",
+                "-f",
+                "rawvideo",
+                "pipe:1",
+            ])
+            .output()
+            .expect("FFmpeg sequential reference decoder must be available");
+        assert!(
+            reference.status.success(),
+            "B-frame reference decode failed: {}",
+            String::from_utf8_lossy(&reference.stderr)
+        );
+        const FRAME_BYTES: usize = 32 * 18 * 4;
+        assert_eq!(reference.stdout.len(), 90 * FRAME_BYTES);
+
+        let mut sequential = LibavFrameDecoder::software_for_tests();
+        let mut request = request();
+        request.source.path = Some(path.to_string_lossy().into_owned());
+        request.source.codec = Some("mpeg4".to_string());
+        request.source.metadata = Some(protocol::VideoMediaMetadata {
+            duration_ms: Some(3_000),
+            width: Some(32),
+            height: Some(18),
+            frame_rate: Some(30.0),
+            has_audio: false,
+        });
+        request.width = 32;
+        request.height = 18;
+
+        for target_ms in (0..=600).step_by(16) {
+            request.position_ms = target_ms;
+            let persistent_frame = sequential.decode_frame(&request).unwrap().unwrap();
+            let frame_index = ((persistent_frame.pts_ms * 30 + 500) / 1_000) as usize;
+            assert_rgba_reference_parity(
+                &persistent_frame,
+                &reference.stdout[frame_index * FRAME_BYTES..(frame_index + 1) * FRAME_BYTES],
+                &format!(
+                    "persistent decode at {target_ms}ms / pts {}ms / continues {} / reuses {}",
+                    persistent_frame.pts_ms,
+                    sequential.session_counters.sequential_continues,
+                    sequential.session_counters.frame_reuses
+                ),
+            );
+        }
+
+        assert_eq!(sequential.cache_len(), 1);
+        assert_eq!(sequential.sessions.len(), 1);
+        assert_eq!(sequential.session_counters.opens, 1);
+        assert_eq!(sequential.session_counters.resets, 0);
+        assert!(sequential.session_counters.sequential_continues > 0);
+        assert!(sequential.session_counters.frame_reuses > 0);
+        assert_eq!(sequential.session_counters.errors, 0);
+        assert!(!sequential.sessions[0].eof_sent);
+        assert!(!sequential.sessions[0].decoder_drained);
+
+        // The sequential loop ends at 592ms. Exactly 1000ms forward must
+        // continue; a subsequent 1001ms gap must reopen, both inside this clip.
+        assert_eq!(request.position_ms, 592);
+        request.position_ms += 1_000;
+        let caught_up = sequential.decode_frame(&request).unwrap().unwrap();
+        let frame_index = ((caught_up.pts_ms * 30 + 500) / 1_000) as usize;
+        assert_rgba_reference_parity(
+            &caught_up,
+            &reference.stdout[frame_index * FRAME_BYTES..(frame_index + 1) * FRAME_BYTES],
+            "inclusive forward catch-up boundary",
+        );
+        assert_eq!(sequential.session_counters.opens, 1);
+        assert_eq!(sequential.session_counters.resets, 0);
+
+        request.position_ms += 1_001;
+        let jumped = sequential.decode_frame(&request).unwrap().unwrap();
+        let mut fresh = LibavFrameDecoder::software_for_tests();
+        assert_seek_parity(
+            &jumped,
+            &fresh.decode_frame(&request).unwrap().unwrap(),
+            "large forward jump",
+        );
+        assert_eq!(sequential.session_counters.opens, 1);
+        assert_eq!(sequential.session_counters.resets, 1);
+
+        request.position_ms = 100;
+        let reversed = sequential.decode_frame(&request).unwrap().unwrap();
+        let mut fresh = LibavFrameDecoder::software_for_tests();
+        assert_seek_parity(
+            &reversed,
+            &fresh.decode_frame(&request).unwrap().unwrap(),
+            "backward reset",
+        );
+        assert_eq!(sequential.session_counters.opens, 1);
+        assert_eq!(sequential.session_counters.resets, 2);
+
+        let mut through_eof = LibavFrameDecoder::software_for_tests();
+        let mut final_frame = None;
+        for target_ms in (0..=3_500).step_by(33) {
+            request.position_ms = target_ms;
+            let persistent_frame = through_eof.decode_frame(&request).unwrap().unwrap();
+            let frame_index = ((persistent_frame.pts_ms * 30 + 500) / 1_000) as usize;
+            assert_rgba_reference_parity(
+                &persistent_frame,
+                &reference.stdout[frame_index * FRAME_BYTES..(frame_index + 1) * FRAME_BYTES],
+                &format!("persistent EOF drain at {target_ms}ms"),
+            );
+            final_frame = Some(persistent_frame);
+        }
+        assert_eq!(through_eof.session_counters.opens, 1);
+        assert_eq!(through_eof.session_counters.resets, 0);
+        assert!(through_eof.sessions[0].eof_sent);
+        assert!(through_eof.sessions[0].decoder_drained);
+        let reuse_count = through_eof.session_counters.frame_reuses;
+        request.position_ms = 4_000;
+        assert_eq!(
+            through_eof.decode_frame(&request).unwrap().unwrap(),
+            final_frame.unwrap()
+        );
+        assert_eq!(through_eof.session_counters.opens, 1);
+        assert_eq!(through_eof.session_counters.frame_reuses, reuse_count + 1);
+
+        request.source.path = Some(
+            path.with_extension("missing.mp4")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        assert!(sequential.decode_frame(&request).is_err());
+        assert_eq!(sequential.cache_len(), 0);
+        assert!(sequential.sessions.is_empty());
+        assert_eq!(sequential.session_counters.errors, 1);
+
+        request.source.path = None;
+        assert!(matches!(
+            sequential.decode_frame(&request),
+            Err(VideoDecodeError::MissingSourcePath { .. })
+        ));
+        assert_eq!(sequential.session_counters.errors, 2);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "libav")]
+    #[test]
+    fn normalizes_positive_and_negative_stream_start_times_for_decode_and_seek() {
+        use std::process::Command;
+
+        const FRAME_BYTES: usize = 32 * 18 * 4;
+        const FRAME_COUNT: usize = 20;
+        let ffmpeg = std::env::var_os("SYNDOCAL_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
+
+        for (label, timestamp_offset, expected_origin_sign) in
+            [("positive", "1", 1_i8), ("negative", "-1", -1_i8)]
+        {
+            let path = std::env::temp_dir().join(format!(
+                "syndocal-libav-{label}-start-time-{}.ts",
+                std::process::id()
+            ));
+            let output = Command::new(&ffmpeg)
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=32x18:rate=10:duration=2",
+                    "-c:v",
+                    "mpeg2video",
+                    "-bf",
+                    "2",
+                    "-g",
+                    "10",
+                    "-output_ts_offset",
+                    timestamp_offset,
+                    "-avoid_negative_ts",
+                    "disabled",
+                    "-muxdelay",
+                    "0",
+                    "-muxpreload",
+                    "0",
+                    "-y",
+                ])
+                .arg(&path)
+                .output()
+                .expect("FFmpeg timestamp-offset fixture generator must be available");
+            assert!(
+                output.status.success(),
+                "{label} timestamp fixture generation failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let reference = Command::new(&ffmpeg)
+                .args(["-v", "error", "-i"])
+                .arg(&path)
+                .args([
+                    "-vf",
+                    "format=rgba",
+                    "-pix_fmt",
+                    "rgba",
+                    "-f",
+                    "rawvideo",
+                    "pipe:1",
+                ])
+                .output()
+                .expect("FFmpeg timestamp-offset reference decoder must be available");
+            assert!(
+                reference.status.success(),
+                "{label} timestamp reference decode failed: {}",
+                String::from_utf8_lossy(&reference.stderr)
+            );
+            assert_eq!(
+                reference.stdout.len(),
+                FRAME_COUNT * FRAME_BYTES,
+                "{label} reference frame count"
+            );
+
+            let mut decoder = LibavFrameDecoder::software_for_tests();
+            let mut request = request();
+            request.source.path = Some(path.to_string_lossy().into_owned());
+            request.source.codec = Some("mpeg2video".to_string());
+            request.source.metadata = Some(protocol::VideoMediaMetadata {
+                duration_ms: Some(2_000),
+                width: Some(32),
+                height: Some(18),
+                frame_rate: Some(10.0),
+                has_audio: false,
+            });
+            request.width = 32;
+            request.height = 18;
+
+            for target_ms in (0..=500).step_by(50) {
+                request.position_ms = target_ms;
+                let frame = decoder.decode_frame(&request).unwrap().unwrap();
+                let expected_frame_index = target_ms.div_ceil(100) as usize;
+                assert_eq!(
+                    frame.pts_ms,
+                    expected_frame_index as u64 * 100,
+                    "{label} sequential target {target_ms}ms"
+                );
+                assert_rgba_reference_parity(
+                    &frame,
+                    &reference.stdout[expected_frame_index * FRAME_BYTES
+                        ..(expected_frame_index + 1) * FRAME_BYTES],
+                    &format!("{label} sequential target {target_ms}ms"),
+                );
+            }
+            assert_eq!(decoder.sessions.len(), 1, "{label}");
+            assert_eq!(
+                decoder.sessions[0].timestamp_origin.signum() as i8,
+                expected_origin_sign,
+                "{label} stream start-time sign"
+            );
+
+            // 500 -> 1500 is inclusive catch-up. Reversal and a 1001ms
+            // forward gap must reset, for both positive and negative origins.
+            for (target_ms, expected_resets) in [(1_500_u64, 0), (100, 1), (1_101, 2)] {
+                request.position_ms = target_ms;
+                let frame = decoder.decode_frame(&request).unwrap().unwrap();
+                let expected_frame_index = target_ms.div_ceil(100) as usize;
+                assert_eq!(
+                    frame.pts_ms,
+                    expected_frame_index as u64 * 100,
+                    "{label} seek target {target_ms}ms"
+                );
+                assert_rgba_reference_parity(
+                    &frame,
+                    &reference.stdout[expected_frame_index * FRAME_BYTES
+                        ..(expected_frame_index + 1) * FRAME_BYTES],
+                    &format!("{label} seek target {target_ms}ms"),
+                );
+                assert_eq!(
+                    decoder.session_counters.resets, expected_resets,
+                    "{label} target {target_ms}ms"
+                );
+                // Reopens may include the existing bounded demux-seek retry;
+                // only the catch-up branch must leave the open count unchanged.
+                if expected_resets == 0 {
+                    assert_eq!(decoder.session_counters.opens, 1, "{label} catch-up");
+                }
+            }
+            assert_eq!(decoder.session_counters.resets, 2, "{label}");
+
+            if label == "positive" {
+                let mut bounded = LibavFrameDecoder::software_for_tests();
+                request.position_ms = 0;
+                for layer_id in 1..=LIBAV_WORKING_SET_CAPACITY as u64 + 1 {
+                    request.layer_id = layer_id;
+                    bounded.decode_frame(&request).unwrap().unwrap();
+                }
+                assert_eq!(bounded.entries.len(), LIBAV_WORKING_SET_CAPACITY);
+                assert_eq!(bounded.sessions.len(), LIBAV_WORKING_SET_CAPACITY);
+                assert_eq!(
+                    bounded.working_set_lru,
+                    (2..=LIBAV_WORKING_SET_CAPACITY as u64 + 1)
+                        .map(|layer_id| LibavRenderInputOwner::new(
+                            protocol::VideoRenderInputKey::LEGACY,
+                            layer_id,
+                        ))
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    bounded.session_counters.opens,
+                    LIBAV_WORKING_SET_CAPACITY as u64 + 1
+                );
+                assert_eq!(bounded.session_counters.evictions, 1);
+                assert!(bounded.entries.iter().all(|entry| entry.layer_id != 1));
+                assert!(bounded.sessions.iter().all(|session| session.layer_id != 1));
+
+                request.source.kind = VideoSourceKind::Camera;
+                assert_eq!(bounded.decode_frame(&request).unwrap(), None);
+                assert_eq!(bounded.entries.len(), LIBAV_WORKING_SET_CAPACITY - 1);
+                assert_eq!(bounded.sessions.len(), LIBAV_WORKING_SET_CAPACITY - 1);
+                assert!(!bounded
+                    .working_set_lru
+                    .contains(&LibavRenderInputOwner::new(
+                        protocol::VideoRenderInputKey::LEGACY,
+                        request.layer_id,
+                    ),));
+                request.source.kind = VideoSourceKind::File;
+            }
+
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+#[test]
+fn legacy_render_input_owners_remain_layer_scoped() {
+    let first = LibavRenderInputOwner::new(protocol::VideoRenderInputKey::LEGACY, 1);
+    let second = LibavRenderInputOwner::new(protocol::VideoRenderInputKey::LEGACY, 2);
+    assert_ne!(first, second);
+    assert!(first.matches(protocol::VideoRenderInputKey::LEGACY, 1));
+    assert!(!first.matches(protocol::VideoRenderInputKey::LEGACY, 2));
+
+    let explicit = protocol::VideoRenderInputKey {
+        project_render_epoch: 4,
+        input_id: protocol::VideoRenderInputId(8),
+    };
+    assert!(LibavRenderInputOwner::new(explicit, 1).matches(explicit, 999));
+}

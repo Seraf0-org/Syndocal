@@ -1,0 +1,231 @@
+import { createEffect, on, onMount } from "solid-js";
+import type { VideoOutputConfigDraft } from "../editorDrafts";
+import type {
+  CompositionSummary,
+  TimelineLayerSummary,
+  VideoLayerSummary,
+  VideoOutputKind,
+  VideoOutputMapping,
+  VideoOutputMappingPresetSummary,
+  VideoOutputSummary,
+} from "../types";
+import { VideoCompositionSetupPanel } from "./VideoCompositionSetupPanel";
+import { VideoOutputCreatePanel } from "./VideoOutputCreatePanel";
+import type { VideoDisplayMonitorDescriptor } from "./VideoOutputCreatePanel";
+import { VideoOutputListPanel } from "./VideoOutputListPanel";
+import type { FrontendTauriInvoke } from "../tauriInvokeCommands";
+
+type MaybePromise = void | Promise<unknown>;
+
+type SetupVideoPanelProps = {
+  className: string;
+  panelRef: (element: HTMLElement) => void;
+  /** Increments when another surface (Perform's Output pane) asks to create an output. */
+  outputToolRequest?: number;
+  outputs: VideoOutputSummary[];
+  compositions: CompositionSummary[];
+  layers: VideoLayerSummary[];
+  timelineId: number;
+  timelineLayers: TimelineLayerSummary[];
+  mappingPresets: VideoOutputMappingPresetSummary[];
+  compositionLabel: string;
+  compositionLayerIds: number[];
+  outputLabel: string;
+  outputKind: VideoOutputKind;
+  syphonAvailable: boolean;
+  spoutAvailable: boolean;
+  ndiAvailable: boolean;
+  outputConfigDraft: (output: VideoOutputSummary) => VideoOutputConfigDraft;
+  onOutputConfigDraft: (output: VideoOutputSummary, patch: Partial<VideoOutputConfigDraft>) => void;
+  onApplyOutputConfig: (output: VideoOutputSummary, monitor?: VideoDisplayMonitorDescriptor) => MaybePromise;
+  onRemoveOutput: (outputId: number) => MaybePromise;
+  outputWidth: number;
+  outputHeight: number;
+  outputFadeMs: number;
+  outputMonitorId: number;
+  outputFullscreen: boolean;
+  outputEndpoint: string;
+  mappingPresetLabel: string;
+  selectedMappingPresetLabel: string;
+  selectedOutputId: number | null;
+  previewOutputId: number | null;
+  previewInfo: string;
+  previewUrl: string;
+  onCompositionLabel: (value: string) => void;
+  onToggleCompositionLayer: (layerId: number, checked: boolean) => void;
+  onAddComposition: () => MaybePromise;
+  onRemoveComposition: (compositionId: number) => MaybePromise;
+  onSetCompositionLayers: (compositionId: number, layerIds: number[]) => MaybePromise;
+  onSetCompositionTimelineLayers: (
+    compositionId: number,
+    timelineLayerIds: import("../types").TimelineVideoLayerRef[],
+  ) => MaybePromise;
+  onMoveCompositionLayer: (
+    compositionId: number,
+    layerIds: number[],
+    layerId: number,
+    direction: -1 | 1,
+  ) => MaybePromise;
+  onOutputLabel: (value: string) => void;
+  onOutputKind: (value: VideoOutputKind) => void;
+  onOutputWidth: (value: number) => void;
+  onOutputHeight: (value: number) => void;
+  onOutputFadeMs: (value: number) => void;
+  onOutputMonitorId: (value: number) => void;
+  onOutputFullscreen: (value: boolean) => void;
+  onOutputEndpoint: (value: string) => void;
+  invokeCommand: FrontendTauriInvoke;
+  onAddDisplayOutput: (monitor: VideoDisplayMonitorDescriptor) => Promise<void>;
+  onAddExternalOutput: (compositionId: number) => Promise<boolean | void>;
+  onEnableShowSpoutOutputs: () => MaybePromise;
+  onResetShowSpoutOutputs: () => MaybePromise;
+  onSelectOutput: (outputId: number) => void;
+  onMappingPresetLabel: (value: string) => void;
+  onSelectedMappingPresetLabel: (value: string) => void;
+  onSaveMappingPreset: (mapping: VideoOutputMapping) => MaybePromise;
+  onExportMappingPreset: (mapping: VideoOutputMapping) => MaybePromise;
+  onImportMappingPreset: () => MaybePromise;
+  onApplyMappingPreset: (outputId: number, label: string) => MaybePromise;
+  onRemoveMappingPreset: (label: string) => MaybePromise;
+  onSetMapping: (outputId: number, mapping: VideoOutputMapping) => MaybePromise;
+  onImportBitmapMask: (output: VideoOutputSummary) => MaybePromise;
+  onClearBitmapMask: (output: VideoOutputSummary) => MaybePromise;
+  windowStateForOutput: (outputId: number) => {
+    stateLabel: string;
+    stateClass: string;
+    detail: string;
+    diagnostics?: string;
+    actualOpen: boolean | null;
+    actionLabel: string;
+    actionDisabled: boolean;
+    error: string | null;
+  };
+  windowActionBusyForOutput: (outputId: number) => boolean;
+  onToggleWindow: (outputId: number, open: boolean) => MaybePromise;
+  routingBusyForOutput: (outputId: number) => boolean;
+  onAssignComposition: (outputId: number, compositionId: number) => MaybePromise;
+};
+
+// The panel remounts whenever Setup > Video is shown; a request is honored once.
+let handledOutputToolRequest = 0;
+
+export function SetupVideoPanel(props: SetupVideoPanelProps) {
+  let outputTool: HTMLDetailsElement | undefined;
+  // Decided once when Setup > Video is shown. A reactive `open` binding would be
+  // re-applied on every project snapshot refresh and close a disclosure the
+  // operator (or Perform's Set up outputs…) had just opened.
+  onMount(() => { if (outputTool && props.outputs.length === 0) outputTool.open = true; });
+  createEffect(on(() => props.outputToolRequest ?? 0, (request) => {
+    if (request <= handledOutputToolRequest || !outputTool) return;
+    handledOutputToolRequest = request;
+    outputTool.open = true;
+    requestAnimationFrame(() => {
+      outputTool?.scrollIntoView({ block: "nearest", inline: "nearest" });
+      outputTool?.querySelector<HTMLElement>("summary")?.focus({ preventScroll: true });
+    });
+  }));
+  return (
+    <section class={props.className} ref={(element) => props.panelRef(element)} tabIndex={-1}>
+      <div class="panelHeader">
+        <h2>Video Setup</h2>
+        <span>{props.outputs.length} video output(s)</span>
+      </div>
+      <div class="videoSetupWorkbench" data-video-setup-scroll>
+        <div class="videoSetupOutputDesk">
+          <VideoOutputListPanel
+            setupTools={
+              <div class="videoSetupSidebar" aria-label="Video setup tools" data-video-setup-tools>
+                <details class="ioDisclosure videoSetupToolDisclosure" data-video-setup-tool="compositions">
+                  <summary>Compositions</summary>
+                  <div class="ioDisclosureBody">
+                    <VideoCompositionSetupPanel
+                      compositions={props.compositions}
+                      layers={props.layers}
+                      timelineId={props.timelineId}
+                      timelineLayers={props.timelineLayers}
+                      draftLabel={props.compositionLabel}
+                      draftLayerIds={props.compositionLayerIds}
+                      onDraftLabel={props.onCompositionLabel}
+                      onToggleDraftLayer={props.onToggleCompositionLayer}
+                      onAddComposition={props.onAddComposition}
+                      onRemoveComposition={props.onRemoveComposition}
+                      onSetCompositionLayers={props.onSetCompositionLayers}
+                      onSetCompositionTimelineLayers={props.onSetCompositionTimelineLayers}
+                      onMoveCompositionLayer={props.onMoveCompositionLayer}
+                    />
+                  </div>
+                </details>
+                {/* With no outputs yet, creating one is the only next step: it starts open (onMount). */}
+                <details class="ioDisclosure videoSetupToolDisclosure" data-video-setup-tool="outputs" ref={outputTool}>
+                  <summary>New Output</summary>
+                  <div class="ioDisclosureBody">
+                    <VideoOutputCreatePanel
+                      label={props.outputLabel}
+                      kind={props.outputKind}
+                      syphonAvailable={props.syphonAvailable}
+                      spoutAvailable={props.spoutAvailable}
+                      ndiAvailable={props.ndiAvailable}
+                      compositions={props.compositions}
+                      width={props.outputWidth}
+                      height={props.outputHeight}
+                      fadeMs={props.outputFadeMs}
+                      monitorId={props.outputMonitorId}
+                      fullscreen={props.outputFullscreen}
+                      endpoint={props.outputEndpoint}
+                      onLabel={props.onOutputLabel}
+                      onKind={props.onOutputKind}
+                      onWidth={props.onOutputWidth}
+                      onHeight={props.onOutputHeight}
+                      onFadeMs={props.onOutputFadeMs}
+                      onMonitorId={props.onOutputMonitorId}
+                      onFullscreen={props.onOutputFullscreen}
+                      onEndpoint={props.onOutputEndpoint}
+                      invokeCommand={props.invokeCommand}
+                      onAddDisplayOutput={props.onAddDisplayOutput}
+                      onAddExternalOutput={props.onAddExternalOutput}
+                      onEnableShowSpoutOutputs={props.onEnableShowSpoutOutputs}
+                      onResetShowSpoutOutputs={props.onResetShowSpoutOutputs}
+                    />
+                  </div>
+                </details>
+              </div>
+            }
+            outputs={props.outputs}
+            syphonAvailable={props.syphonAvailable}
+            spoutAvailable={props.spoutAvailable}
+            ndiAvailable={props.ndiAvailable}
+            invokeCommand={props.invokeCommand}
+            outputConfigDraft={props.outputConfigDraft}
+            onOutputConfigDraft={props.onOutputConfigDraft}
+            onApplyOutputConfig={props.onApplyOutputConfig}
+            onRemoveOutput={props.onRemoveOutput}
+            compositions={props.compositions}
+            mappingPresets={props.mappingPresets}
+            mappingPresetLabel={props.mappingPresetLabel}
+            selectedMappingPresetLabel={props.selectedMappingPresetLabel}
+            selectedOutputId={props.selectedOutputId}
+            previewOutputId={props.previewOutputId}
+            previewInfo={props.previewInfo}
+            previewUrl={props.previewUrl}
+            onSelectOutput={props.onSelectOutput}
+            onMappingPresetLabel={props.onMappingPresetLabel}
+            onSelectedMappingPresetLabel={props.onSelectedMappingPresetLabel}
+            onSaveMappingPreset={props.onSaveMappingPreset}
+            onExportMappingPreset={props.onExportMappingPreset}
+            onImportMappingPreset={props.onImportMappingPreset}
+            onApplyMappingPreset={props.onApplyMappingPreset}
+            onRemoveMappingPreset={props.onRemoveMappingPreset}
+            onSetMapping={props.onSetMapping}
+            onImportBitmapMask={props.onImportBitmapMask}
+            onClearBitmapMask={props.onClearBitmapMask}
+            windowStateForOutput={props.windowStateForOutput}
+            windowActionBusyForOutput={props.windowActionBusyForOutput}
+            onToggleWindow={props.onToggleWindow}
+            routingBusyForOutput={props.routingBusyForOutput}
+            onAssignComposition={props.onAssignComposition}
+          />
+        </div>
+      </div>
+    </section>
+  );
+}

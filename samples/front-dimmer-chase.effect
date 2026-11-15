@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "effect_type": "Chaser",
+  "enabled": true,
+  "lfo": null,
+  "position_wave": null,
+  "color": null,
+  "chaser": {
+    "label": "Front Dimmer Chaser",
+    "steps": [
+      {
+        "fixture_ids": [],
+        "target_group_ids": ["Front"],
+        "level": 65535
+      },
+      {
+        "fixture_ids": [],
+        "target_group_ids": [],
+        "level": 0
+      }
+    ],
+    "features": [
+      {
+        "attribute": "Dimmer",
+        "low": 0,
+        "high": 65535
+      }
+    ],
+    "step_duration_ms": 250,
+    "clock_sync": {
+      "beats": 0.5
+    },
+    "direction": "Forward",
+    "wings": 1,
+    "active_step_count": 1,
+    "duty_cycle": 0.75,
+    "overlap": 0.2,
+    "phase": 0.0,
+    "fixture_spread": 0.0,
+    "random_seed": 1337,
+    "blend_mode": "Override"
+  }
+}

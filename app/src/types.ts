@@ -1,0 +1,4682 @@
+export type MachineOutputRole = "Lighting" | "Video" | "Both" | "Standby";
+
+export type OutputOwnershipReason =
+  | "OwnedByMachineRole"
+  | "BlockedByMachineRole"
+  | "Transitioning"
+  | "TransitionFailed"
+  | "ProjectSwapDisarmed"
+  | "StartupDenied";
+
+export type OutputOwnershipState = "Ready" | "Transitioning" | "Activating" | "Failed";
+
+export interface OutputOwnershipStatus {
+  role: MachineOutputRole;
+  effective_role: MachineOutputRole;
+  desired_role: MachineOutputRole;
+  persisted_role: MachineOutputRole | null;
+  state: OutputOwnershipState;
+  generation: number;
+  epoch: number;
+  lighting_allowed: boolean;
+  video_allowed: boolean;
+  lighting_reason: OutputOwnershipReason;
+  video_reason: OutputOwnershipReason;
+  error: string | null;
+}
+
+export type ShowClockIpcRole = "primary" | "standby";
+export type ShowClockIpcPhase = "STOPPED" | "ACQUIRING" | "LOCKED" | "HOLD" | "STALE" | "FAULT";
+export type ShowClockIpcFenceState = "DISARMED" | "HOLD" | "ARMED";
+export type ShowClockActionKind =
+  | "go" | "stop" | "back" | "release" | "blackout" | "take"
+  | "clip_launch" | "transition" | "timeline_jump";
+export type ShowClockLatePolicy = "execute_immediately" | "drop" | "hold";
+export type ShowClockVideoTransitionKind =
+  | "Cut" | "Crossfade" | "Dip" | "Wipe" | "Luma" | "Displacement" | "Blur" | "Glitch" | "Custom";
+export type ShowClockActionPayload =
+  | { kind: "cue_release"; cue_id: number }
+  | { kind: "video_take"; target_layer_id: number; fade_ms: number; preview_position_ms?: number | null; preview_speed_milli?: number | null }
+  | { kind: "clip_launch"; layer_id: number; slot_id?: number | null; transition_kind?: ShowClockVideoTransitionKind; transition_duration_ms?: number }
+  | { kind: "timeline_jump"; position_ms: number };
+
+export interface ShowClockIpcStatus {
+  running: boolean;
+  role: ShowClockIpcRole | null;
+  state: ShowClockIpcPhase;
+  local_address: string | null;
+  peer_address: string | null;
+  session_id: string | null;
+  node_id: string | null;
+  clock_generation: number;
+  fencing_generation: number;
+  accepted_samples: number;
+  last_sequence: number;
+  offset_us: number;
+  sample_age_us: number | null;
+  output_armed: boolean;
+  show_clock_gate_armed: boolean;
+  fence_state: ShowClockIpcFenceState;
+  accepted_actions: number;
+  scheduled_actions: number;
+  last_action_sequence: number;
+  last_action_id: string | null;
+  last_action_status: string | null;
+  /** Oversized or undecodable datagrams the standby dropped without stopping. */
+  dropped_datagrams: number;
+  /** Well-formed envelopes refused (bad tag, replay, reorder); never applied. */
+  rejected_packets?: number;
+  last_rejection?: string | null;
+  last_error: string | null;
+}
+
+export interface ShowClockStartRequest {
+  role: ShowClockIpcRole;
+  bind_address: string;
+  peer_address: string;
+  session_id: string;
+  node_id: string;
+  peer_node_id: string;
+  project_hash_hex: string;
+  media_hash_hex: string;
+  key_hex: string;
+  clock_generation: number;
+  fencing_generation: number;
+  project_generation: number;
+  lease_generation: number;
+  audio_generation: number;
+  recording_generation: number;
+  bpm_milli: number;
+  initial_show_time_us: number;
+}
+
+export interface ShowClockActionRequest {
+  action_id_hex: string;
+  sequence: number;
+  target_show_time_us: number;
+  action: ShowClockActionKind;
+  late_policy: ShowClockLatePolicy;
+  payload?: ShowClockActionPayload | null;
+}
+
+export interface ShowClockArmOutputRequest {
+  operator_confirmed: boolean;
+}
+
+export interface ShowClockReArmRequest {
+  operator_confirmed_primary_stopped: boolean;
+  clock_generation: number;
+  fencing_generation: number;
+  project_generation: number;
+  lease_generation: number;
+  audio_generation: number;
+  recording_generation: number;
+  project_hash_hex: string;
+  media_hash_hex: string;
+}
+
+export type AttributeResolution = "EightBit" | "SixteenBit";
+
+export interface CieColorSummary {
+  x: number;
+  y: number;
+  luminance: number;
+}
+
+export interface EmitterCalibrationSummary {
+  name: string;
+  color?: CieColorSummary | null;
+  dominant_wavelength_nm?: number | null;
+}
+
+export interface ChannelFunctionSummary {
+  name: string;
+  attribute: string;
+  parent_function?: string | null;
+  dmx_from: number;
+  dmx_to: number;
+  physical_from?: number | null;
+  physical_to?: number | null;
+  wheel_slot?: string | null;
+  wheel_slot_name?: string | null;
+  wheel_slot_color?: string | null;
+  wheel_slot_media?: string | null;
+  emitter?: EmitterCalibrationSummary | null;
+}
+
+export interface AttributeControl {
+  attribute: string;
+  channel_name: string;
+  geometry?: string | null;
+  offsets: number[];
+  resolution: AttributeResolution;
+  default_value: number;
+  functions?: ChannelFunctionSummary[];
+}
+
+export interface Vec3 {
+  x: number;
+  y: number;
+  z: number;
+}
+
+export interface MidiInputSummary {
+  index: number;
+  name: string;
+}
+
+export interface MidiOutputSummary {
+  index: number;
+  name: string;
+}
+
+export type MidiControlMessage =
+  | "NoteOn"
+  | "NoteOff"
+  | "ControlChange"
+  | "ProgramChange"
+  /** 14-bit DAW / Mackie Control fader; the mapping number is 0. */
+  | "PitchBend"
+  /** Endless encoder CC (Mackie V-Pot): steps from the current value. */
+  | "RelativeControlChange"
+  /** A tempo trigger, not a controller message: the number picks an entry of
+   * `beatDivisionBeats`. Only Perform trigger targets accept it. */
+  | "BeatDivision"
+  /** Persisted live-audio source; never a hardware MIDI message. */
+  | "Audio";
+
+export interface MidiFeedbackMessage {
+  message: MidiControlMessage;
+  channel: number;
+  number: number;
+  value: number;
+}
+
+export interface MidiControlFeedback {
+  off?: MidiFeedbackMessage | null;
+  on?: MidiFeedbackMessage | null;
+  unknown?: MidiFeedbackMessage | null;
+}
+
+export type MidiControlAction =
+  | "ToggleCue"
+  | "FixtureAttribute"
+  | "SelectedFeatureFader"
+  | "FixtureHighlight"
+  | "FixtureSolo"
+  | "FixturePark"
+  | "GroupHighlight"
+  | "GroupSolo"
+  | "GroupPark"
+  | "TriggerCue"
+  | "FlashCue"
+  | "TriggerCueDirection"
+  | "FlashCueDirection"
+  | "TriggerCueListNext"
+  | "TriggerNextCue"
+  | "TriggerPreviousCue"
+  | "EffectEnabled"
+  | "NodeGraphEnabled"
+  | "VideoParam"
+  | "VideoCuePointAdd"
+  | "VideoCuePointRemove"
+  | "VideoCuePointJump"
+  | "VideoCuePointPrevious"
+  | "VideoCuePointNext"
+  | "VideoLayerEnabled"
+  | "VideoLayerSolo"
+  | "VideoPlay"
+  | "VideoLoop"
+  | "VideoLayerFade"
+  | "VideoOutputEnabled"
+  | "VideoOutputOpacity"
+  | "VideoOutputFade"
+  | "VideoOutputMappingField"
+  | "VideoOutputMappingPreset"
+  | "VideoOutputBlackout"
+  | "TimelinePlay"
+  | "TimelineSeek"
+  | "TimelineBeatPrevious"
+  | "TimelineBeatNext"
+  | "TimelineLoopToggle"
+  | "TimelineLoopHalf"
+  | "TimelineLoopDouble"
+  | "LightingMaster"
+  | "GroupSubmaster"
+  | "SetBpm"
+  | "TapBpm"
+  | "CueFadePause"
+  | "Blackout"
+  | "AllBlackout"
+  | "VideoMaster"
+  | "VideoBlackout"
+  | "ClearFixtureFlags"
+  /** Perform actions use the renderer's same ticketed commands for every transport. */
+  | "VideoClipSlotTrigger"
+  | "VideoTake"
+  | "VideoLayerStop"
+  | "VideoLayerBlendMode"
+  | "VideoTransitionKind"
+  | "VideoTransitionTime"
+  | "VideoIsfStageEnabled"
+  | "VideoIsfParam"
+  | "VideoGroupOpacity"
+  | "VideoGroupSolo"
+  | "VideoGroupBypass"
+  | "VideoGroupBlendMode"
+  | "VideoGroupEnabled";
+
+export interface MidiControlMapping {
+  audio?: import("./audioControlMapping").AudioMappingSettings | null;
+  channel?: number | null;
+  message: MidiControlMessage;
+  number: number;
+  action: MidiControlAction;
+  fixture_id?: number | null;
+  attribute?: string | null;
+  group_id?: string | null;
+  cue_id?: number | null;
+  layer_id?: number | null;
+  output_id?: number | null;
+  video_param?: VideoParam | null;
+  cue_point_index?: number | null;
+  duration_ms?: number | null;
+  /** Stable clip-slot id for `VideoClipSlotTrigger`; never a column index. */
+  clip_slot_id?: number | null;
+  /** Stable effect-stage id for `VideoIsfStageEnabled` / `VideoIsfParam`. */
+  isf_stage_id?: number | null;
+  /** Stable video group identity; distinct from the lighting group_id. */
+  video_group_id?: number | null;
+  feedback?: MidiControlFeedback | null;
+  low: number;
+  high: number;
+}
+
+export interface LearnedMidiControl {
+  channel: number;
+  message: MidiControlMessage;
+  number: number;
+  value: number;
+}
+
+export interface SerialPortSummary {
+  name: string;
+  port_type: string;
+  usb_vid?: number | null;
+  usb_pid?: number | null;
+  serial_number?: string | null;
+  manufacturer?: string | null;
+  product?: string | null;
+  windows_device_instance_id?: string | null;
+  macos_device_instance_id?: string | null;
+  recommended_protocol?: DmxOutputProtocol | null;
+}
+
+export type SerialDmxMachineBindingState =
+  | "missing_selection"
+  | "selected_and_present"
+  | "stale_or_missing"
+  | "ambiguous"
+  | "blocked_persistence";
+
+export interface SerialDmxMachineBindingIdentity {
+  port_name: string;
+  port_type: string;
+  usb_vid: number;
+  usb_pid: number;
+  serial_number: string;
+  manufacturer: string;
+  product: string;
+  windows_device_instance_id?: string | null;
+  macos_device_instance_id?: string | null;
+}
+
+export interface SerialDmxMachineBindingStatus {
+  state: SerialDmxMachineBindingState;
+  selected: SerialDmxMachineBindingIdentity | null;
+  detail: string;
+  /** Decimal process-local route revision; avoids JS number precision loss. */
+  routeStatusRevision: string;
+}
+
+/** A universe's machine-local USB-DMX cable binding (Universe 1 and up). */
+export interface UsbDmxUniverseBindingStatus {
+  /** Migrated old U0 keeps its original channel-500 safety policy. */
+  legacyU0Invariants?: boolean;
+  universe: number;
+  state: SerialDmxMachineBindingState;
+  identity: SerialDmxMachineBindingIdentity;
+  detail: string;
+}
+
+/** One engine cable slot; queue state is never a fixture/wire proof. */
+export interface UsbDmxCableStatus {
+  slot: number;
+  universe: number | null;
+  routeStatusRevision: string;
+  active: boolean;
+  zeroFrameQueued: boolean;
+  zeroFramePhysicalWriteCompleted: boolean;
+  liveFrameQueued: boolean;
+  workerShutdownCompleted: boolean;
+  faulted: boolean;
+  detail: string;
+}
+
+export interface UsbDmxUniversesStatus {
+  bindingStoreVersion?: number;
+  legacyRouteActive?: boolean;
+  bindings: UsbDmxUniverseBindingStatus[];
+  cables: UsbDmxCableStatus[];
+  /** Set when the machine-local binding file cannot be read; cables stay off. */
+  persistenceError: string | null;
+}
+
+/** Runtime-only Open DMX worker truth; queue state is never a fixture/wire proof. */
+export interface ShowSerialDmxSafetyBlackoutRouteStatus {
+  /** Decimal process-local route revision; must match the paired binding read. */
+  routeStatusRevision: string;
+  active: boolean;
+  zeroFrameQueued: boolean;
+  zeroFramePhysicalWriteCompleted: boolean;
+  liveFrameQueued: boolean;
+  /** False after a bounded shutdown detach; no binding mutation is safe then. */
+  workerShutdownCompleted: boolean;
+  faulted: boolean;
+  /** Config/sender truth only; it is not an Art-Net receiver or wire receipt. */
+  artnetMirrorLive: boolean;
+  artnetMirrorDetail: string;
+  detail: string;
+}
+
+export interface OscInputConfig {
+  bind_ip: string;
+  port: number;
+}
+
+export type OscControlAction =
+  | "FixtureAttribute"
+  | "SelectedFeatureFader"
+  | "FixtureHighlight"
+  | "FixtureSolo"
+  | "FixturePark"
+  | "GroupHighlight"
+  | "GroupSolo"
+  | "GroupPark"
+  | "TriggerCue"
+  | "TriggerNextCue"
+  | "TriggerPreviousCue"
+  | "EffectEnabled"
+  | "NodeGraphEnabled"
+  | "VideoParam"
+  | "VideoCuePointAdd"
+  | "VideoCuePointRemove"
+  | "VideoCuePointJump"
+  | "VideoCuePointPrevious"
+  | "VideoCuePointNext"
+  | "VideoLayerEnabled"
+  | "VideoLayerSolo"
+  | "VideoPlay"
+  | "VideoLoop"
+  | "VideoLayerFade"
+  | "VideoOutputEnabled"
+  | "VideoOutputOpacity"
+  | "VideoOutputFade"
+  | "VideoOutputMappingField"
+  | "VideoOutputMappingPreset"
+  | "VideoOutputBlackout"
+  | "TimelinePlay"
+  | "TimelineSeek"
+  | "TimelineBeatPrevious"
+  | "TimelineBeatNext"
+  | "TimelineLoopToggle"
+  | "TimelineLoopHalf"
+  | "TimelineLoopDouble"
+  | "LightingMaster"
+  | "GroupSubmaster"
+  | "SetBpm"
+  | "TapBpm"
+  | "CueFadePause"
+  | "Blackout"
+  | "AllBlackout"
+  | "VideoMaster"
+  | "VideoBlackout"
+  | "ClearFixtureFlags"
+  | "VideoClipSlotTrigger"
+  | "VideoTake"
+  | "VideoLayerStop"
+  | "VideoLayerBlendMode"
+  | "VideoTransitionKind"
+  | "VideoTransitionTime"
+  | "VideoIsfStageEnabled"
+  | "VideoIsfParam"
+  | "VideoGroupOpacity"
+  | "VideoGroupSolo"
+  | "VideoGroupBypass"
+  | "VideoGroupBlendMode"
+  | "VideoGroupEnabled";
+
+export interface OscControlMapping {
+  /** Optional stable identities; absent in projects saved before Perform Learn. */
+  clip_slot_id?: number | null;
+  isf_stage_id?: number | null;
+  /** Stable video group identity; distinct from the lighting group_id. */
+  video_group_id?: number | null;
+  address: string;
+  action: OscControlAction;
+  fixture_id?: number | null;
+  attribute?: string | null;
+  group_id?: string | null;
+  cue_id?: number | null;
+  layer_id?: number | null;
+  output_id?: number | null;
+  video_param?: VideoParam | null;
+  cue_point_index?: number | null;
+  duration_ms?: number | null;
+  low: number;
+  high: number;
+}
+
+export type DmxControlAction = OscControlAction;
+
+export interface DmxControlMapping {
+  /** Optional stable identities; absent in projects saved before Perform Learn. */
+  clip_slot_id?: number | null;
+  isf_stage_id?: number | null;
+  /** Stable video group identity; distinct from the lighting group_id. */
+  video_group_id?: number | null;
+  universe: number;
+  channel: number;
+  action: DmxControlAction;
+  fixture_id?: number | null;
+  attribute?: string | null;
+  group_id?: string | null;
+  cue_id?: number | null;
+  layer_id?: number | null;
+  output_id?: number | null;
+  video_param?: VideoParam | null;
+  cue_point_index?: number | null;
+  duration_ms?: number | null;
+  low: number;
+  high: number;
+}
+
+export interface LearnedDmxControl {
+  universe: number;
+  channel: number;
+  value: number;
+}
+
+export interface LearnedOscControl {
+  address: string;
+  value?: number | null;
+  argument_count: number;
+}
+
+export interface RemoteControlConfig {
+  bind_ip: string;
+  port: number;
+  pairing_pin: string;
+  allow_lan: boolean;
+  max_connections: number;
+  max_message_bytes: number;
+  max_messages_per_second: number;
+  web_remote_enabled: boolean;
+  dj_link_enabled: boolean;
+  dj_link_bind_ip: string | null;
+}
+
+/** App-local, non-secret DJ Link authority state. The token is never in this DTO. */
+export interface DjLinkMachineStatus {
+  configured: boolean;
+  credentialReady: boolean;
+  autoStartArmed: boolean;
+  bindIp: string | null;
+  bindPort: number | null;
+  networkGuid: string | null;
+  adapterGuid: string | null;
+  credentialGeneration: number | null;
+  credentialCleanupPending: boolean;
+  blockReason: string | null;
+}
+
+/** Exact wired candidate tuple; all fields are required for a bind. */
+export interface DjLinkWiredCandidate {
+  networkGuid: string;
+  adapterGuid: string;
+  bindIp: string;
+  adapterAlias: string | null;
+}
+
+export interface RemoteClientSummary {
+  id: number;
+  peer_addr: string;
+  connected_at_unix_ms: number;
+  last_activity_unix_ms: number;
+  messages_received: number;
+}
+
+export interface RemoteControlStatus {
+  running: boolean;
+  web_remote_enabled: boolean;
+  dj_link_enabled: boolean;
+  active_connections: number;
+  rejected_connections: number;
+  clients: RemoteClientSummary[];
+  dj_link?: DjLinkRuntimeStatus | null;
+}
+
+export interface DjTrackSelector {
+  contentId?: string | null;
+  title?: string | null;
+  artist?: string | null;
+  /** Case-sensitive title substring; exclusive with the exact selectors. */
+  titleContains?: string | null;
+  /** Fallback deck if no primary exact/titleContains mapping matches. */
+  fallbackDeck?: number | null;
+}
+
+export type DjTrackRetriggerPolicy = "once_per_play_session";
+
+export interface DjTrackTriggerMapping {
+  id: string;
+  selector: DjTrackSelector;
+  timelineId: number;
+  retrigger: DjTrackRetriggerPolicy;
+}
+
+export interface DjLinkRuntimeStatus {
+  available?: boolean;
+  connected: boolean;
+  peer: string | null;
+  generation: number;
+  agentId?: string | null;
+  sessionId?: string | null;
+  trackActive: boolean;
+  loopDivision: number | null;
+  released: boolean;
+  lastEventId: string | null;
+  outcome?: string | null;
+  ageMs: number | null;
+  ownerDeck?: string | null;
+  trackContentId?: string | null;
+  trackTitle?: string | null;
+  trackArtist?: string | null;
+  trackDeckId?: string | null;
+  trackStartedAt?: string | null;
+  trackPlaying?: boolean;
+  trackBpm?: number | null;
+  positionSec?: number | null;
+  snapshotReady?: boolean;
+  authoritativeState?: "idle" | "running" | "stopped" | "ended" | "reset" | null;
+  timelineId?: string | null;
+  playSessionId?: string | null;
+  pedalOwner?: string | null;
+  releaseEventId?: string | null;
+  positionBars?: number | null;
+  loopActive?: boolean;
+  lastOutboundEventId?: string | null;
+  lastOutboundSequence?: number | null;
+  lastOutboundDelivery?: string | null;
+  lastOperatorReturnRequestId?: string | null;
+  lastOperatorReturnSequence?: number | null;
+  lastOperatorReturnDelivery?: string | null;
+}
+
+export type ClockSource = "Manual" | "Tap" | "MidiClock" | "MidiTimecode" | "Ltc" | "AbletonLink";
+export type LfoShape = "Sine" | "Cosine" | "Pulse" | "Triangle" | "Ramp" | "Saw" | "Square" | "Strobe" | "Random" | "Perlin" | "Sinus3" | "Tangeant" | "DaslightCustom";
+export type EffectKind = "Lfo" | "PositionWave" | "Color" | "Chaser" | "Move" | "Value" | "Curve" | "Mapping" | "ColorMapping";
+export type EffectBlendMode = "Override" | "Add" | "Multiply";
+export type ColorEffectAlgorithm = "Cycle" | "Bounce" | "Sequence" | "Random";
+export type ColorEffectInterpolation = "Rgb" | "HsvShortest" | "HsvLongest";
+export type ChaserDirection = "Forward" | "Reverse" | "Bounce" | "BuildUpDown" | "Random";
+export type MoveInterpolation =
+  | "Line"
+  | "Smooth"
+  | "Circle"
+  | "DaslightCircle"
+  | "DaslightCurve"
+  | "DaslightLine"
+  | "DaslightPolygon"
+  | "DaslightPoints";
+export type MoveCoordinateMode = "Absolute" | "Relative";
+export type MoveDirection = "Forward" | "Reverse" | "Bounce";
+export type ValueEffectInterpolation = "Step" | "Line" | "Smooth";
+export type ValueEffectMode = "Absolute" | "Relative";
+export type ValueEffectDirection = "Forward" | "Reverse" | "Bounce";
+export type MappingEffectDirection = "Forward" | "Reverse" | "Bounce" | "Static";
+export type NodeGraphNodeKind = "Lfo" | "PositionWave" | "Audio" | "Transform" | "Output";
+export type AudioSpectrumBand = "Bass" | "Mid" | "High";
+export type AudioSpectrumSource = "Timeline" | "Live";
+export type AudioReactiveFeature =
+  | "LegacyBand"
+  | "Band"
+  | "Rms"
+  | "Peak"
+  | "SpectralFlux"
+  | "Onset"
+  | "OnsetStrength"
+  | "BeatPhase"
+  | "Bpm"
+  | "BpmConfidence"
+  | "SpectralCentroid"
+  | "SpectralDensitySlow"
+  | "SpectralDensityFast"
+  | "Kick"
+  | "KickStrength"
+  | "Snare"
+  | "SnareStrength";
+export type AudioReactiveCurve = "Linear" | "Smoothstep" | "Exponential" | "Logarithmic";
+export type NodeGraphTransformOp = "Scale" | "Offset" | "Clamp" | "Invert" | "Abs";
+
+export interface DmxModeSummary {
+  name: string;
+  controls: AttributeControl[];
+}
+
+export interface GeometrySummary {
+  name: string;
+  kind: string;
+  parent?: string | null;
+  matrix: number[];
+  model_name?: string | null;
+  model_file?: string | null;
+  model_primitive?: string | null;
+  model_dimensions?: Vec3 | null;
+  beam_type?: string | null;
+  beam_angle_deg?: number | null;
+  field_angle_deg?: number | null;
+  beam_radius?: number | null;
+}
+
+export interface FixtureProfileSummary {
+  source_path: string;
+  manufacturer: string;
+  name: string;
+  short_name?: string | null;
+  fixture_type_id?: string | null;
+  dmx_modes: DmxModeSummary[];
+  geometries: GeometrySummary[];
+  warnings: string[];
+}
+
+export interface GdtfShareModeSummary {
+  name: string;
+  dmx_footprint?: number | null;
+}
+
+export interface GdtfShareFixtureSummary {
+  rid?: number | null;
+  uuid?: string | null;
+  manufacturer: string;
+  fixture: string;
+  revision: string;
+  uploader?: string | null;
+  rating?: string | null;
+  version?: string | null;
+  creator?: string | null;
+  filesize?: number | null;
+  modes: GdtfShareModeSummary[];
+}
+
+export interface PatchFixtureRequest {
+  profile_path: string;
+  mode_name?: string | null;
+  label: string;
+  universe: number;
+  address: number;
+  group_ids: string[];
+  position: Vec3;
+  rotation: { pitch: number; yaw: number; roll: number };
+}
+
+export interface FixtureLimits {
+  dimmer_min: number;
+  dimmer_max: number;
+  pan_min: number;
+  pan_max: number;
+  tilt_min: number;
+  tilt_max: number;
+  invert_pan: boolean;
+  invert_tilt: boolean;
+  swap_pan_tilt: boolean;
+}
+
+export interface CustomFixtureProfileRequest {
+  manufacturer: string;
+  name: string;
+  mode_name: string;
+  attributes: string[];
+}
+
+export interface CustomFixtureProfileFile {
+  version: number;
+  request: CustomFixtureProfileRequest;
+}
+
+export interface AudioWaveformPoint {
+  time_ms: number;
+  peak: number;
+  rms: number;
+}
+
+export interface AudioSpectrumPoint {
+  time_ms: number;
+  bass: number;
+  mid: number;
+  high: number;
+}
+
+export interface AudioAnalysisSummary {
+  path: string;
+  sample_rate: number;
+  channels: number;
+  duration_ms: number;
+  estimated_bpm?: number | null;
+  waveform: AudioWaveformPoint[];
+  spectrum: AudioSpectrumPoint[];
+  beats: number[];
+}
+
+export interface AttributeValueSummary {
+  attribute: string;
+  value: number;
+}
+
+export type FixtureStageColorRole = "Red" | "Green" | "Blue" | "Amber" | "White" | "Uv";
+
+export interface FixtureStageColorBinding {
+  control_index: number;
+  role: FixtureStageColorRole;
+}
+
+export interface FixtureStageLayoutCell {
+  beam_index: number;
+  offset_x: number;
+  offset_z: number;
+  logical_segment_index: number | null;
+}
+
+export interface FixtureStageLogicalSegment {
+  logical_index: number;
+  color_controls: FixtureStageColorBinding[];
+}
+
+export interface FixtureStageLayout {
+  version: number;
+  cell_width: number;
+  cell_depth: number;
+  cells: FixtureStageLayoutCell[];
+  logical_segments: FixtureStageLogicalSegment[];
+  global_dimmer_control_index: number | null;
+  global_strobe_control_index: number | null;
+}
+
+export interface PatchedFixtureSummary {
+  id: number;
+  label: string;
+  profile_source_path: string;
+  profile_name: string;
+  manufacturer: string;
+  mode_name: string;
+  universe: number;
+  address: number;
+  group_ids: string[];
+  position: Vec3;
+  rotation: { pitch: number; yaw: number; roll: number };
+  geometries: GeometrySummary[];
+  controls: AttributeControl[];
+  stage_layout?: FixtureStageLayout | null;
+  attribute_values: AttributeValueSummary[];
+  limits: FixtureLimits;
+  highlighted: boolean;
+  soloed: boolean;
+  parked: boolean;
+}
+
+export interface VisualizerFixtureNode {
+  id: number;
+  label: string;
+  position: Vec3;
+  yaw_deg: number;
+  pitch_deg: number;
+  roll_deg: number;
+  color: [number, number, number];
+  intensity: number;
+}
+
+export interface VisualizerBeamNode {
+  fixture_id: number;
+  geometry_name?: string | null;
+  beam_type?: string | null;
+  beam_angle_deg?: number | null;
+  field_angle_deg?: number | null;
+  origin: Vec3;
+  direction: Vec3;
+  length: number;
+  radius: number;
+  color: [number, number, number];
+  intensity: number;
+}
+
+export type GeometryModelMeshKind = "None" | "Box" | "Cylinder" | "Sphere" | "Plane" | "Mesh" | "Unknown";
+export type FixtureModelDrawKind = "BuiltInPrimitive" | "ExternalMesh" | "BoundsFallback";
+export type VisualizerExternalModelAssetStatus = "Loaded" | "Missing" | "Skipped" | "Error";
+export type VisualizerExternalModelAssetFormat = "Glb" | "Gltf" | "Obj" | "ThreeDs" | "Collada" | "Unknown";
+
+export interface VisualizerFixtureGeometryNode {
+  fixture_id: number;
+  profile_source_path: string;
+  name: string;
+  kind: string;
+  parent?: string | null;
+  model_name?: string | null;
+  model_file?: string | null;
+  model_primitive?: string | null;
+  model_mesh_kind: GeometryModelMeshKind;
+  model_dimensions?: Vec3 | null;
+  position: Vec3;
+  local_position: Vec3;
+  right: Vec3;
+  up: Vec3;
+  direction: Vec3;
+  local_right: Vec3;
+  local_up: Vec3;
+  local_direction: Vec3;
+  beam_type?: string | null;
+  beam_angle_deg?: number | null;
+  field_angle_deg?: number | null;
+  beam_radius?: number | null;
+  mapped_channel_count: number;
+}
+
+export interface VisualizerFixtureModelNode {
+  fixture_id: number;
+  profile_source_path: string;
+  geometry_name: string;
+  mesh_kind: GeometryModelMeshKind;
+  model_name?: string | null;
+  model_file?: string | null;
+  model_primitive?: string | null;
+  dimensions?: Vec3 | null;
+  bounding_radius: number;
+  position: Vec3;
+  right: Vec3;
+  up: Vec3;
+  direction: Vec3;
+}
+
+export interface VisualizerFixtureModelRenderPlan {
+  fixture_id: number;
+  profile_source_path: string;
+  geometry_name: string;
+  draw_kind: FixtureModelDrawKind;
+  fallback_mesh_kind: GeometryModelMeshKind;
+  model_file?: string | null;
+  dimensions?: Vec3 | null;
+  bounding_radius: number;
+  position: Vec3;
+  right: Vec3;
+  up: Vec3;
+  direction: Vec3;
+}
+
+export interface VisualizerModelPrimitiveVertex {
+  position: Vec3;
+  normal: Vec3;
+}
+
+export interface VisualizerFixtureModelPrimitiveMesh {
+  fixture_id: number;
+  geometry_name: string;
+  mesh_kind: GeometryModelMeshKind;
+  vertices: VisualizerModelPrimitiveVertex[];
+  indices: number[];
+}
+
+export interface VisualizerVideoSurfaceNode {
+  id: number;
+  label: string;
+  kind: VideoOutputKind;
+  composition_id: number;
+  position: Vec3;
+  width: number;
+  height: number;
+  rotation_deg: number;
+  opacity: number;
+  enabled: boolean;
+  blackout: boolean;
+}
+
+export interface VisualizerStageObjectNode {
+  id: number;
+  label: string;
+  kind: StageObjectKind;
+  position: Vec3;
+  width: number;
+  depth: number;
+  rotation_deg: number;
+  color?: string | null;
+}
+
+export interface VisualizerScene {
+  fixtures: VisualizerFixtureNode[];
+  fixture_geometries: VisualizerFixtureGeometryNode[];
+  fixture_models: VisualizerFixtureModelNode[];
+  beams: VisualizerBeamNode[];
+  video_surfaces: VisualizerVideoSurfaceNode[];
+  stage_objects: VisualizerStageObjectNode[];
+  bounds: {
+    min: Vec3;
+    max: Vec3;
+  };
+}
+
+export interface VisualizerRenderPayload {
+  scene: VisualizerScene;
+  model_render_plans: VisualizerFixtureModelRenderPlan[];
+  primitive_meshes: VisualizerFixtureModelPrimitiveMesh[];
+}
+
+export interface VisualizerExternalModelAsset {
+  asset_key: string;
+  profile_source_path: string;
+  model_file: string;
+  status: VisualizerExternalModelAssetStatus;
+  format: VisualizerExternalModelAssetFormat;
+  byte_length: number;
+  meshes: VisualizerFixtureModelPrimitiveMesh[];
+  error?: string | null;
+  mesh_error?: string | null;
+}
+
+export interface VisualizerResolvedRenderPayload {
+  scene: VisualizerScene;
+  model_render_plans: VisualizerFixtureModelRenderPlan[];
+  primitive_meshes: VisualizerFixtureModelPrimitiveMesh[];
+  external_model_assets: VisualizerExternalModelAsset[];
+  resolved_meshes: VisualizerFixtureModelPrimitiveMesh[];
+}
+
+export interface VisualizerModelAssetCacheSummary {
+  entry_count: number;
+  loaded_count: number;
+  missing_count: number;
+  byte_length: number;
+  limit: number;
+}
+
+export interface FixturePreset {
+  version: number;
+  manufacturer: string;
+  profile_name: string;
+  profile_source_path?: string | null;
+  mode_name: string;
+  values: AttributeValueSummary[];
+}
+
+export interface FixturePresetGroupLoadResult {
+  path: string;
+  applied_count: number;
+  skipped_count: number;
+}
+
+export interface TimelineGroupAutomationAddResult {
+  automation_ids: number[];
+  applied_count: number;
+  skipped_count: number;
+}
+
+export interface NodeGraphLfoNode {
+  shape: LfoShape;
+  period_ms: number;
+  clock_sync?: EffectClockSync | null;
+  phase: number;
+  amplitude: number;
+  bias: number;
+}
+
+export interface NodeGraphPositionWaveNode {
+  shape: LfoShape;
+  origin: Vec3;
+  direction: Vec3;
+  speed: number;
+  wavelength: number;
+  clock_sync?: EffectClockSync | null;
+  phase: number;
+}
+
+export interface NodeGraphTransformNode {
+  op: NodeGraphTransformOp;
+  amount: number;
+  min: number;
+  max: number;
+}
+
+export interface NodeGraphOutputNode {
+  fixture_ids: number[];
+  target_group_ids: string[];
+  attribute: string;
+  video_targets: VideoEffectTarget[];
+  low: number;
+  high: number;
+  blend_mode: EffectBlendMode;
+}
+
+export interface NodeGraphNodeSummary {
+  id: number;
+  label: string;
+  kind: NodeGraphNodeKind;
+  x: number;
+  y: number;
+  lfo?: NodeGraphLfoNode | null;
+  position_wave?: NodeGraphPositionWaveNode | null;
+  audio?: NodeGraphAudioNode | null;
+  transform?: NodeGraphTransformNode | null;
+  output?: NodeGraphOutputNode | null;
+}
+
+export interface NodeGraphEdgeSummary {
+  from_node: number;
+  from_port: string;
+  to_node: number;
+  to_port: string;
+}
+
+export interface NodeGraphSummary {
+  id: number;
+  label: string;
+  enabled: boolean;
+  nodes: NodeGraphNodeSummary[];
+  edges: NodeGraphEdgeSummary[];
+  audio_runtime?: NodeGraphAudioRuntimeStatus[];
+}
+
+export interface NodeGraphAudioRuntimeStatus {
+  node_id: number;
+  input_value: number;
+  output_value: number;
+  source_available: boolean;
+  safety_zeroed: boolean;
+  held: boolean;
+  feature_sequence: number;
+}
+
+export interface NodeGraphPresetFile {
+  version: number;
+  app: string;
+  graph: NodeGraphSummary;
+}
+
+export interface OperatorSelectionContext {
+  fixture_ids: number[];
+  attributes: string[];
+}
+
+export interface OperatorFeatureFaderResult {
+  target_index: number;
+  attribute: string;
+  fixture_ids: number[];
+  value: number;
+}
+
+export type OperatorLockMode = "Full" | "Partial";
+
+export interface OperatorCredentialVerifier {
+  scheme: "PBKDF2-SHA256";
+  iterations: number;
+  salt_b64: string;
+  verifier_b64: string;
+}
+
+export interface OperatorPolicy {
+  lock_mode: OperatorLockMode;
+  lock_on_load: boolean;
+  credential: OperatorCredentialVerifier;
+}
+
+export interface FixtureGroupSummary {
+  id: string;
+  label: string;
+  color?: string | null;
+}
+
+export interface ProjectFile {
+  version: number;
+  app: string;
+  operator_policy?: OperatorPolicy | null;
+  custom_profiles?: FixtureProfileSummary[];
+  fixture_groups?: FixtureGroupSummary[];
+  midi_mappings?: MidiControlMapping[];
+  osc_mappings?: OscControlMapping[];
+  dmx_mappings?: DmxControlMapping[];
+  dj_track_triggers?: DjTrackTriggerMapping[];
+  snapshot: EngineSnapshot;
+}
+
+export interface ProjectLoadResult {
+  path: string;
+  /** Exact backend-owned current project path; unlike `path`, this may be null. */
+  current_project_path: string | null;
+  profiles: FixtureProfileSummary[];
+  midi_mappings: MidiControlMapping[];
+  osc_mappings: OscControlMapping[];
+  dmx_mappings: DmxControlMapping[];
+  dj_track_triggers?: DjTrackTriggerMapping[];
+  warnings: string[];
+  /** Backend-authoritative identity token for subsequent mapping/history CAS. */
+  project_epoch: number;
+  project_revision: number;
+  history_generation: number;
+  checkpoint_hash: string;
+  /** Durable clean/recovery interpretation of this fenced publication. */
+  authority_disposition_generation: number;
+  authority_disposition: ProjectAuthorityDisposition;
+  /** Coherent UI authority image captured with the result's token. */
+  authority?: ProjectAuthorityBundle | null;
+}
+
+/**
+ * Browser recovery is offered only after this machine-local serial handshake.
+ * A journal advance is durable before the backend invalidates a prior project
+ * authority, so a stale localStorage image cannot cross a crash/restart.
+ */
+export interface ProjectRecoveryAuthorityStatus {
+  recovery_authority_serial: number;
+  last_transition: ProjectRecoveryAuthorityTransition;
+}
+
+export type ProjectRecoveryAuthorityTransition =
+  | { kind: "legacy_unknown" }
+  | { kind: "project_publication" }
+  | {
+    kind: "recovery_publication";
+    source_serial: number;
+    request_id: string;
+    target_checkpoint_hash: string;
+  }
+  | { kind: "history_navigation" }
+  | { kind: "clean_save" }
+  | {
+    kind: "recovery_acknowledged";
+    recovery_publication_serial: number;
+    request_id: string;
+    target_checkpoint_hash: string;
+  };
+
+/** One fenced project-root capture used by recovery/autosave. */
+export interface ProjectCheckpointBundle {
+  project: ProjectFile;
+  current_path: string | null;
+  project_epoch: number;
+  project_revision: number;
+  checkpoint_hash: string;
+  recovery_authority_serial: number;
+}
+
+export interface ProjectInputRuntimeStatus {
+  project_input_runtime_generation: number;
+  mapping_input_runtime_generation: number;
+  midi_clock_active: boolean;
+  midi_control_active: boolean;
+  midi_feedback_output_active: boolean;
+  midi_feedback_runtime_active: boolean;
+  osc_active: boolean;
+  dmx_active: boolean;
+}
+
+/** Durable coordinator publication semantics for event-loss polling. */
+export type ProjectAuthorityPublicationKind =
+  | "runtime_status"
+  | "mutation"
+  | "identity_replacement"
+  | "history_navigation";
+
+/**
+ * Backend-owned dirty/recovery semantics for a project authority image.
+ * Consumers must never infer these from a display label or a partial
+ * snapshot signature because event loss is recovered through polling.
+ */
+export type ProjectAuthorityDisposition =
+  | "clean_at_path"
+  | "unsaved_replacement"
+  | "recovery_pending_ack"
+  | "history_navigation"
+  | "runtime_sanitize";
+
+/**
+ * Complete, staged frontend authority state. Backend captures this under
+ * external-command admission and the ProjectCoordinator; callers must apply
+ * it as one identity-guarded operation rather than refreshing fields in
+ * separate RPCs.
+ */
+export interface ProjectAuthorityBundle {
+  project_epoch: number;
+  project_revision: number;
+  checkpoint_hash: string;
+  /** Runtime-only Timeline transport fence projected outside the persisted snapshot. */
+  timeline_transport_epoch: number;
+  timeline_transport_generation: number;
+  /** Mandatory current runtime projection paired with `snapshot`. */
+  timeline_runtime: TimelineRuntimeSnapshotWire;
+  publication_generation: number;
+  publication_kind: ProjectAuthorityPublicationKind;
+  /** Advances only for identity/Undo/Redo mapping replacement publications. */
+  mapping_replacement_generation: number;
+  authority_disposition_generation: number;
+  authority_disposition: ProjectAuthorityDisposition;
+  /** Durable machine-local recovery journal generation. */
+  recovery_authority_serial: number;
+  recovery_authority_last_transition: ProjectRecoveryAuthorityTransition;
+  path_generation: number;
+  history_generation: number;
+  current_project_path: string | null;
+  snapshot: EngineSnapshot;
+  profiles: FixtureProfileSummary[];
+  fixture_groups: FixtureGroupSummary[];
+  operator_policy: OperatorPolicy | null;
+  midi_mappings: MidiControlMapping[];
+  osc_mappings: OscControlMapping[];
+  dmx_mappings: DmxControlMapping[];
+  dj_track_triggers: DjTrackTriggerMapping[];
+  history: ProjectHistoryStatus;
+  input_runtime: ProjectInputRuntimeStatus;
+}
+
+export interface ProjectHistoryNavigationResult {
+  history_status: ProjectHistoryStatus;
+  authority: ProjectAuthorityBundle;
+}
+
+/** Atomic coordinator result for transaction Commit/Cancel and history Clear. */
+export interface ProjectHistoryMutationResult {
+  history_status: ProjectHistoryStatus;
+  authority: ProjectAuthorityBundle;
+}
+
+export const PROJECT_TRANSACTION_SCHEMA_VERSION = 1 as const;
+
+export interface ProjectTransactionTicket {
+  transaction_id: number;
+  project_epoch: number;
+  project_revision: number;
+  project_checkpoint_hash: string;
+  client_operation_id: string;
+  shape_fingerprint: string;
+  schema_version: number;
+  owner_id: string;
+  window_label: string;
+  owner_incarnation: number;
+  label: string;
+  coalesce_key: string;
+}
+
+/** Durable published-command proof retained with a transaction receipt. */
+export interface ProjectTransactionPatchCommandResult {
+  kind: "patch_fixtures";
+  request_digest: string;
+  fixture_ids: number[];
+}
+
+/** Durable published-command proof for an exact profile relink. */
+export interface ProjectTransactionRepairFixtureProfileCommandResult {
+  kind: "repair_fixture_profile";
+  request_digest: string;
+  fixture_id: number;
+}
+
+/** Engine acknowledgement retained with a Stage receipt; mirrors the Rust enum. */
+export type ProjectTransactionStageMutationOutcome = "applied" | "unchanged";
+
+/**
+ * Durable published-command proof shared by every D4 Stage renderer-ticketed
+ * route. Mirrors Rust's `ProjectTransactionCommandResult::StageProjectMutation`
+ * serde shape exactly: `command_name` must equal the requested route, and each
+ * route keeps its payload invariant (`add_stage_object` retains its allocated
+ * positive object ID, save/import retain the preset label, unit routes carry
+ * both nulls). Legacy route replies stay `()`/number/string on the wire.
+ */
+export interface ProjectTransactionStageCommandResult {
+  kind: "stage_project_mutation";
+  command_name: string;
+  request_digest: string;
+  outcome: ProjectTransactionStageMutationOutcome;
+  stage_object_id: number | null;
+  label: string | null;
+}
+
+export type ProjectTransactionCommandResult =
+  | ProjectTransactionPatchCommandResult
+  | ProjectTransactionRepairFixtureProfileCommandResult
+  | ProjectTransactionStageCommandResult;
+
+export type ProjectTransactionRecovery =
+  | {
+    status: "pending";
+    ticket: ProjectTransactionTicket;
+    command_result?: ProjectTransactionCommandResult | null;
+    /** Exact backend admission state for reply-loss recovery. */
+    command_in_flight: boolean;
+    /** Durable backend fault: do not poll, Cancel, or replay this ticket. */
+    command_indeterminate_error: string | null;
+  }
+  | { status: "committed"; mutation: ProjectHistoryMutationResult; command_result?: ProjectTransactionCommandResult | null }
+  | { status: "cancelled"; mutation: ProjectHistoryMutationResult; command_result?: ProjectTransactionCommandResult | null }
+  | { status: "acknowledged" };
+
+/** Canonical renderer wire shape; Rust recomputes and compares this tuple. */
+export const projectTransactionShapeFingerprint = (
+  commandName: string,
+  label: string,
+  coalesceKey: string,
+) => `project-transaction-v${PROJECT_TRANSACTION_SCHEMA_VERSION}|command=${commandName}|label=${label}|coalesce=${coalesceKey}`;
+
+export const projectTransactionRecoveryCanAdopt = (status: ProjectTransactionRecovery["status"]) =>
+  status === "pending";
+
+export const projectTransactionRecoveryIsTerminal = (status: ProjectTransactionRecovery["status"]) =>
+  status === "committed" || status === "cancelled" || status === "acknowledged";
+
+/** A Save/Save As acknowledgement captured after final disk publication. */
+export interface ProjectSaveResult {
+  path: string;
+  authority: ProjectAuthorityBundle;
+}
+
+/**
+ * The request is written by the renderer before entering the Tauri command.
+ * Keep its field names aligned with the versioned durable Rust journal rather
+ * than translating a partial UI intent at the IPC boundary.
+ */
+export type ProjectPublicationSurfaceV1 = "save" | "save_as" | "user_template" | "backup";
+export type ProjectPublicationTargetPolicyV1 = "current_or_dialog" | "dialog" | "managed_unique";
+export type ProjectPublicationStateV1 =
+  | "reserved"
+  | "selecting"
+  | "selected"
+  | "prepared"
+  | "succeeded"
+  | "cancelled"
+  | "abandoned"
+  | "failed"
+  | "indeterminate";
+
+export interface ProjectPublicationRequestV1 {
+  schemaVersion: 1;
+  originId: string;
+  requestId: number;
+  /** Registered renderer transaction owner; binds mutation admission end to end. */
+  ownerId: string;
+  surface: ProjectPublicationSurfaceV1;
+  expectedProjectEpoch: number;
+  expectedProjectRevision: number;
+  expectedCheckpointHash: string;
+  mappingAuthorityHash: string;
+  sourcePath: string | null;
+  reason: string | null;
+  targetPolicy: ProjectPublicationTargetPolicyV1;
+}
+
+/** Durable receipt for a Save, Save As, user-template, or backup request. */
+export interface ProjectPublicationStatusV1 {
+  request: ProjectPublicationRequestV1;
+  shapeHash: string;
+  surface: ProjectPublicationSurfaceV1;
+  state: ProjectPublicationStateV1;
+  targetPath: string | null;
+  /** SHA-256 of the prepared/published artifact when one exists. */
+  artifactDigest?: string;
+  backup: ProjectBackupSummary | null;
+  recoveryAuthoritySerial: number;
+  authority: ProjectAuthorityBundle | null;
+  error: string | null;
+  /** A successful backup may retain a non-fatal retention-cleanup warning. */
+  warning?: string;
+}
+
+export interface DvcImportDetail {
+  item: string;
+  message: string;
+}
+
+export interface DvcImportCategory {
+  count: number;
+  details: DvcImportDetail[];
+}
+
+export interface DvcImportSummary {
+  fixtures: number;
+  profiles: number;
+  fixture_groups: number;
+  groups: number;
+  cues: number;
+  values_decoded: number;
+  values_skipped: number;
+  beam_records: number;
+  beam_feature_checks: number;
+  beam_feature_mismatches: number;
+  timeline_audio_clips: number;
+  timeline_scene_blocks: number;
+  effects_converted: number;
+  effects_skipped: number;
+  unknown_channel_types: number;
+  missing_audio_files: number;
+}
+
+export interface DvcImportReport {
+  path: string;
+  das_build: string;
+  version_file: string;
+  summary: DvcImportSummary;
+  converted: DvcImportCategory;
+  approximate: DvcImportCategory;
+  skipped: DvcImportCategory;
+  unsupported: DvcImportCategory;
+  warnings: string[];
+  midi_mappings: MidiControlMapping[];
+  dmx_mappings: DmxControlMapping[];
+}
+
+export interface UserTemplateLoadResult extends ProjectLoadResult {
+  label: string;
+  midi_mappings: MidiControlMapping[];
+  osc_mappings: OscControlMapping[];
+  dmx_mappings: DmxControlMapping[];
+  dj_track_triggers: DjTrackTriggerMapping[];
+}
+
+export interface NodeGraphAudioNode {
+  source?: AudioSpectrumSource;
+  band: AudioSpectrumBand;
+  feature: AudioReactiveFeature;
+  band_index: number;
+  gain: number;
+  bias: number;
+  attack_ms: number;
+  release_ms: number;
+  gate: number;
+  curve: AudioReactiveCurve;
+  invert: boolean;
+  hold_ms: number;
+}
+
+export interface ProjectBackupSummary {
+  id: number;
+  created_at_unix_ms: number;
+  source_path?: string | null;
+  reason: string;
+  bytes: number;
+}
+
+export interface ApplicationUpdateConfiguration {
+  enabled: boolean;
+  current_version: string;
+  channel: string;
+  endpoint_origin?: string | null;
+  reason?: string | null;
+}
+
+export interface ApplicationUpdateCheck {
+  available: boolean;
+  current_version: string;
+  channel: string;
+  version?: string | null;
+  date?: string | null;
+  notes?: string | null;
+}
+
+export interface ApplicationUpdateProgress {
+  phase: "downloading" | "verifying" | "verified";
+  downloaded_bytes: number;
+  total_bytes?: number | null;
+}
+
+export interface ProjectHistoryStatus {
+  can_undo: boolean;
+  can_redo: boolean;
+  undo_depth: number;
+  redo_depth: number;
+  undo_label?: string | null;
+  redo_label?: string | null;
+  project_epoch: number;
+  project_revision: number;
+  /** Canonical persistence hash paired with the history stack. */
+  checkpoint_hash: string;
+  /** Changes even when the project content token is unchanged but history UI changes. */
+  history_generation: number;
+  undo_entry_id?: number | null;
+  undo_checkpoint_hash?: string | null;
+  redo_entry_id?: number | null;
+  redo_checkpoint_hash?: string | null;
+}
+
+export interface EngineSnapshotSyncResponse {
+  revision: number;
+  /** Mandatory engine-owned runtime projection; never reconstructed from `.sdc`. */
+  timeline_runtime: TimelineRuntimeSnapshotWire;
+  full?: EngineSnapshot | null;
+  delta?: Partial<EngineSnapshot> | null;
+}
+
+export interface Phase1SmokeReport {
+  path: string;
+  cue_id: number;
+  cue_label: string;
+  active_cue_id?: number | null;
+  timeline_event_count: number;
+  timeline_automation_count: number;
+  timeline_video_automation_count: number;
+  timeline_duration_ms: number;
+  timeline_probe_ms: number;
+  timeline_probe_dimmer_byte: number;
+  timeline_probe_video_opacity?: number | null;
+  dmx_output_count: number;
+  enabled_dmx_output_count: number;
+  dmx_preview_universe_count: number;
+  primary_output_label: string;
+  video_layer_count: number;
+  video_layer_label?: string | null;
+  video_layer_playing: boolean;
+  video_layer_opacity?: number | null;
+  first_8: number[];
+  expected_first_8: number[];
+  non_zero_first_8: number;
+  passed: boolean;
+}
+
+export interface CueFixtureTarget {
+  fixture_id: number;
+  values: AttributeValueSummary[];
+}
+
+export type VideoGeneratorColor = [number, number, number, number];
+export type VideoGenerator =
+  | { Solid: { color: VideoGeneratorColor } }
+  | { LinearGradient: { color_a: VideoGeneratorColor; color_b: VideoGeneratorColor; angle_degrees: number } }
+  | { Noise: { seed: number; scale: number; speed: number; color_a: VideoGeneratorColor; color_b: VideoGeneratorColor } };
+export type VideoSourceKind = { Generator: VideoGenerator } | "File" | "Camera" | "ScreenCapture" | "Ndi" | "Spout" | "Syphon" | "StillImage";
+
+export interface VideoSourceSummary {
+  kind: VideoSourceKind;
+  path?: string | null;
+  name?: string | null;
+  codec?: string | null;
+  metadata?: VideoMediaMetadata | null;
+}
+
+/** Persisted content identity for a local Media Library entry. */
+export type MediaAssetId = number;
+export type MediaHashAlgorithm = "Sha256";
+
+export interface MediaContentHash {
+  algorithm: MediaHashAlgorithm;
+  hex: string;
+}
+
+/**
+ * Project-persisted Media Library data. Availability deliberately lives in the
+ * IPC-only DTO below so a `.sdc` never serializes another machine's file state.
+ */
+export interface MediaAssetSummary {
+  id: MediaAssetId;
+  label: string;
+  source: VideoSourceSummary;
+  content_hash?: MediaContentHash | null;
+  byte_size?: number | null;
+}
+
+export type MediaAssetAvailability =
+  | { kind: "available_verified"; asset_id: MediaAssetId }
+  | { kind: "available_unverified"; asset_id: MediaAssetId }
+  | { kind: "missing"; asset_id: MediaAssetId }
+  | { kind: "hash_mismatch"; asset_id: MediaAssetId; expected: MediaContentHash; actual: MediaContentHash }
+  | { kind: "unreadable"; asset_id: MediaAssetId; error: string }
+  | { kind: "live_source"; asset_id: MediaAssetId };
+
+export type MediaAssetRelinkPolicy = "RequireContentMatch" | "AdoptReplacement";
+
+export type MediaAssetRelinkOutcome =
+  | { kind: "relinked"; asset_id: MediaAssetId; adopted_replacement: boolean }
+  | { kind: "needs_explicit_adoption"; asset_id: MediaAssetId }
+  | { kind: "hash_mismatch"; asset_id: MediaAssetId; expected: MediaContentHash; actual: MediaContentHash }
+  | { kind: "missing_replacement"; asset_id: MediaAssetId }
+  | { kind: "unreadable_replacement"; asset_id: MediaAssetId; error: string }
+  | { kind: "live_source"; asset_id: MediaAssetId };
+
+export type MediaAssetImportEntryStatus = "prepared" | "imported" | "reused" | "skipped" | "failed";
+
+export interface MediaAssetImportEntryReport {
+  input_index: number;
+  path: string;
+  status: MediaAssetImportEntryStatus;
+  asset_id?: MediaAssetId | null;
+  message?: string | null;
+}
+
+/** Exact operation identity reserved before the first local-media hash begins. */
+export interface MediaAssetOperationStartReport {
+  request_id: number;
+  operation_generation: number;
+  project_epoch: number;
+  project_revision: number;
+  checkpoint_hash: string;
+}
+
+/** Long-I/O Prepare/Finalize and short ticketed Commit report. */
+export interface MediaAssetImportReport {
+  request_id: number;
+  operation_generation: number;
+  prepared_import_token?: number | null;
+  project_epoch: number;
+  project_revision: number;
+  checkpoint_hash: string;
+  prepared: number;
+  imported: number;
+  reused: number;
+  skipped: number;
+  failed: number;
+  entries: MediaAssetImportEntryReport[];
+}
+
+export interface MediaAssetAvailabilityReport {
+  request_id: number;
+  operation_generation: number;
+  project_epoch: number;
+  project_revision: number;
+  checkpoint_hash: string;
+  availability: MediaAssetAvailability[];
+}
+
+/** Renderer-visible progress for one cancellable local-media operation. */
+export type MediaAssetOperationPhase =
+  | "picker"
+  | "preparing"
+  | "hashing"
+  | "finalizing"
+  | "committing"
+  | "cancelling";
+
+export interface MediaAssetActiveOperation {
+  id: number;
+  label: string;
+  phase: MediaAssetOperationPhase;
+}
+
+/** Start/Reserved Relink Prepare/Finalize report; tokenless outcomes are read-only. */
+export interface MediaAssetRelinkPrepareReport {
+  request_id: number;
+  operation_generation: number;
+  prepared_relink_token?: number | null;
+  project_epoch: number;
+  project_revision: number;
+  checkpoint_hash: string;
+  outcome?: MediaAssetRelinkOutcome | null;
+}
+
+export interface MediaAssetRelinkReport {
+  request_id: number;
+  operation_generation: number;
+  project_epoch: number;
+  project_revision: number;
+  checkpoint_hash: string;
+  outcome: MediaAssetRelinkOutcome;
+}
+
+/** Backend-owned Media Asset commit families retained in terminal receipts. */
+export type MediaAssetAuthoritativeCommitKind =
+  | "import"
+  | "relink"
+  | "video_file_layer"
+  | "still_image_layer"
+  | "local_media_layers"
+  | "bootstrap_vj_show";
+
+export interface VjFirstRunSetupResult {
+  layer_ids: number[];
+  composition_id: number;
+  output_id: number;
+}
+
+export interface MediaAssetAuthoritativeImportResult {
+  report: MediaAssetImportReport;
+  mutation: ProjectHistoryMutationResult;
+}
+
+export interface MediaAssetAuthoritativeRelinkResult {
+  report: MediaAssetRelinkReport;
+  mutation: ProjectHistoryMutationResult;
+}
+
+export interface MediaAssetAuthoritativeLayerResult {
+  layer_ids: number[];
+  mutation: ProjectHistoryMutationResult;
+}
+
+export interface MediaAssetAuthoritativeBootstrapResult {
+  setup: VjFirstRunSetupResult;
+  mutation: ProjectHistoryMutationResult;
+}
+
+export interface MediaAssetAuthoritativeFailureResult {
+  message: string;
+}
+
+/**
+ * Exact terminal payload returned by the backend receipt query. The tagged
+ * union mirrors Rust's `#[serde(tag = "kind", content = "result")]` shape.
+ */
+export type MediaAssetAuthoritativeTerminalResult =
+  | { kind: "import"; result: MediaAssetAuthoritativeImportResult }
+  | { kind: "relink"; result: MediaAssetAuthoritativeRelinkResult }
+  | { kind: "layers"; result: MediaAssetAuthoritativeLayerResult }
+  | { kind: "bootstrap"; result: MediaAssetAuthoritativeBootstrapResult }
+  | { kind: "failure"; result: MediaAssetAuthoritativeFailureResult };
+
+export interface MediaAssetAuthoritativeTerminalEnvelope {
+  command_kind: MediaAssetAuthoritativeCommitKind;
+  shape_fingerprint: string;
+  terminal: MediaAssetAuthoritativeTerminalResult;
+}
+
+export interface VideoMediaMetadata {
+  duration_ms?: number | null;
+  width?: number | null;
+  height?: number | null;
+  frame_rate?: number | null;
+  has_audio?: boolean;
+}
+
+export type VideoBlendMode =
+  | "Normal" | "Add" | "Multiply" | "Screen"
+  | "Overlay" | "Subtract" | "Difference" | "Lighten" | "Darken" | "SoftLight";
+export type VideoPixelFormat = "Rgba8" | "Bgra8" | "Dxt1" | "Dxt5";
+
+export interface VideoFrame {
+  layer_id: number;
+  width: number;
+  height: number;
+  pts_ms: number;
+  duration_ms: number;
+  format: VideoPixelFormat;
+  data: number[];
+}
+
+export type VideoBackendState = "Available" | "Missing" | "NotBuilt";
+
+export interface VideoBackendStatus {
+  id: string;
+  label: string;
+  state: VideoBackendState;
+  detail: string;
+}
+
+export interface VideoRuntimeStatus {
+  backends: VideoBackendStatus[];
+}
+
+export interface VideoAudioMonitorStatus {
+  output_open: boolean;
+  device_name?: string | null;
+  active_layer_ids: number[];
+  resync_count: number;
+  last_drift_ms: number;
+  max_abs_drift_ms: number;
+  last_sync_error?: string | null;
+}
+
+export type VideoRecordingState = "Idle" | "Preparing" | "Recording" | "Finalizing" | "Complete" | "Fault";
+
+/** Why the current or last take ended (DEC-RECORD-OWN-001). */
+export type VideoRecordingEndReason = "operator_stop" | "ownership_revoked" | "fault";
+
+export type MtcOutputFrameRate = "fps24" | "fps25" | "fps2997_drop" | "fps30";
+
+/** MIDI Time Code output following the Timeline (machine-local). */
+export interface MtcOutputStatus {
+  running: boolean;
+  port_name: string | null;
+  frame_rate: MtcOutputFrameRate | null;
+  transmitting: boolean;
+  held_reason: string | null;
+  timecode: string | null;
+  quarter_frames_sent: number;
+  full_frames_sent: number;
+  last_error: string | null;
+}
+
+export interface LtcInputDeviceSummary {
+  name: string;
+  channels: number;
+  sample_rate: number;
+  is_default: boolean;
+}
+
+/** SMPTE LTC input chased by the Timeline (machine-local). */
+export interface LtcInputStatus {
+  running: boolean;
+  device_name: string | null;
+  channel_index: number;
+  sample_rate: number;
+  signal: boolean;
+  timecode: string | null;
+  frame_rate: string | null;
+  frames_decoded: number;
+  dropped_samples: number;
+  last_error: string | null;
+}
+
+export type TakeoverRecordingState = "idle" | "pending" | "blocked" | "started" | "failed" | "cancelled";
+
+/** After Take Over and Arm, the previous Primary's recording continues here. */
+export interface TakeoverRecordingStatus {
+  state: TakeoverRecordingState;
+  folder: string | null;
+  reason: string | null;
+  predecessor_take_id: string | null;
+}
+
+export interface VideoRecordingStatus {
+  /** Additive lifecycle truth; legacy peers may omit it and use active/error fallback. */
+  state?: VideoRecordingState;
+  active: boolean;
+  output_id?: number | null;
+  path?: string | null;
+  width: number;
+  height: number;
+  frame_rate: number;
+  frames_written: number;
+  dropped_frames: number;
+  audio_requested: boolean;
+  audio_included: boolean;
+  audio_track_count: number;
+  started_unix_ms?: number | null;
+  renderer_process_isolated: boolean;
+  renderer_force_termination: boolean;
+  stop_deadline_ms: number;
+  last_error?: string | null;
+  /** The current or last take's receipt id. */
+  take_id?: string | null;
+  /** The video output ownership epoch the current or last take was admitted in. */
+  owner_epoch?: number | null;
+  end_reason?: VideoRecordingEndReason | null;
+  /** Why ownership was revoked when the gate alone does not say. */
+  end_detail?: string | null;
+  /** The takeover take (DEC-RECORD-OWN-001 phase 3). */
+  takeover?: TakeoverRecordingStatus | null;
+  /** Whether this PC may start a take now; only the video output owner records. */
+  admission_allowed?: boolean;
+  admission_reason?: string | null;
+}
+
+export interface LiveAudioInputStatus {
+  generation?: number;
+  running: boolean;
+  stale: boolean;
+  safety_clear_pending: boolean;
+  device_id?: string | null;
+  device_name?: string | null;
+  backend?: string | null;
+  sample_format?: string | null;
+  sample_rate: number;
+  channels: number;
+  configured_buffer_frames?: number | null;
+  applied_buffer_frames?: number | null;
+  channel_mix: LiveAudioChannelMix;
+  bass: number;
+  mid: number;
+  high: number;
+  bands: number[];
+  band_count: number;
+  rms: number;
+  peak: number;
+  spectral_flux: number;
+  spectral_centroid: number;
+  spectral_density_fast: number;
+  spectral_density_slow: number;
+  kick_strength: number;
+  snare_strength: number;
+  kick_event: boolean;
+  snare_event: boolean;
+  onset: boolean;
+  onset_strength: number;
+  bpm?: number | null;
+  bpm_confidence: number;
+  beat_phase: number;
+  feature_sequence: number;
+  analyzed_windows: number;
+  dropped_chunks: number;
+  dropped_frames: number;
+  backend_xruns: number;
+  callback_count: number;
+  last_callback_frames: number;
+  min_callback_frames: number;
+  max_callback_frames: number;
+  capture_to_worker_us: number;
+  max_capture_to_worker_us: number;
+  queue_depth: number;
+  queue_capacity: number;
+  queue_depth_high_water: number;
+  last_error?: string | null;
+  asio_selection?: LiveAudioInputAsioSelection | null;
+}
+
+/**
+ * Backend-native verdict for the machine-local persisted ASIO selection.
+ * Exact wire contract: unknown, missing, or malformed fields fail closed on
+ * the frontend; absent/null means non-ASIO or no persisted selection.
+ */
+export type LiveAudioInputAsioSelectionState = "restored" | "revalidated" | "invalid";
+
+export interface LiveAudioInputAsioSelection {
+  state: LiveAudioInputAsioSelectionState;
+  driver_id: string | null;
+  driver_name: string | null;
+  sample_rate_hz: number | null;
+  input_channels: number | null;
+  sample_format: string | null;
+  fixed_buffer_frames: number | null;
+  reason: string | null;
+  message: string;
+}
+
+export type LiveAudioInputBackendId = "wasapi_shared" | "asio";
+
+/** Exact probe classification; the authoritative availability gate for Start. */
+export type LiveAudioInputBackendAvailability = "ready" | "not_packaged" | "fault" | "unsupported";
+
+export interface LiveAudioInputBackendSummary {
+  id: LiveAudioInputBackendId;
+  label: string;
+  built: boolean;
+  requires_explicit_device: boolean;
+  distribution: string;
+  /** Required exact availability; never defaulted, aliased, or inferred from `built`. */
+  availability: LiveAudioInputBackendAvailability;
+  /** Optional nonblank probe detail; null when the probe adds nothing. */
+  availability_detail: string | null;
+}
+
+export interface LiveAudioInputDeviceSummary {
+  id: string;
+  name: string;
+  label: string;
+  backend: string;
+}
+
+export type LiveAudioChannelMix =
+  | { mode: "average_all" }
+  | { mode: "single"; channel_index: number }
+  | { mode: "stereo_pair"; left_channel_index: number; right_channel_index: number };
+
+export interface LiveAudioInputConfig {
+  channels: number;
+  sample_rate: number;
+  sample_format: string;
+}
+
+export type LiveAudioBufferCapability =
+  | { kind: "range"; min_frames: number; max_frames: number }
+  | { kind: "unknown" };
+
+export interface LiveAudioInputConfigRange {
+  channels: number;
+  min_sample_rate: number;
+  max_sample_rate: number;
+  sample_format: string;
+  buffer_size: LiveAudioBufferCapability;
+}
+
+export interface LiveAudioInputResolvedConfig {
+  channels: number;
+  sample_rate: number;
+  sample_format: string;
+  buffer_size: LiveAudioBufferCapability;
+}
+
+export interface LiveAudioInputCapabilities {
+  device_id?: string | null;
+  device_name: string;
+  backend: string;
+  default_config: LiveAudioInputConfig;
+  supported_configs: LiveAudioInputConfigRange[];
+  resolved_config: LiveAudioInputResolvedConfig;
+  max_capture_frames: number;
+}
+
+export interface LiveAudioInputStartRequest {
+  backend: LiveAudioInputBackendId;
+  device_id?: string | null;
+  sample_rate?: number | null;
+  stream_channels?: number | null;
+  sample_format?: string | null;
+  buffer_frames?: number | null;
+  channel_mix: LiveAudioChannelMix;
+}
+
+export interface VideoPreviewQueueSummary {
+  layer_id: number;
+  label: string;
+  source_kind: VideoSourceKind;
+  position_ms: number;
+  source_duration_ms?: number | null;
+  playing: boolean;
+  effective_speed: number;
+  queue_len: number;
+  expected_queue_len: number;
+  expected_positions_ms: number[];
+  ready: boolean;
+}
+
+export interface VideoDecodeEnqueueReport {
+  layers_considered: number;
+  requests_attempted: number;
+  inserted: number;
+  duplicate: number;
+  reprioritized: number;
+  dropped_lower_priority: number;
+  rejected_full: number;
+  pending: number;
+}
+
+export interface VideoOutputDecodePreviewSummary {
+  output_id: number;
+  label: string;
+  width: number;
+  height: number;
+  enabled: boolean;
+  blackout: boolean;
+  report?: VideoDecodeEnqueueReport | null;
+  error?: string | null;
+}
+
+export interface VideoPreviewDiagnostics {
+  queue_count: number;
+  frame_queue_capacity: number;
+  still_image_cache_len: number;
+  decoder_cache_len: number;
+  decoder_diagnostics: VideoDecoderDiagnostics;
+  isf_pipeline_count: number;
+  isf_last_stack_stage_count: number;
+  isf_last_stack_render_us: number;
+  last_isf_error?: string | null;
+  isf_stage_errors: VideoIsfStageError[];
+  prefetch_count: number;
+  prefetch_interval_ms: number;
+  bpm?: number | null;
+  layer_queues: VideoPreviewQueueSummary[];
+  output_decode_previews: VideoOutputDecodePreviewSummary[];
+}
+
+export interface VideoDecoderDiagnostics {
+  total_requests: number;
+  hap_requests: number;
+  hap_successes: number;
+  hap_failures: number;
+  libav_requests: number;
+  libav_successes: number;
+  libav_failures: number;
+  cli_fallback_requests: number;
+  cli_fallback_successes: number;
+  cli_fallback_failures: number;
+  deferred_requests: number;
+  decode_failures: number;
+  hap_cache_len: number;
+  libav_cache_len: number;
+  libav_session_count: number;
+  libav_session_open_count: number;
+  libav_session_reset_count: number;
+  libav_sequential_continue_count: number;
+  libav_frame_reuse_count: number;
+  libav_live_held_frame_count: number;
+  libav_working_set_eviction_count: number;
+  libav_session_error_count: number;
+  libav_hardware_session_count: number;
+  libav_hardware_frame_count: number;
+  libav_hardware_error_count: number;
+  cli_cache_len: number;
+}
+
+export interface ExternalVideoInputPlan {
+  layer_id: number;
+  label: string;
+  kind: VideoSourceKind;
+  backend_id: string;
+  source_identity: string;
+  backend_label?: string | null;
+  backend_state?: VideoBackendState | null;
+  backend_detail?: string | null;
+  endpoint_name: string;
+  enabled: boolean;
+  ready: boolean;
+  live: boolean;
+  issue?: string | null;
+}
+
+export interface ExternalVideoOutputPlan {
+  output_id: number;
+  label: string;
+  kind: VideoOutputKind;
+  backend_id: string;
+  backend_label?: string | null;
+  backend_state?: VideoBackendState | null;
+  backend_detail?: string | null;
+  endpoint_name: string;
+  enabled: boolean;
+  width: number;
+  height: number;
+  opacity: number;
+  blackout: boolean;
+  composition_id: number;
+  ready: boolean;
+  live: boolean;
+  issue?: string | null;
+}
+
+export interface ExternalVideoIoPlans {
+  inputs: ExternalVideoInputPlan[];
+  outputs: ExternalVideoOutputPlan[];
+}
+
+export type ExternalVideoTransportDirection = "Input" | "Output";
+
+export interface ExternalVideoTransportRoute {
+  direction: ExternalVideoTransportDirection;
+  route_id: number;
+  label: string;
+  backend_id: string;
+  endpoint_name: string;
+}
+
+export interface ExternalVideoTransportBlockedRoute {
+  route: ExternalVideoTransportRoute;
+  issue: string;
+}
+
+export type ExternalVideoTransportDriverAction = "Start" | "Stop";
+
+export interface ExternalVideoTransportDriverEvent {
+  sequence: number;
+  action: ExternalVideoTransportDriverAction;
+  route: ExternalVideoTransportRoute;
+  message: string;
+}
+
+export interface ExternalVideoTransportSyncReport {
+  started: ExternalVideoTransportRoute[];
+  kept: ExternalVideoTransportRoute[];
+  stopped: ExternalVideoTransportRoute[];
+  blocked: ExternalVideoTransportBlockedRoute[];
+  start_failed: ExternalVideoTransportBlockedRoute[];
+  stop_failed: ExternalVideoTransportBlockedRoute[];
+  idle: ExternalVideoTransportRoute[];
+  active_count: number;
+}
+
+export interface ExternalVideoCaptureFaultStatus {
+  route_id: number;
+  backend_id: string;
+  label: string;
+  message: string;
+}
+
+export interface ExternalVideoTransportStatus {
+  active_routes: ExternalVideoTransportRoute[];
+  active_count: number;
+  live_sources: ExternalVideoSourceRuntimeStatus[];
+  live_source_faults: ExternalVideoCaptureFaultStatus[];
+  capture_faults: ExternalVideoCaptureFaultStatus[];
+  ownership_allowed: boolean;
+  ownership_state: OutputOwnershipState;
+  ownership_reason: OutputOwnershipReason;
+  ownership_error: string | null;
+}
+
+/** Renderer-scoped, exact-authority ticket for an operator-authorized Media Library preview. */
+export interface MediaAssetPreviewSessionTicket {
+  session_id: number;
+  asset_id: MediaAssetId;
+  project_epoch: number;
+  project_revision: number;
+  checkpoint_hash: string;
+}
+
+export interface ExternalVideoTransportSyncResponse {
+  report: ExternalVideoTransportSyncReport;
+  events: ExternalVideoTransportDriverEvent[];
+}
+
+export interface VideoBpmSync {
+  enabled: boolean;
+  ratio: number;
+  loop_bars: number;
+}
+
+export interface Transform2D {
+  x: number;
+  y: number;
+  scale_x: number;
+  scale_y: number;
+  rotation_deg: number;
+  crop_left: number;
+  crop_top: number;
+  crop_right: number;
+  crop_bottom: number;
+}
+
+export interface VideoColorAdjust {
+  brightness: number;
+  contrast: number;
+  hue_deg: number;
+  saturation: number;
+  gamma: number;
+}
+
+export interface VideoFxAdjust {
+  pixelate: number;
+  blur: number;
+  glow: number;
+  edge: number;
+  key_red: number;
+  key_green: number;
+  key_blue: number;
+  key_threshold: number;
+}
+
+export interface VideoCuePointSummary {
+  position_ms: number;
+  label: string;
+  color?: string | null;
+}
+
+/** Stable authored identity for an ordered clip-bank entry. */
+export type VideoClipSlotId = number;
+export type VideoClipLoopMode = "Once" | "Loop" | "PingPong";
+export type VideoClipLaunchQuantization = "Immediate" | "NextBeat" | "NextBar";
+
+export interface VideoClipCuePointSummary {
+  position_ms: number;
+  name: string;
+}
+
+export interface VideoClipEffectOverrideSummary {
+  stage_index: number;
+  control_name: string;
+  value: [number, number, number, number];
+}
+
+/** Persisted authoring data. Runtime selection/playhead never belongs here. */
+export interface VideoClipSlotSummary {
+  id: VideoClipSlotId;
+  media_asset_id: MediaAssetId;
+  in_point_ms: number;
+  out_point_ms?: number | null;
+  loop_mode: VideoClipLoopMode;
+  speed: number;
+  cue_points: VideoClipCuePointSummary[];
+  launch_quantization: VideoClipLaunchQuantization;
+  effect_overrides: VideoClipEffectOverrideSummary[];
+}
+
+export interface VideoClipPendingLaunchSummary {
+  slot_id: VideoClipSlotId;
+  quantization: VideoClipLaunchQuantization;
+  target_boundary_ordinal: number;
+  clock_generation: number;
+  held_for_clock_discontinuity: boolean;
+  transition_kind: VideoClipTakeKind;
+  duration: VideoClipTakeDuration;
+  resolved_duration_ms: number;
+}
+
+export type VideoClipTakeKind =
+  | "Cut"
+  | "Crossfade"
+  | "Dip"
+  | "Wipe"
+  | "Luma"
+  | "Displacement"
+  | "Blur"
+  | "Glitch"
+  | "Custom";
+
+export type VideoClipTakeDurationUnit = "Milliseconds" | "Beats" | "Bars";
+
+export interface VideoClipTakeDuration {
+  unit: VideoClipTakeDurationUnit;
+  /** Fixed-point thousandths: 1000 is one beat/bar; milliseconds are exact. */
+  value_milliunits: number;
+}
+
+export interface VideoClipTakeTransitionSummary {
+  origin_slot_id: VideoClipSlotId;
+  outgoing_slot_id: VideoClipSlotId;
+  incoming_slot_id: VideoClipSlotId;
+  kind: VideoClipTakeKind;
+  elapsed_ms: number;
+  duration_ms: number;
+  duration: VideoClipTakeDuration;
+  progress_millis: number;
+  incoming_playhead_ms: number;
+  incoming_playing: boolean;
+}
+
+/** Ephemeral engine truth. It is intentionally separate from `.sdc` snapshots. */
+export interface VideoClipLayerRuntimeSummary {
+  layer_id: number;
+  active_slot_id?: VideoClipSlotId | null;
+  queued_slot_id?: VideoClipSlotId | null;
+  pending_launch?: VideoClipPendingLaunchSummary | null;
+  transition?: VideoClipTakeTransitionSummary | null;
+  playhead_ms: number;
+  playing: boolean;
+  ping_pong_reverse: boolean;
+}
+
+export interface VideoClipRuntimeSnapshot {
+  layers: VideoClipLayerRuntimeSummary[];
+}
+
+export type VideoClipSlotAuthoritativeCommitKind =
+  | "create"
+  | "assign"
+  | "update"
+  | "remove"
+  | "reorder"
+  | "duplicate"
+  | "set_default"
+  | "import_and_assign"
+  | "queue"
+  | "cancel_queue"
+  | "launch"
+  | "seek";
+
+export interface VideoClipSlotAuthoritativeAuthoredResult {
+  command_kind: VideoClipSlotAuthoritativeCommitKind;
+  layer_id: number;
+  affected_slot_ids: VideoClipSlotId[];
+  focus_slot_id?: VideoClipSlotId | null;
+  created_slot_ids: VideoClipSlotId[];
+  imported_asset_ids: MediaAssetId[];
+  insertion_before_slot_id?: VideoClipSlotId | null;
+  mutation: ProjectHistoryMutationResult;
+}
+
+export interface VideoClipSlotAuthoritativeRuntimeResult {
+  command_kind: VideoClipSlotAuthoritativeCommitKind;
+  project_epoch: number;
+  project_revision: number;
+  checkpoint_hash: string;
+  runtime_generation: number;
+  runtime: VideoClipRuntimeSnapshot;
+}
+
+/** History-free read report; unlike a runtime command reply it has no command identity. */
+export interface VideoClipRuntimeReport {
+  project_epoch: number;
+  project_revision: number;
+  checkpoint_hash: string;
+  runtime_generation: number;
+  runtime: VideoClipRuntimeSnapshot;
+}
+
+/** Immutable terminal receipt for a runtime command; live runtime is attached to the envelope. */
+export interface VideoClipSlotAuthoritativeRuntimeOutcome {
+  command_kind: VideoClipSlotAuthoritativeCommitKind;
+}
+
+export interface VideoClipSlotAuthoritativeFailureResult {
+  message: string;
+}
+
+export type VideoClipSlotAuthoritativeTerminalResult =
+  | { kind: "authored"; result: VideoClipSlotAuthoritativeAuthoredResult }
+  | { kind: "runtime"; result: VideoClipSlotAuthoritativeRuntimeOutcome }
+  | { kind: "failure"; result: VideoClipSlotAuthoritativeFailureResult };
+
+export interface VideoClipSlotAuthoritativeTerminalEnvelope {
+  command_kind: VideoClipSlotAuthoritativeCommitKind;
+  shape_fingerprint: string;
+  terminal: VideoClipSlotAuthoritativeTerminalResult;
+  runtime?: VideoClipSlotAuthoritativeRuntimeResult;
+}
+
+export interface VideoLayerState {
+  enabled: boolean;
+  solo: boolean;
+  opacity: number;
+  speed: number;
+  playing: boolean;
+  position_ms: number;
+  loop_enabled: boolean;
+  loop_start_ms: number;
+  loop_end_ms: number;
+  bpm_sync: VideoBpmSync;
+  cue_points: VideoCuePointSummary[];
+  cue_points_ms: number[];
+  transform: Transform2D;
+  color: VideoColorAdjust;
+  fx: VideoFxAdjust;
+}
+
+export type VideoIsfControlKind = "Event" | "Bool" | "Long" | "Float" | "Point2d" | "Color";
+
+export type VideoIsfTempoSyncUnit = "beats" | "bars";
+
+/** One cycle per `count` beats or bars (4/4) of the global tempo; count is 0.25, 0.5, 1, 2 or 4. */
+export interface VideoIsfTempoSync {
+  unit: VideoIsfTempoSyncUnit;
+  count: number;
+}
+
+export interface VideoIsfControlSummary {
+  name: string;
+  kind: VideoIsfControlKind;
+  value: [number, number, number, number];
+  default: [number, number, number, number];
+  minimum: [number, number, number, number];
+  maximum: [number, number, number, number];
+  labels: string[];
+  values: number[];
+  /** Authored tempo-sync choice for a Float time control; absent means a raw value. */
+  tempo_sync?: VideoIsfTempoSync | null;
+}
+
+export type VideoIsfImageSource =
+  | { kind: "none" }
+  | { kind: "layer"; layer_id: number }
+  | { kind: "imported"; path: string };
+
+export interface VideoIsfImageBinding {
+  name: string;
+  source: VideoIsfImageSource;
+}
+
+export interface VideoIsfEffectStageSummary {
+  enabled: boolean;
+  label: string;
+  source: string;
+  source_path?: string | null;
+  description?: string | null;
+  categories: string[];
+  controls: VideoIsfControlSummary[];
+  image_bindings?: VideoIsfImageBinding[];
+}
+
+export interface VideoIsfEffectSummary extends VideoIsfEffectStageSummary {
+  stack?: VideoIsfEffectStageSummary[];
+}
+
+export interface VideoIsfStageError {
+  layer_id: number;
+  stage_index?: number | null;
+  stage_label?: string | null;
+  message: string;
+}
+
+export interface VideoLayerSummary {
+  id: number;
+  label: string;
+  source: VideoSourceSummary;
+  media_asset_id?: MediaAssetId | null;
+  blend_mode: VideoBlendMode;
+  state: VideoLayerState;
+  isf_effect?: VideoIsfEffectSummary | null;
+  clip_slots?: VideoClipSlotSummary[];
+  default_clip_slot_id?: VideoClipSlotId | null;
+}
+
+export type VideoEffectId = number;
+export type VideoEffectChainId = number;
+export type VideoEffectStageId = number;
+export type VideoEffectPresetId = number;
+export type VideoLayerGroupId = number;
+export type VideoTransitionBusId = number;
+
+export type VideoTransitionEffectOwner =
+  | { kind: "clip_take"; layer_id: number }
+  | { kind: "layer_bus"; bus_id: VideoTransitionBusId };
+
+export type VideoEffectScope =
+  | { scope: "clip"; layer_id: number; slot_id: VideoClipSlotId }
+  | { scope: "layer"; layer_id: number }
+  | { scope: "transition"; owner: VideoTransitionEffectOwner }
+  | { scope: "composition"; composition_id: number }
+  | { scope: "group"; group_id: VideoLayerGroupId }
+  | { scope: "output"; output_id: number };
+
+export type VideoEffectKind = { kind: "isf"; effect: VideoIsfEffectSummary };
+
+export interface VideoEffectSummary {
+  id: VideoEffectId;
+  kind: VideoEffectKind;
+}
+
+export interface VideoEffectStageSummary {
+  id: VideoEffectStageId;
+  enabled: boolean;
+  label: string;
+  effect: VideoEffectSummary;
+}
+
+export interface VideoEffectChainSummary {
+  id: VideoEffectChainId;
+  scope: VideoEffectScope;
+  bypassed: boolean;
+  stages: VideoEffectStageSummary[];
+}
+
+export interface VideoEffectPresetStagePayload {
+  enabled: boolean;
+  label: string;
+  effect: VideoEffectKind;
+}
+
+export interface VideoEffectPresetPayload {
+  bypassed: boolean;
+  stages: VideoEffectPresetStagePayload[];
+}
+
+export interface VideoEffectPresetSummary {
+  id: VideoEffectPresetId;
+  label: string;
+  payload: VideoEffectPresetPayload;
+}
+
+export interface VideoLayerGroupSummary {
+  id: VideoLayerGroupId;
+  label: string;
+  composition_id: number;
+  layer_ids: number[];
+  enabled: boolean;
+  opacity: number;
+  blend_mode: VideoBlendMode;
+  solo: boolean;
+  bypassed: boolean;
+  transform?: Transform2D | null;
+}
+
+/** Only the group mix controls accepted from a learned input. */
+export type VideoGroupControlPatch = Partial<Pick<VideoLayerGroupSummary,
+  "enabled" | "opacity" | "blend_mode" | "solo" | "bypassed">>;
+
+export interface VideoCompositionLayerOrder {
+  composition_id: number;
+  layer_ids: number[];
+}
+
+/** One ticket and undo entry for both group policy and composition order. */
+export type VideoEffectCatalogUpdate = VideoEffectCatalog & {
+  composition_layer_orders?: VideoCompositionLayerOrder[];
+};
+
+export type VideoLayerTransitionTarget =
+  | { kind: "layer"; layer_id: number }
+  | { kind: "group"; group_id: VideoLayerGroupId };
+
+export type VideoLayerTransitionCurve = "linear" | "ease_in" | "ease_out" | "ease_in_out";
+
+export interface VideoLayerTransitionBusSummary {
+  id: VideoTransitionBusId;
+  label: string;
+  composition_id: number;
+  enabled: boolean;
+  members: VideoLayerTransitionTarget[];
+  default_from: VideoLayerTransitionTarget;
+  default_to: VideoLayerTransitionTarget;
+  default_kind: VideoClipTakeKind;
+  default_duration: VideoClipTakeDuration;
+  default_curve: VideoLayerTransitionCurve;
+  matte_source?: VideoLayerTransitionTarget | null;
+}
+
+export interface VideoLayerTransitionBusRuntimeSummary {
+  bus_id: VideoTransitionBusId;
+  origin_from: VideoLayerTransitionTarget;
+  from: VideoLayerTransitionTarget;
+  to: VideoLayerTransitionTarget;
+  kind: VideoClipTakeKind;
+  curve: VideoLayerTransitionCurve;
+  elapsed_ms: number;
+  duration_ms: number;
+  duration: VideoClipTakeDuration;
+  progress_millis: number;
+}
+
+export interface VideoLayerTransitionRuntimeSnapshot {
+  buses: VideoLayerTransitionBusRuntimeSummary[];
+}
+
+export type VideoLayerTransitionAuthoritativeRuntimeCommandKind = "launch" | "release";
+
+export interface VideoLayerTransitionAuthoritativeRuntimeResult {
+  command_kind: VideoLayerTransitionAuthoritativeRuntimeCommandKind;
+  project_epoch: number;
+  project_revision: number;
+  checkpoint_hash: string;
+  runtime_generation: number;
+  runtime: VideoLayerTransitionRuntimeSnapshot;
+}
+
+export interface VideoLayerTransitionRuntimeReport {
+  project_epoch: number;
+  project_revision: number;
+  checkpoint_hash: string;
+  runtime_generation: number;
+  runtime: VideoLayerTransitionRuntimeSnapshot;
+}
+
+export interface VideoLayerTransitionAuthoritativeRuntimeOutcome {
+  command_kind: VideoLayerTransitionAuthoritativeRuntimeCommandKind;
+}
+
+export interface VideoEffectCatalog {
+  effect_chains: VideoEffectChainSummary[];
+  effect_presets: VideoEffectPresetSummary[];
+  layer_groups: VideoLayerGroupSummary[];
+  transition_buses: VideoLayerTransitionBusSummary[];
+}
+
+export interface VideoEffectCatalogAuthoritativeResult {
+  catalog: VideoEffectCatalog;
+  mutation: ProjectHistoryMutationResult;
+}
+
+export interface TimelineAdvancedAuthoritativeResult {
+  authoring: TimelineAdvancedAuthoringSummary;
+  timeline_bank: TimelineSnapshot[];
+  active_timeline_id: number;
+  selected_items: TimelineItemRef[];
+  mutation: ProjectHistoryMutationResult;
+}
+
+export type VideoEffectCatalogTerminalResult =
+  | { kind: "applied"; result: VideoEffectCatalogAuthoritativeResult }
+  | { kind: "timeline"; result: TimelineAdvancedAuthoritativeResult }
+  | { kind: "runtime"; result: VideoLayerTransitionAuthoritativeRuntimeOutcome }
+  | { kind: "failure"; result: { message: string } };
+
+export interface VideoEffectCatalogTerminalEnvelope {
+  shape_fingerprint: string;
+  terminal: VideoEffectCatalogTerminalResult;
+  runtime?: VideoLayerTransitionAuthoritativeRuntimeResult | null;
+}
+
+export interface VideoLayerTarget {
+  layer_id: number;
+  state: VideoLayerState;
+}
+
+export interface VideoOutputTarget {
+  output_id: number;
+  enabled: boolean;
+  opacity: number;
+  blackout: boolean;
+}
+
+export type VideoOutputKind = "Display" | "NdiSender" | "SpoutSender" | "SyphonServer";
+export type VideoOutputAspectMode = "Stretch" | "Fit" | "Fill";
+
+export interface VideoMaskPoint {
+  x: number;
+  y: number;
+}
+
+export interface VideoOutputMapping {
+  stage_x: number;
+  stage_y: number;
+  stage_z: number;
+  offset_x: number;
+  offset_y: number;
+  scale_x: number;
+  scale_y: number;
+  rotation_deg: number;
+  aspect_ratio: number;
+  aspect_mode: VideoOutputAspectMode;
+  lens_distortion: number;
+  edge_blend_left: number;
+  edge_blend_right: number;
+  edge_blend_top: number;
+  edge_blend_bottom: number;
+  edge_blend_gamma: number;
+  black_level: number;
+  mask_point_count: number;
+  mask_invert: boolean;
+  mask_softness: number;
+  mask_points: VideoMaskPoint[];
+  bitmap_mask_width: number;
+  bitmap_mask_height: number;
+  bitmap_mask_luma_words: number[];
+  keystone_x: number;
+  keystone_y: number;
+  corner_top_left_x: number;
+  corner_top_left_y: number;
+  corner_top_right_x: number;
+  corner_top_right_y: number;
+  corner_bottom_right_x: number;
+  corner_bottom_right_y: number;
+  corner_bottom_left_x: number;
+  corner_bottom_left_y: number;
+}
+
+export interface VideoBitmapMaskImportResult {
+  width: number;
+  height: number;
+  luma_words: number[];
+  source_name: string;
+}
+
+export interface VideoOutputSummary {
+  id: number;
+  label: string;
+  kind: VideoOutputKind;
+  enabled: boolean;
+  composition_id: number;
+  fullscreen: boolean;
+  monitor_id?: number | null;
+  monitor_identity?: string | null;
+  width: number;
+  height: number;
+  endpoint_name?: string | null;
+  opacity: number;
+  blackout: boolean;
+  mapping: VideoOutputMapping;
+}
+
+export interface VideoOutputMappingPresetSummary {
+  label: string;
+  mapping: VideoOutputMapping;
+}
+
+export interface CompositionSummary {
+  id: number;
+  label: string;
+  layer_ids: number[];
+  /** Stable Timeline Video lane identities, resolved at render time. */
+  timeline_layer_ids?: TimelineVideoLayerRef[];
+  output_ids: number[];
+}
+
+export interface TimelineVideoLayerRef {
+  timeline_id: number;
+  layer_id: number;
+}
+
+export interface CompositionLayerPlan {
+  layer_id: number;
+  label: string;
+  source: VideoSourceSummary;
+  blend_mode: VideoBlendMode;
+  opacity: number;
+  position_ms: number;
+  transform: Transform2D;
+  color: VideoColorAdjust;
+  fx: VideoFxAdjust;
+}
+
+export interface CompositionPlan {
+  composition_id: number;
+  label: string;
+  output_ids: number[];
+  master_opacity: number;
+  blackout: boolean;
+  layers: CompositionLayerPlan[];
+}
+
+export interface VideoOutputRenderPlan {
+  output_id: number;
+  label: string;
+  kind: VideoOutputKind;
+  enabled: boolean;
+  width: number;
+  height: number;
+  fullscreen: boolean;
+  monitor_id?: number | null;
+  endpoint_name?: string | null;
+  output_opacity: number;
+  output_blackout: boolean;
+  mapping: VideoOutputMapping;
+  composition: CompositionPlan;
+}
+
+export interface VideoOutputWindowStatus {
+  output_id: number;
+  label: string;
+  live_open: boolean;
+  /** Backend-issued positive incarnation for the current live window. */
+  live_window_incarnation?: number | null;
+  test_pattern_open: boolean;
+  live_window_label: string;
+  test_pattern_window_label: string;
+  ownership_allowed: boolean;
+  ownership_state: OutputOwnershipState;
+  ownership_reason: OutputOwnershipReason;
+  ownership_error: string | null;
+  performance?: NativeVideoOutputPerformance | null;
+}
+
+export interface NativeVideoOutputPerformance {
+  frame_count: number;
+  average_frame_us: number;
+  last_frame_us: number;
+  max_frame_us: number;
+  deadline_miss_count: number;
+  frame_budget_pass: boolean | null;
+  width: number;
+  height: number;
+  output_capacity_bytes: number;
+  layer_slots: number;
+  output_reallocations: number;
+  layer_reallocations: number;
+  compressed_layer_uploads: number;
+  decoder_diagnostics: VideoDecoderDiagnostics;
+  last_error: string | null;
+  warmup_remaining: number;
+  validation_frame_target: number;
+  validation_epoch: number;
+  validation_state: string;
+  validation_reason: string | null;
+  lifetime_frame_count: number;
+  lifetime_average_frame_us: number;
+  lifetime_last_frame_us: number;
+  lifetime_max_frame_us: number;
+  lifetime_deadline_miss_count: number;
+  lifetime_error_count: number;
+}
+
+export interface VideoOutputWindowSyncSummary {
+  synced_live: number;
+  synced_test_pattern: number;
+  skipped_closed: number;
+}
+
+export interface VideoOutputWindowCloseSummary {
+  closed_live: number;
+  closed_test_pattern: number;
+  skipped_closed: number;
+}
+
+export interface VideoSnapshot {
+  layers: VideoLayerSummary[];
+  media_assets: MediaAssetSummary[];
+  compositions: CompositionSummary[];
+  outputs: VideoOutputSummary[];
+  mapping_presets: VideoOutputMappingPresetSummary[];
+  master_opacity: number;
+  blackout: boolean;
+  auto_vj?: AutoVjSnapshot;
+  effect_chains?: VideoEffectChainSummary[];
+  effect_presets?: VideoEffectPresetSummary[];
+  layer_groups?: VideoLayerGroupSummary[];
+  transition_buses?: VideoLayerTransitionBusSummary[];
+}
+
+export interface AutoVjConfig {
+  eligible_layer_ids: number[];
+  seed: number;
+  beats_per_change: number;
+  transition_ms: number;
+  avoid_immediate_repeat: boolean;
+  rhythm_source: AutoVjRhythmSource;
+}
+
+export type AutoVjRhythmSource = "Clock" | "LiveAudio";
+
+export type AutoVjMode = "Off" | "Armed" | "Running" | "Hold" | "Fault";
+
+export interface AutoVjAction {
+  sequence: number;
+  boundary_index: number;
+  beat: number;
+  layer_id: number;
+  transition_ms: number;
+  selection_token: number;
+  seed: number;
+  show_revision: number;
+  trigger: "ClockBoundary" | "LiveAudioOnset";
+  live_audio_feature_sequence?: number | null;
+}
+
+export interface AutoVjStatus {
+  mode: AutoVjMode;
+  armed: boolean;
+  hold: boolean;
+  show_revision: number;
+  action_sequence: number;
+  last_consumed_boundary?: number | null;
+  next_boundary_beat?: number | null;
+  last_action?: AutoVjAction | null;
+  action_log: AutoVjAction[];
+  fault?: string | null;
+  live_audio_beat_counter: number;
+  last_live_audio_feature_sequence?: number | null;
+}
+
+export interface AutoVjSnapshot {
+  config: AutoVjConfig;
+  status: AutoVjStatus;
+}
+
+/**
+ * Runtime-only state for the VJ preview deck. This is deliberately kept out of
+ * VideoSnapshot so preview transport never becomes project history or changes
+ * the Program bus.
+ */
+export interface VjPreviewTransportSummary {
+  layer_id: number | null;
+  /** Explicitly auditioned clip; null for the layer's current source. Runtime-only. */
+  slot_id?: VideoClipSlotId | null;
+  playing: boolean;
+  position_ms: number;
+  duration_ms: number | null;
+  speed: number;
+  loop_enabled: boolean;
+  loop_start_ms: number;
+  loop_end_ms: number;
+  updated_at_ms: number;
+  generation: number;
+  source_name?: string | null;
+  /** True while Preview renders an audition chain instead of the authored one. */
+  effect_audition?: boolean;
+}
+
+export interface CueSummary {
+  id: number;
+  cue_list_id: number;
+  cue_number: string;
+  label: string;
+  group_id?: string | null;
+  recall_mode?: RecallMode;
+  fade_ms: number;
+  /** Intrinsic musical length used when a placed Scene Block conforms to tempo. */
+  authored_beats?: number | null;
+  pre_wait_ms: number;
+  follow_ms?: number | null;
+  ifcb_timing: CueIfcbTiming;
+  parts: CuePartSummary[];
+  mark: boolean;
+  mib_fixture_ids: number[];
+  palette_targets: CuePaletteTarget[];
+  tracking: boolean;
+  notes: string;
+  targets: CueFixtureTarget[];
+  video_targets: VideoLayerTarget[];
+  video_output_targets: VideoOutputTarget[];
+  node_graph_targets: CueNodeGraphTarget[];
+  effect_targets: CueEffectTarget[];
+  steps?: CueStepSummary[];
+  child_timeline?: ChildTimelineSummary | null;
+  /** Persistent identity color (#rrggbb); absent inherits the group identity before cue hash fallback. */
+  color?: string | null;
+  /** T17 authored live-modifier dial defaults; absent means neutral, no flash. */
+  live_modifiers?: CueLiveModifierSettings | null;
+}
+
+export type CueLiveDirection = "Authored" | "Forward" | "Reverse" | "Bounce";
+
+/** T17/T20 authored starting position of the per-scene live controls. */
+export interface CueLiveModifierSettings {
+  speed: number;
+  size: number;
+  phase: number;
+  direction?: CueLiveDirection;
+  /** One-based Cue Step segment; 0 follows normal playback. */
+  segment?: number;
+  flash: boolean;
+}
+
+/** T17 runtime-only latched live override for one active scene. */
+export interface CueLiveModifierState {
+  cue_id: number;
+  speed: number;
+  size: number;
+  phase: number;
+  direction?: CueLiveDirection;
+  segment?: number;
+}
+
+export interface CueStepSummary {
+  values: CueFixtureTarget[];
+  fade_ms: number;
+  hold_ms: number;
+}
+
+export interface CueNodeGraphTarget {
+  graph_id: number;
+  enabled: boolean;
+}
+
+export type RecallMode = "Coexist" | "ReplaceGroup";
+
+export type EffectParamsSnapshot =
+  | { Lfo: LfoEffectRequest }
+  | { PositionWave: PositionWaveEffectRequest }
+  | { Color: ColorEffectRequest }
+  | { Chaser: ChaserEffectRequest }
+  | { Move: MoveEffectRequest }
+  | { Value: ValueEffectRequest }
+  | { Curve: CurveEffectRequest }
+  | { Mapping: MappingEffectRequest }
+  | { ColorMapping: ColorMappingEffectRequest };
+
+export interface CueEffectTarget {
+  effect_id: number;
+  enabled: boolean;
+  params?: EffectParamsSnapshot | null;
+  /** Optional cross-Cue Effect fade; absent preserves instant legacy recall. */
+  transition_ms?: number | null;
+}
+
+export interface ActiveFadeSummary {
+  cue_id: number;
+  progress: number;
+  remaining_ms: number;
+  paused: boolean;
+}
+
+export type TimelineTrackKind = "Lighting" | "Video";
+
+export type TimelineLayerKind = "Lighting" | "Video" | "Audio";
+
+export interface TimelineLayerSummary {
+  id: number;
+  label: string;
+  order: number;
+  muted: boolean;
+  locked: boolean;
+  solo: boolean;
+  expanded?: boolean;
+  kind: TimelineLayerKind;
+}
+
+export type TimelineAudioOutputBus = "PROGRAM" | "CUE";
+
+export type TimelineAudioClockMaster = "SHOW_CLOCK";
+export type TimelineAudioResamplingPolicy = "BOUNDED_DEVICE_SLEW";
+export type TimelineAudioSeekPolicy = "REANCHOR_TO_SHOW_CLOCK";
+export type TimelineAudioLoopPolicy = "WRAP_TO_AUTHORED_RANGE";
+export type TimelineAudioUnderrunPolicy = "RETIRE_AND_HOLD";
+export type TimelineAudioDeviceFaultPolicy = "RETIRE_AND_HOLD";
+
+export interface TimelineAudioPolicy {
+  version: number;
+  clock_master: TimelineAudioClockMaster;
+  resampling: TimelineAudioResamplingPolicy;
+  seek: TimelineAudioSeekPolicy;
+  loop_policy: TimelineAudioLoopPolicy;
+  underrun: TimelineAudioUnderrunPolicy;
+  device_fault: TimelineAudioDeviceFaultPolicy;
+  max_slew_ppm: number;
+  max_drift_ms: number;
+  resync_cooldown_ms: number;
+}
+
+export type ExternalVideoSourceRuntimeState =
+  | "Disabled"
+  | "Unavailable"
+  | "Ready"
+  | "Starting"
+  | "Live"
+  | "Fault"
+  | "Retiring";
+
+export interface ExternalVideoSourceRuntimeStatus {
+  route_id: number;
+  identity: string;
+  generation: number;
+  state: ExternalVideoSourceRuntimeState;
+  issue?: string | null;
+}
+
+export interface TimelineAudioClipSummary {
+  id: number;
+  layer_id: number;
+  media_asset_id?: number | null;
+  path: string;
+  start_ms: number;
+  offset_ms: number;
+  duration_ms: number;
+  gain: number;
+  fade_in_ms: number;
+  fade_out_ms: number;
+  /** Missing only in legacy browser fixtures; native project migration resolves it to PROGRAM. */
+  output_bus?: TimelineAudioOutputBus;
+}
+
+export interface TimelineCueEventSummary {
+  id: number;
+  cue_id: number;
+  time_ms: number;
+  /** Beat-domain placement intent; time_ms remains playback truth. */
+  time_beats?: number | null;
+  track: TimelineTrackKind;
+  layer_id?: number | null;
+  /** Legacy iteration length; for conformed blocks this is the fixed playback window. Zero preserves a point event. */
+  duration_ms: number;
+  /** Beat-domain block-window intent used by tempo reconform. */
+  duration_beats?: number | null;
+  /** Rewrites placement/window milliseconds from beat intent on BPM changes. */
+  conform_to_tempo?: boolean;
+  /** Keeps duration_ms as the block window and derives retrigger count to fill it. */
+  loop_fill?: boolean;
+  /** Cue-content phase offset at Scene Block activation; omitted legacy values default to zero. */
+  source_offset_ms?: number;
+  /** Derived display/cadence multiplier; recomputed by the engine on load. */
+  rate?: number | null;
+  /** Scene Block fade-in override, clamped to the block window. */
+  fade_in_ms?: number;
+  /** Scene Block release fade, clamped to the block window. */
+  fade_out_ms?: number;
+  /** Number of Cue iterations; derived by the engine when loop_fill is enabled. */
+  loop_count: number;
+  /** Optional placement to seek to after the final iteration completes. */
+  jump_to_event_id: number | null;
+}
+
+export type AutomationInterpolation = "Step" | "Linear" | "Bezier";
+
+export interface AutomationKeyframeSummary {
+  time_ms: number;
+  value: number;
+  interpolation: AutomationInterpolation;
+}
+
+export interface TimelineAutomationSummary {
+  id: number;
+  fixture_id: number;
+  attribute: string;
+  track: TimelineTrackKind;
+  timeline_layer_id?: number | null;
+  keyframes: AutomationKeyframeSummary[];
+  enabled: boolean;
+}
+
+export type VideoParam =
+  | "Opacity"
+  | "Speed"
+  | "PositionMs"
+  | "BpmSyncEnabled"
+  | "BpmSyncRatio"
+  | "BpmSyncLoopBars"
+  | "TransformX"
+  | "TransformY"
+  | "TransformScaleX"
+  | "TransformScaleY"
+  | "TransformRotationDeg"
+  | "TransformCropLeft"
+  | "TransformCropTop"
+  | "TransformCropRight"
+  | "TransformCropBottom"
+  | "ColorBrightness"
+  | "ColorContrast"
+  | "ColorHueDeg"
+  | "ColorSaturation"
+  | "ColorGamma"
+  | "FxPixelate"
+  | "FxBlur"
+  | "FxGlow"
+  | "FxEdge"
+  | "FxKeyRed"
+  | "FxKeyGreen"
+  | "FxKeyBlue"
+  | "FxKeyThreshold";
+
+export interface VideoAutomationKeyframeSummary {
+  time_ms: number;
+  value: number;
+  interpolation: AutomationInterpolation;
+}
+
+export interface TimelineVideoAutomationSummary {
+  id: number;
+  layer_id: number;
+  param: VideoParam;
+  track: TimelineTrackKind;
+  timeline_layer_id?: number | null;
+  keyframes: VideoAutomationKeyframeSummary[];
+  enabled: boolean;
+}
+
+export interface ChildTimelineSummary {
+  layers?: TimelineLayerSummary[];
+  events?: TimelineCueEventSummary[];
+  automations?: TimelineAutomationSummary[];
+  video_automations?: TimelineVideoAutomationSummary[];
+  audio?: AudioAnalysisSummary | null;
+  audio_clips?: TimelineAudioClipSummary[];
+  /** Scale this Timeline scene's authored millisecond grid to the owning Scene duration in beats. */
+  tempo_driven?: boolean;
+  metronome_enabled?: boolean;
+  count_in_beats?: number;
+  duration_ms?: number;
+}
+
+export type TimelinePhaseRole =
+  | "intro"
+  | "verse"
+  | "pre_chorus"
+  | "chorus"
+  | "interlude"
+  | "bridge"
+  | "breakdown"
+  | "outro"
+  | "custom";
+
+export interface TimelinePhaseSummary {
+  id: number;
+  label: string;
+  role: TimelinePhaseRole;
+  start_ms: number;
+  end_ms: number;
+}
+
+export interface TimelineVideoClipSummary {
+  id: number;
+  layer_id: number;
+  media_asset_id: number;
+  start_ms: number;
+  offset_ms: number;
+  duration_ms: number;
+  fade_in_ms: number;
+  fade_out_ms: number;
+}
+
+export type TimelineItemRef =
+  | { kind: "lighting_event"; event_id: number }
+  | { kind: "video_clip"; clip_id: number }
+  | { kind: "audio_clip"; clip_id: number }
+  | { kind: "lighting_automation"; automation_id: number }
+  | { kind: "video_automation"; automation_id: number };
+
+export interface TimelineItemGroupSummary {
+  id: number;
+  members: TimelineItemRef[];
+}
+
+export interface TimelineItemLaneTarget {
+  item: TimelineItemRef;
+  target_layer_id: number;
+}
+
+export interface TimelineItemLanePlacement {
+  item: TimelineItemRef;
+  resolved_layer_id: number;
+}
+
+export interface TimelineItemLaneMovePlan {
+  items: TimelineItemRef[];
+  primary: TimelineItemRef;
+  delta_ms: number;
+  lane_targets: TimelineItemLaneTarget[];
+  isolate: boolean;
+}
+
+export type TimelineItemLaneMovePlanResult =
+  | { ok: true; plan: TimelineItemLaneMovePlan }
+  | { ok: false; reason: "missing" | "kind" | "locked" | "range" | "unchanged" };
+
+const timelineItemLaneMoveKey = (item: TimelineItemRef) => {
+  switch (item.kind) {
+    case "lighting_event": return `lighting-event:${item.event_id}`;
+    case "video_clip": return `video-clip:${item.clip_id}`;
+    case "audio_clip": return `audio-clip:${item.clip_id}`;
+    case "lighting_automation": return `lighting-automation:${item.automation_id}`;
+    case "video_automation": return `video-automation:${item.automation_id}`;
+  }
+};
+
+export const planTimelineItemLaneMove = (input: {
+  items: TimelineItemRef[];
+  primary: TimelineItemRef;
+  target_layer_id: number;
+  delta_ms: number;
+  isolate: boolean;
+  layers: TimelineLayerSummary[];
+  groups: TimelineItemGroupSummary[];
+  placements: TimelineItemLanePlacement[];
+}): TimelineItemLaneMovePlanResult => {
+  const layerById = new Map(input.layers.map((layer) => [layer.id, layer]));
+  const placementByItem = new Map(input.placements.map((placement) => [
+    timelineItemLaneMoveKey(placement.item),
+    placement.resolved_layer_id,
+  ]));
+  const primaryKey = timelineItemLaneMoveKey(input.primary);
+  const primarySourceId = placementByItem.get(primaryKey);
+  const primarySource = primarySourceId === undefined ? undefined : layerById.get(primarySourceId);
+  const primaryTarget = layerById.get(input.target_layer_id);
+  if (!primarySource || !primaryTarget) return { ok: false, reason: "missing" };
+  const primaryIsScene = input.primary.kind === "lighting_event";
+  const sceneTargetCompatible = primaryIsScene
+    && primarySource.kind !== "Audio"
+    && primaryTarget.kind !== "Audio";
+  if (primarySource.kind !== primaryTarget.kind && !sceneTargetCompatible) {
+    return { ok: false, reason: "kind" };
+  }
+  if (primarySource.locked || primaryTarget.locked) return { ok: false, reason: "locked" };
+
+  const requested = input.isolate ? [input.primary] : [...input.items];
+  if (!requested.some((item) => timelineItemLaneMoveKey(item) === primaryKey)) {
+    requested.push(input.primary);
+  }
+  if (!input.isolate) {
+    let expanded = true;
+    while (expanded) {
+      expanded = false;
+      const keys = new Set(requested.map(timelineItemLaneMoveKey));
+      for (const group of input.groups) {
+        if (!group.members.some((member) => keys.has(timelineItemLaneMoveKey(member)))) continue;
+        for (const member of group.members) {
+          const key = timelineItemLaneMoveKey(member);
+          if (keys.has(key)) continue;
+          keys.add(key);
+          requested.push(member);
+          expanded = true;
+        }
+      }
+    }
+  }
+  const uniqueItems = requested.filter((item, index) => requested.findIndex((candidate) =>
+    timelineItemLaneMoveKey(candidate) === timelineItemLaneMoveKey(item)) === index);
+  const layersByKind = new Map<TimelineLayerKind, TimelineLayerSummary[]>();
+  for (const kind of ["Audio", "Lighting", "Video"] as const) {
+    layersByKind.set(kind, input.layers
+      .filter((layer) => layer.kind === kind)
+      .sort((left, right) => left.order - right.order || left.id - right.id));
+  }
+  const primarySourceLayers = layersByKind.get(primarySource.kind) ?? [];
+  const primaryTargetLayers = layersByKind.get(primaryTarget.kind) ?? [];
+  const sourceIndex = primarySourceLayers.findIndex((layer) => layer.id === primarySource.id);
+  const targetIndex = primaryTargetLayers.findIndex((layer) => layer.id === primaryTarget.id);
+  if (sourceIndex < 0 || targetIndex < 0) return { ok: false, reason: "missing" };
+  const ordinalDelta = targetIndex - sourceIndex;
+  if (primarySource.id === primaryTarget.id && Math.round(input.delta_ms) === 0) {
+    return { ok: false, reason: "unchanged" };
+  }
+
+  const laneTargets: TimelineItemLaneTarget[] = [];
+  for (const item of uniqueItems) {
+    const resolvedLayerId = placementByItem.get(timelineItemLaneMoveKey(item));
+    const source = resolvedLayerId === undefined ? undefined : layerById.get(resolvedLayerId);
+    if (!source) return { ok: false, reason: "missing" };
+    if (source.locked) return { ok: false, reason: "locked" };
+    const sourceKindLayers = layersByKind.get(source.kind) ?? [];
+    const itemSourceIndex = sourceKindLayers.findIndex((layer) => layer.id === source.id);
+    const targetKind = primaryIsScene && item.kind === "lighting_event"
+      ? primaryTarget.kind
+      : source.kind;
+    const targetKindLayers = layersByKind.get(targetKind) ?? [];
+    const itemTarget = timelineItemLaneMoveKey(item) === primaryKey
+      ? primaryTarget
+      : targetKindLayers[itemSourceIndex + ordinalDelta];
+    if (itemSourceIndex < 0 || !itemTarget) return { ok: false, reason: "range" };
+    if (itemTarget.locked) return { ok: false, reason: "locked" };
+    laneTargets.push({ item, target_layer_id: itemTarget.id });
+  }
+  return {
+    ok: true,
+    plan: {
+      items: uniqueItems,
+      primary: input.primary,
+      delta_ms: Math.round(input.delta_ms),
+      lane_targets: laneTargets,
+      isolate: input.isolate,
+    },
+  };
+};
+
+export interface TimelineLoopRegionSummary {
+  a_ms: number;
+  b_ms: number;
+  enabled: boolean;
+  musical_length_beats?: number | null;
+}
+
+export type TimelineFollowLightingPolicy = "hold_then_cut" | "linear_merge";
+export type TimelineFollowFaultPolicy = "hold" | "cut" | "fault";
+export type TimelineFollowDestinationStartMode = "play" | "wait_for_pedal";
+
+export interface TimelineFollowSummary {
+  enabled: boolean;
+  next_timeline_id: number;
+  duration: VideoClipTakeDuration;
+  curve: VideoLayerTransitionCurve;
+  video_kind: VideoClipTakeKind;
+  lighting_policy: TimelineFollowLightingPolicy;
+  destination_bpm?: number | null;
+  preroll_ms: number;
+  trans_cadence_bars: number;
+  fault_policy: TimelineFollowFaultPolicy;
+  /** Hold the destination's first measure until the operator releases the pedal. */
+  hold_first_destination_measure?: boolean;
+  /** Start immediately, or install the destination paused until Pedal 1. */
+  destination_start_mode?: TimelineFollowDestinationStartMode;
+}
+
+export type TimelineLoopRuntimeStatus = "disabled" | "armed" | "looping";
+export interface TimelineLoopRuntimeSummary {
+  generation: number;
+  status: TimelineLoopRuntimeStatus;
+  a_ms?: number | null;
+  b_ms?: number | null;
+  musical_length_millibeats?: number | null;
+  wrap_count: number;
+}
+
+/** Runtime-only Follow transport status. This is never inferred from authored Follow settings. */
+export type TimelineFollowRuntimeStatus =
+  | "idle"
+  | "pending"
+  | "armed"
+  | "transitioning"
+  | "settling"
+  | "held"
+  | "fault"
+  | "aborting";
+export type TimelineFollowAdmissionReason = "natural_playback_boundary" | "preroll_before_natural_playback_boundary";
+export type TimelineFollowAbortReason =
+  | "stop"
+  | "manual_seek"
+  | "project_replacement"
+  | "timeline_bank_replacement"
+  | "loop_wrap"
+  | "playback_fault"
+  | "explicit_abort"
+  | "clock_discontinuity";
+export type TimelineFollowOutcome =
+  | { kind: "completed" }
+  | { kind: "cut" }
+  | { kind: "held" }
+  | { kind: "fault" }
+  | { kind: "aborted"; reason: TimelineFollowAbortReason };
+export type TimelineFollowSettlementState = "pending" | "applied" | "not_applicable" | "fault" | "timed_out";
+export type TimelineFollowSettlementDomain = "audio" | "video" | "lighting";
+export interface TimelineFollowSettlementConsumerSummary {
+  consumer_id: { kind: "audio" } | { kind: "lighting" } | { kind: "video_output"; output_id: number };
+  state: TimelineFollowSettlementState;
+  fault?: string | null;
+}
+export interface TimelineFollowSettlementDomainSummary {
+  domain: TimelineFollowSettlementDomain;
+  state: TimelineFollowSettlementState;
+  fault?: string | null;
+  consumers: TimelineFollowSettlementConsumerSummary[];
+}
+export interface TimelineFollowSettlementSummary {
+  started_at_ms: number;
+  deadline_ms: number;
+  state: TimelineFollowSettlementState;
+  progress_millis: number;
+  fault_policy: TimelineFollowFaultPolicy;
+  fault?: string | null;
+  domains: TimelineFollowSettlementDomainSummary[];
+}
+export interface TimelineFollowRuntimeSummary {
+  /** Output ownership epoch paired with generation; the runtime stale-read fence. */
+  epoch: number;
+  generation: number;
+  status: TimelineFollowRuntimeStatus;
+  admission_reason?: TimelineFollowAdmissionReason | null;
+  outcome?: TimelineFollowOutcome | null;
+  source_timeline_id?: number | null;
+  target_timeline_id?: number | null;
+  elapsed_ms: number;
+  duration_ms: number;
+  progress_millis: number;
+  fault?: string | null;
+  transition_hold_active?: boolean;
+  /** Target is paused at zero after Follow and will start only on Pedal 1. */
+  waiting_for_pedal_start?: boolean;
+  settlement?: TimelineFollowSettlementSummary | null;
+}
+
+export interface TimelineFollowRuntimeReport {
+  project_epoch: number;
+  project_revision: number;
+  checkpoint_hash: string;
+  runtime: TimelineFollowRuntimeSummary;
+}
+
+export interface TimelineFollowAbortRequest {
+  expected_follow_epoch: number;
+  expected_generation: number;
+}
+
+export interface TimelineFollowAbortAuthoritativeResult {
+  runtime: TimelineFollowRuntimeSummary;
+}
+
+export interface TimelineFollowOperationTerminalEnvelope {
+  shape_fingerprint: string;
+  terminal: TimelineFollowAbortAuthoritativeResult;
+}
+
+/** Same runtime epoch accepts an equal/newer generation; a newer epoch starts a new generation domain. */
+export const timelineFollowRuntimeCanApply = (
+  applied: Pick<TimelineFollowRuntimeSummary, "epoch" | "generation"> | null,
+  candidate: Pick<TimelineFollowRuntimeSummary, "epoch" | "generation">,
+) => applied === null
+  || candidate.epoch > applied.epoch
+  || (candidate.epoch === applied.epoch && candidate.generation >= applied.generation);
+
+/**
+ * Owns the one renderer-visible Follow abort in flight. A project replacement
+ * invalidates its previous lease before clearing busy state, so an old IPC
+ * completion cannot clear a newer project's Abort affordance.
+ */
+export const createTimelineFollowAbortLease = () => {
+  let latestLease = 0;
+  let activeLease: number | null = null;
+  const nextLease = () => {
+    if (latestLease >= Number.MAX_SAFE_INTEGER) {
+      throw new Error("Timeline Follow abort leases are exhausted; reload Syndocal before continuing.");
+    }
+    latestLease += 1;
+    return latestLease;
+  };
+  return {
+    begin: () => {
+      const lease = nextLease();
+      activeLease = lease;
+      return lease;
+    },
+    reset: () => {
+      nextLease();
+      activeLease = null;
+    },
+    isCurrent: (lease: number) => activeLease === lease && latestLease === lease,
+    reportFailure: (lease: number, publish: () => void) => {
+      if (activeLease !== lease || latestLease !== lease) return false;
+      publish();
+      return true;
+    },
+    release: (lease: number) => {
+      if (activeLease !== lease || latestLease !== lease) return false;
+      activeLease = null;
+      return true;
+    },
+  };
+};
+
+export interface TimelineFollowAbortFocusFence {
+  reset: () => void;
+  schedule: (
+    applied: boolean,
+    focus: () => void,
+    scheduler: (callback: () => void) => unknown,
+  ) => boolean;
+}
+
+/**
+ * A separate generation fence for deferred focus restoration. Abort ownership
+ * may already be released when requestAnimationFrame runs, so project reset
+ * must invalidate callbacks independently of the operation lease.
+ */
+export const createTimelineFollowAbortFocusFence = (): TimelineFollowAbortFocusFence => {
+  let generation = 0;
+  const reset = () => {
+    if (generation >= Number.MAX_SAFE_INTEGER) {
+      throw new Error("Timeline Follow abort focus generations are exhausted; reload Syndocal before continuing.");
+    }
+    generation += 1;
+  };
+  return {
+    reset,
+    schedule: (applied, focus, scheduler) => {
+      if (!applied) return false;
+      const capturedGeneration = generation;
+      scheduler(() => {
+        if (generation !== capturedGeneration) return;
+        focus();
+      });
+      return true;
+    },
+  };
+};
+
+export type TimelineGuideCueKind =
+  | { kind: "phase"; phase_id: number }
+  | { kind: "looping" }
+  | { kind: "break" }
+  | { kind: "trans" }
+  | { kind: "complete" };
+
+export type TimelineGuideAssetKey =
+  | "intro"
+  | "verse"
+  | "pre_chorus"
+  | "chorus"
+  | "interlude"
+  | "bridge"
+  | "breakdown"
+  | "outro"
+  | "looping"
+  | "break"
+  | "trans"
+  | "complete";
+
+export type TimelineScheduleSource =
+  | { kind: "root" }
+  | { kind: "direct_child"; cue_id: number; generation: number };
+
+export interface TimelineGuideCueSummary {
+  generation: number;
+  sequence: number;
+  at_ms: number;
+  label: string;
+  cue: TimelineGuideCueKind;
+  asset: TimelineGuideAssetKey;
+  playback_rate_milli: number;
+  sample_frame: number;
+  epoch: number;
+  transport_generation: number;
+  schedule_generation: number;
+  source: TimelineScheduleSource;
+}
+
+/** Machine-local Cue Audio delivery settings. Project Click and Guide remain separate enables. */
+export interface MachineTimelineCueAudioSettingsV1 {
+  version: number;
+  route: "follow_program" | "explicit_device";
+  device_name: string | null;
+  topology_fingerprint: string | null;
+  click_gain: number;
+  guide_gain: number;
+}
+
+export type TimelineCueAudioLifecycle =
+  | "loading_settings"
+  | "disabled_by_project"
+  | "waiting_for_program_output"
+  | "applying"
+  | "running"
+  | "missing_device"
+  | "ambiguous_device"
+  | "topology_changed"
+  | "stalled"
+  | "fault";
+
+/** Exact-name output candidates; duplicate names are summarized by occurrences and are not selectable. */
+export interface TimelineCueAudioEndpointSummary {
+  name: string;
+  occurrences: number;
+  selectable: boolean;
+}
+
+/** Backend-authoritative machine Cue Audio status. Do not derive applied state on the frontend. */
+export interface TimelineCueAudioStatus {
+  runtimeIncarnation: number;
+  statusRevision: number;
+  desiredSettings: MachineTimelineCueAudioSettingsV1;
+  appliedSettings: MachineTimelineCueAudioSettingsV1 | null;
+  settingsRevision: number;
+  lifecycle: TimelineCueAudioLifecycle;
+  requestedDeviceName: string | null;
+  resolvedDeviceName: string | null;
+  requestedTopologyFingerprint: string | null;
+  observedTopologyFingerprint: string | null;
+  topologyGeneration: number;
+  endpoints: TimelineCueAudioEndpointSummary[];
+  outputClockEpoch: number;
+  scheduleGeneration: number;
+  sourceFence: number;
+  nextOutputFrame: number;
+  callbackLive: boolean;
+  faultCode: string;
+  faultCount: number;
+  faultSequence: number;
+  lastError: string | null;
+  rotationCount: number;
+  stallCount: number;
+  configCount: number;
+}
+
+export interface TimelineAdvancedAuthoringSummary {
+  /**
+   * Complete timing/keyframe mutation payload used by the authoritative
+   * Timeline Apply transaction. Scene Block source replacement is deliberately
+   * not represented here: this wire shape has no source_offset_ms field.
+   */
+  snap_request?: TimelineSnapRequest | null;
+  video_clips: TimelineVideoClipSummary[];
+  audio_clips: TimelineAudioClipSummary[];
+  phases: TimelinePhaseSummary[];
+  item_groups: TimelineItemGroupSummary[];
+  loop_region?: TimelineLoopRegionSummary | null;
+  follow?: TimelineFollowSummary | null;
+  guide_enabled: boolean;
+}
+
+/**
+ * Exact Timeline event timing payload accepted by the existing authoritative
+ * Apply transaction. It intentionally has no source_offset_ms: callers must
+ * use it only when the event source is provably unchanged.
+ */
+export interface TimelineEventPlacementUpdate {
+  event_id: number;
+  cue_id: number;
+  time_ms: number;
+  time_beats: number | null;
+  track: TimelineTrackKind;
+  layer_id: number | null;
+  duration_ms: number;
+  duration_beats: number | null;
+  conform_to_tempo: boolean;
+  loop_fill: boolean;
+  fade_in_ms: number;
+  fade_out_ms: number;
+  loop_count: number;
+  jump_to_event_id: number | null;
+}
+
+export interface TimelineSnapRequest {
+  event_placements: TimelineEventPlacementUpdate[];
+  lighting_automations: Array<{
+    automation_id: number;
+    keyframes: AutomationKeyframeSummary[];
+  }>;
+  video_automations: Array<{
+    automation_id: number;
+    keyframes: VideoAutomationKeyframeSummary[];
+  }>;
+}
+
+export type TimelineAdvancedMutationRequest =
+  | { kind: "apply"; authoring: TimelineAdvancedAuthoringSummary }
+  | { kind: "insert_media"; media_asset_id: number; start_ms: number; video_layer_id?: number | null; audio_layer_id?: number | null }
+  | { kind: "group"; members: TimelineItemRef[] }
+  | { kind: "ungroup"; group_id: number }
+  | { kind: "move_group"; group_id: number; delta_ms: number }
+  | { kind: "duplicate_items"; items: TimelineItemRef[]; offset_ms: number }
+  | { kind: "nudge_items"; items: TimelineItemRef[]; delta_ms: number }
+  | { kind: "ripple_items"; items: TimelineItemRef[]; delta_ms: number }
+  | { kind: "quantize_items"; items: TimelineItemRef[]; grid_ms: number }
+  | { kind: "paste_items"; items: TimelineItemRef[]; target_ms: number }
+  | { kind: "trim_items"; items: TimelineItemRef[]; primary: TimelineItemRef; edge: "start" | "end"; boundary_ms: number; isolate: boolean }
+  | { kind: "split_items"; items: TimelineItemRef[]; primary: TimelineItemRef; boundary_ms: number; isolate: boolean }
+  | { kind: "move_items_to_lanes"; items: TimelineItemRef[]; primary: TimelineItemRef; delta_ms: number; lane_targets: TimelineItemLaneTarget[]; isolate: boolean }
+  | { kind: "delete_items"; items: TimelineItemRef[] }
+  | { kind: "set_phases"; phases: TimelinePhaseSummary[] }
+  | { kind: "set_loop"; loop_region?: TimelineLoopRegionSummary | null }
+  | { kind: "set_follow"; follow?: TimelineFollowSummary | null }
+  | { kind: "set_guide"; enabled: boolean }
+  | { kind: "create_timeline"; label: string }
+  | { kind: "duplicate_timeline"; timeline_id: number }
+  | { kind: "remove_timeline"; timeline_id: number }
+  | { kind: "reorder_timelines"; timeline_ids: number[] }
+  | { kind: "select_timeline"; timeline_id: number; play?: boolean };
+
+export interface TimelineSnapshot {
+  id?: number;
+  label?: string;
+  layers?: TimelineLayerSummary[];
+  events: TimelineCueEventSummary[];
+  automations: TimelineAutomationSummary[];
+  video_automations: TimelineVideoAutomationSummary[];
+  audio?: AudioAnalysisSummary | null;
+  audio_clips?: TimelineAudioClipSummary[];
+  video_clips?: TimelineVideoClipSummary[];
+  phases?: TimelinePhaseSummary[];
+  item_groups?: TimelineItemGroupSummary[];
+  loop_region?: TimelineLoopRegionSummary | null;
+  follow?: TimelineFollowSummary | null;
+  guide_enabled?: boolean;
+  loop_runtime?: TimelineLoopRuntimeSummary;
+  follow_runtime?: TimelineFollowRuntimeSummary;
+  guide_cues?: TimelineGuideCueSummary[];
+  audio_offset_ms?: number;
+  audio_muted?: boolean;
+  metronome_enabled?: boolean;
+  count_in_beats?: number;
+  count_in_remaining_ms?: number;
+  /** Exact engine-owned runtime fence epoch; never authored/persisted. */
+  transport_epoch?: number;
+  /** Exact engine-owned runtime fence generation; never authored/persisted. */
+  transport_generation?: number;
+  playing: boolean;
+  position_ms: number;
+  duration_ms: number;
+}
+
+/**
+ * Runtime-only Timeline transport state sent beside the persisted snapshot.
+ * The nested TimelineSnapshot intentionally omits this data on every serde
+ * project path, so renderer ingress must hydrate only this projection.
+ */
+export interface TimelineRuntimeSnapshotWire {
+  transport_epoch: number;
+  transport_generation: number;
+  loop_runtime: TimelineLoopRuntimeSummary;
+  follow_runtime: TimelineFollowRuntimeWire;
+}
+
+/** Exact full Follow runtime projection used only beside snapshot IPC. */
+export interface TimelineFollowRuntimeWire extends TimelineFollowRuntimeSummary {
+  epoch: number;
+  transition_hold_active: boolean;
+  waiting_for_pedal_start: boolean;
+}
+
+/** Exact response shape of the direct full `get_snapshot` read. */
+export interface EngineSnapshotRuntimeWireResponse {
+  snapshot: EngineSnapshot;
+  timeline_runtime: TimelineRuntimeSnapshotWire;
+}
+
+export interface DaslightCurveSource {
+  rate: number;
+  size: number;
+  offset: number;
+  sample_ms: number;
+  rng_seed?: number | null;
+}
+
+/**
+ * Imported Daslight Custom CURVE source. `raw_y` deliberately retains the
+ * source encoding: the integer tens digit is the easing code and the
+ * fractional part is the output value. Point order is semantic and must not
+ * be sorted by an editor or preview.
+ */
+export interface DaslightCustomCurvePoint {
+  x: number;
+  raw_y: number;
+}
+
+export interface DaslightCustomCurveSource {
+  points: DaslightCustomCurvePoint[];
+  phasing: number;
+  sample_ms: number;
+}
+
+export interface LfoEffectRequest {
+  label: string;
+  fixture_ids: number[];
+  target_group_ids: string[];
+  attribute: string;
+  video_targets: VideoEffectTarget[];
+  shape: LfoShape;
+  period_ms: number;
+  clock_sync?: EffectClockSync | null;
+  low: number;
+  high: number;
+  phase: number;
+  fixture_spread?: number;
+  beam_targets?: EffectBeamTarget[];
+  blend_mode: EffectBlendMode;
+  daslight_curve?: DaslightCurveSource | null;
+  daslight_custom_curve?: DaslightCustomCurveSource | null;
+}
+
+export interface EffectClockSync {
+  beats: number;
+}
+
+export interface ColorEffectColor {
+  red: number;
+  green: number;
+  blue: number;
+}
+
+export interface ColorEffectStop {
+  position: number;
+  color: ColorEffectColor;
+}
+
+export interface ColorEffectBeamTarget {
+  fixture_id: number;
+  beam_index: number;
+  selection_index: number;
+  feature_attribute?: string | null;
+}
+
+export type ColorEffectSpatialRecipe =
+  | { KnightRider: { grayscale?: boolean; vertical_symmetry?: boolean; size: number; one_way: boolean; fading: boolean; go_outside: boolean; gradient: number } }
+  | { Sweep: { grayscale?: boolean; vertical_symmetry?: boolean; direction_change: boolean } }
+  | { Burst: { grayscale?: boolean; vertical_symmetry?: boolean; color_width: number; gradient: number } }
+  | { RandomFill: { grayscale?: boolean; vertical_symmetry?: boolean; rng_seed?: number; point_width: number; source_point_height?: number | null } }
+  | { Sparkle: { grayscale?: boolean; vertical_symmetry?: boolean; rng_seed?: number; number: number; lifetime_ms?: number | null; source_lifespan?: number | null; width: number; height?: number | null } }
+  | { Spiral: { grayscale?: boolean; radius: number; arms: number; gradient: number } }
+  | { Butterfly: { grayscale?: boolean; color_width: number; gradient: number; clockwise: boolean } }
+  | { Plasma: { grayscale: boolean; vertical_symmetry: boolean; size_x: number; param_x: number; size_y: number; param_y: number; speed_x: number; param_sx: number; speed_y: number; param_sy: number } }
+  | { ColorRainbow: { grayscale: boolean; vertical_symmetry: boolean; color_width: number; angle_degrees: number; gradient: number } }
+  | { Rainbow: { grayscale: boolean; vertical_symmetry: boolean; horizontal_symmetry: boolean; rotation_degrees: number; color_width: number; angle_degrees: number; gradient: number } }
+  | { Grid: { grayscale: boolean; size: number; width: number } }
+  | { Lines: { grayscale: boolean; size: number } }
+  | { Graph: { grayscale: boolean; height: number; width: number; pitch: number; frequency: number; amplitude: number; offset: number } }
+  | { Perlin: { grayscale?: boolean; vertical_symmetry?: boolean; horizontal_symmetry?: boolean; rotation_degrees?: number; octaves: number; zoom: number; direction_degrees: number; speed: number; amplitude: number } };
+
+export type ColorEffectSpatialCoordinateFrame = "DaslightPatchCanvas";
+
+export type ColorEffectSpatialMappingShape = "Rectangle";
+
+export type ColorEffectSpatialSamplingRule = "RotatedInclusionMaskAxisAlignedRaster";
+
+export interface ColorEffectSpatialPlacementTarget {
+  fixture_id: number;
+  beam_index: number;
+  patch_x: number;
+  patch_y: number;
+}
+
+export interface ColorEffectSpatialPlacement {
+  source_coordinate_frame: ColorEffectSpatialCoordinateFrame;
+  mapping_shape: ColorEffectSpatialMappingShape;
+  x: number;
+  y: number;
+  sx: number;
+  sy: number;
+  mapping_angle_degrees: number;
+  sampling_rule: ColorEffectSpatialSamplingRule;
+  vertical_symmetry?: boolean;
+  horizontal_symmetry?: boolean;
+  raster_rotation_degrees?: number;
+  target_coordinates?: ColorEffectSpatialPlacementTarget[];
+}
+
+export interface ColorEffectSpatialPattern {
+  recipe: ColorEffectSpatialRecipe;
+  parameter_model_version: 1;
+  beam_targets?: ColorEffectBeamTarget[];
+  placement?: ColorEffectSpatialPlacement;
+}
+
+export interface ColorEffectRequest {
+  label: string;
+  fixture_ids: number[];
+  target_group_ids: string[];
+  stops: ColorEffectStop[];
+  algorithm: ColorEffectAlgorithm;
+  interpolation: ColorEffectInterpolation;
+  period_ms: number;
+  clock_sync?: EffectClockSync | null;
+  phase: number;
+  fixture_spread: number;
+  blend_mode: EffectBlendMode;
+  spatial_pattern?: ColorEffectSpatialPattern | null;
+}
+
+export interface PositionWaveEffectRequest {
+  label: string;
+  fixture_ids: number[];
+  target_group_ids: string[];
+  attribute: string;
+  video_targets: VideoEffectTarget[];
+  shape: LfoShape;
+  origin: { x: number; y: number; z: number };
+  direction: { x: number; y: number; z: number };
+  speed: number;
+  wavelength: number;
+  clock_sync?: EffectClockSync | null;
+  low: number;
+  high: number;
+  phase: number;
+  blend_mode: EffectBlendMode;
+}
+
+export interface EffectBeamTarget {
+  fixture_id: number;
+  beam_index: number;
+  selection_index: number;
+  feature_attribute: string;
+}
+
+export interface ChaserStep {
+  fixture_ids: number[];
+  target_group_ids: string[];
+  beam_targets?: EffectBeamTarget[];
+  level: number;
+}
+
+export interface ChaserFeature {
+  attribute: string;
+  low: number;
+  high: number;
+}
+
+export interface ChaserEffectRequest {
+  label: string;
+  steps: ChaserStep[];
+  features: ChaserFeature[];
+  step_duration_ms: number;
+  clock_sync?: EffectClockSync | null;
+  direction: ChaserDirection;
+  wings: number;
+  active_step_count: number;
+  duty_cycle: number;
+  overlap: number;
+  phase: number;
+  fixture_spread: number;
+  random_seed: number;
+  random_cycle_count?: number;
+  blend_mode: EffectBlendMode;
+}
+
+export interface MovePathPoint {
+  x: number;
+  y: number;
+}
+
+export interface MoveEffectBeamTarget {
+  fixture_id: number;
+  /** Raw Daslight BEAMID retained as the fixture beam/segment index. */
+  beam_index: number;
+  /** Stable zero-based source-selection index; equal values share phase. */
+  selection_index: number;
+}
+
+export interface MoveEffectRequest {
+  label: string;
+  fixture_ids: number[];
+  target_group_ids: string[];
+  /** Explicit beam/segment targets in authored source order. */
+  beam_targets?: MoveEffectBeamTarget[];
+  points: MovePathPoint[];
+  closed: boolean;
+  interpolation: MoveInterpolation;
+  coordinate_mode: MoveCoordinateMode;
+  center_x: number;
+  center_y: number;
+  size_x: number;
+  size_y: number;
+  rotation_degrees: number;
+  period_ms: number;
+  clock_sync?: EffectClockSync | null;
+  direction: MoveDirection;
+  phase: number;
+  fixture_spread: number;
+  /** Daslight-compatible Pan mirror for the second half of the resolved fixture order. */
+  symmetry?: boolean;
+  blend_mode: EffectBlendMode;
+}
+
+export interface ValueEffectPoint {
+  position: number;
+  value: number;
+}
+
+export interface ValueEffectRequest {
+  label: string;
+  fixture_ids: number[];
+  target_group_ids: string[];
+  attribute: string;
+  features?: ChaserFeature[];
+  points: ValueEffectPoint[];
+  spatial_pattern?: ColorEffectSpatialPattern | null;
+  interpolation: ValueEffectInterpolation;
+  mode: ValueEffectMode;
+  direction: ValueEffectDirection;
+  period_ms: number;
+  clock_sync?: EffectClockSync | null;
+  low: number;
+  high: number;
+  phase: number;
+  fixture_spread: number;
+  blend_mode: EffectBlendMode;
+}
+
+export interface CurveEffectPoint {
+  position: number;
+  value: number;
+  in_tangent: number;
+  out_tangent: number;
+}
+
+export interface CurveEffectRequest {
+  label: string;
+  fixture_ids: number[];
+  target_group_ids: string[];
+  attribute: string;
+  features?: ChaserFeature[];
+  points: CurveEffectPoint[];
+  mode: ValueEffectMode;
+  direction: ValueEffectDirection;
+  period_ms: number;
+  clock_sync?: EffectClockSync | null;
+  low: number;
+  high: number;
+  phase: number;
+  fixture_spread: number;
+  blend_mode: EffectBlendMode;
+}
+
+export interface MappingEffectRequest {
+  label: string;
+  fixture_ids: number[];
+  target_group_ids: string[];
+  attribute: string;
+  features?: ChaserFeature[];
+  shape: LfoShape;
+  mode: ValueEffectMode;
+  direction: MappingEffectDirection;
+  period_ms: number;
+  clock_sync?: EffectClockSync | null;
+  low: number;
+  high: number;
+  phase: number;
+  fixture_spread: number;
+  repetitions: number;
+  blend_mode: EffectBlendMode;
+}
+
+export type ColorMappingSourceKind = "Image" | "Text" | "Video";
+export type ColorMappingPlaybackDirection = "Forward" | "Reverse" | "Bounce";
+export type ColorMappingWrapMode = "Clamp" | "Repeat" | "Mirror";
+export type ColorMappingSampling = "Nearest" | "Bilinear";
+
+export interface ColorMappingCellTarget {
+  fixture_id: number;
+  beam_index: number;
+  selection_index: number;
+  u: number;
+  v: number;
+  feature_attribute?: string | null;
+  feature_low?: number | null;
+  feature_high?: number | null;
+}
+
+export interface ColorMappingFrame {
+  /** Packed RGB16 in an exact JavaScript integer: 0xRRRRGGGGBBBB. */
+  pixels: number[];
+}
+
+export interface ColorMappingEffectRequest {
+  label: string;
+  fixture_ids: number[];
+  target_group_ids: string[];
+  source_kind: ColorMappingSourceKind;
+  width: number;
+  height: number;
+  frames: ColorMappingFrame[];
+  cells?: ColorMappingCellTarget[];
+  playback_direction: ColorMappingPlaybackDirection;
+  period_ms: number;
+  clock_sync?: EffectClockSync | null;
+  phase: number;
+  offset_u: number;
+  offset_v: number;
+  scale_u: number;
+  scale_v: number;
+  rotation_degrees: number;
+  wrap_mode: ColorMappingWrapMode;
+  sampling: ColorMappingSampling;
+  blend_mode: EffectBlendMode;
+}
+
+export interface VideoEffectTarget {
+  layer_ids: number[];
+  param: VideoParam;
+  low: number;
+  high: number;
+  position?: Vec3 | null;
+}
+
+export interface EffectSummary {
+  id: number;
+  label: string;
+  effect_type: EffectKind;
+  fixture_ids: number[];
+  target_group_ids: string[];
+  attribute: string;
+  video_targets: VideoEffectTarget[];
+  shape: LfoShape;
+  period_ms?: number | null;
+  clock_sync?: EffectClockSync | null;
+  low: number;
+  high: number;
+  phase: number;
+  fixture_spread?: number;
+  blend_mode: EffectBlendMode;
+  origin?: { x: number; y: number; z: number } | null;
+  direction?: { x: number; y: number; z: number } | null;
+  speed?: number | null;
+  wavelength?: number | null;
+  enabled: boolean;
+  /** Present for Cue-owned FX synthesized from the owning Cue target. */
+  params?: EffectParamsSnapshot | null;
+  lfo?: LfoEffectRequest | null;
+  color?: ColorEffectRequest | null;
+  chaser?: ChaserEffectRequest | null;
+  move_effect?: MoveEffectRequest | null;
+  value?: ValueEffectRequest | null;
+  curve?: CurveEffectRequest | null;
+  mapping?: MappingEffectRequest | null;
+  color_mapping?: ColorMappingEffectRequest | null;
+}
+
+export interface EffectPreset {
+  version: number;
+  effect_type: EffectKind;
+  enabled: boolean;
+  lfo?: LfoEffectRequest | null;
+  position_wave?: PositionWaveEffectRequest | null;
+  color?: ColorEffectRequest | null;
+  chaser?: ChaserEffectRequest | null;
+  move_effect?: MoveEffectRequest | null;
+  value?: ValueEffectRequest | null;
+  curve?: CurveEffectRequest | null;
+  mapping?: MappingEffectRequest | null;
+  color_mapping?: ColorMappingEffectRequest | null;
+}
+
+export type DmxOutputProtocol =
+  | "ArtNet"
+  | "Sacn"
+  | "EnttecUsbPro"
+  | "DmxKingUltraDmx"
+  | "EnttecOpenDmx";
+
+export interface DmxOutputConfig {
+  enabled: boolean;
+  protocol: DmxOutputProtocol;
+  target_ip: string;
+  port: number;
+  universe: number;
+  serial_port: string;
+  serial_baud_rate: number;
+}
+
+export interface ProgrammerValueSummary {
+  fixture_id: number;
+  attribute: string;
+  value: number;
+}
+
+export interface ProgrammerSnapshot {
+  enabled: boolean;
+  blind: boolean;
+  values: ProgrammerValueSummary[];
+  dmx_previews: DmxUniversePreview[];
+}
+
+export interface CuePartSummary {
+  number: number;
+  label: string;
+  delay_ms: number;
+  fade_ms?: number | null;
+  fixture_ids: number[];
+  video_layer_ids: number[];
+  video_output_ids: number[];
+}
+
+export interface CueListSummary {
+  id: number;
+  label: string;
+  active_cue_id?: number | null;
+}
+
+export type PaletteKind = "Intensity" | "Position" | "Color" | "Beam" | "All";
+
+export interface ReferencePaletteSummary {
+  id: number;
+  label: string;
+  kind: PaletteKind;
+  values: AttributeValueSummary[];
+  color_stops?: ColorEffectStop[];
+}
+
+export interface PlaybackExecutorSummary {
+  id: number;
+  label: string;
+  cue_list_id: number;
+  page: number;
+  slot: number;
+  level: number;
+}
+
+export interface CuePaletteTarget {
+  palette_id: number;
+  fixture_ids: number[];
+}
+
+export interface CueIfcbTiming {
+  intensity_fade_ms?: number | null;
+  intensity_delay_ms: number;
+  focus_fade_ms?: number | null;
+  focus_delay_ms: number;
+  color_fade_ms?: number | null;
+  color_delay_ms: number;
+  beam_fade_ms?: number | null;
+  beam_delay_ms: number;
+}
+
+export type DmxInputProtocol = "ArtNet" | "Sacn";
+export type DmxMergeMode = "Htp" | "Ltp";
+
+export interface DmxInputConfig {
+  protocol: DmxInputProtocol;
+  bind_ip: string;
+  port: number;
+  universe: number;
+  merge_enabled: boolean;
+  merge_mode: DmxMergeMode;
+  timeout_ms: number;
+}
+
+export interface DmxInputStatus {
+  running: boolean;
+  signal_present: boolean;
+  packets_received: number;
+  invalid_packets: number;
+  last_packet_unix_ms?: number | null;
+  source_address?: string | null;
+}
+
+export interface ArtRdmRequest {
+  gateway_ip: string;
+  port_address: number;
+  source_uid: string;
+  target_uid: string;
+  command: "Get" | "Set";
+  parameter_id: number;
+  parameter_data_hex: string;
+  timeout_ms: number;
+}
+
+export interface UsbRdmRequest {
+  serial_port: string;
+  serial_baud_rate: number;
+  source_uid: string;
+  target_uid: string;
+  command: "Get" | "Set";
+  parameter_id: number;
+  parameter_data_hex: string;
+  timeout_ms: number;
+}
+
+export interface ArtRdmDeviceInfoResponse {
+  protocol_version: number;
+  model_id: number;
+  product_category: number;
+  software_version_id: number;
+  dmx_footprint: number;
+  current_personality: number;
+  personality_count: number;
+  dmx_start_address: number;
+  sub_device_count: number;
+  sensor_count: number;
+}
+
+export interface ArtRdmResponse {
+  source_uid: string;
+  destination_uid: string;
+  command_class: string;
+  parameter_id: number;
+  parameter_data_hex: string;
+  response_type: "Ack" | "AckTimer" | "NackReason" | "AckOverflow";
+  response_blocks: number;
+  ack_timer_count: number;
+  queued_message_polls: number;
+  nack_reason?: number | null;
+  fifo_available: number;
+  fifo_max: number;
+  device_info?: ArtRdmDeviceInfoResponse | null;
+}
+
+export interface DmxTestFrameResult {
+  protocol: DmxOutputProtocol;
+  universe: number;
+  channel: number;
+  width: number;
+  value: number;
+  bytes: number;
+}
+
+export interface DmxOutputRouteTelemetry {
+  index: number;
+  universe: number;
+  attempted: boolean;
+  success: boolean;
+  bytes: number;
+  error?: string | null;
+  consecutive_failures: number;
+  reconnect_attempts: number;
+  reconnecting: boolean;
+  retry_in_ms?: number | null;
+  last_success_unix_ms?: number | null;
+}
+
+export type TelemetryBudgetStatus = "Pass" | "Warn" | "Fail" | "InsufficientSamples" | "Idle";
+
+export interface TelemetryBudgetCheck {
+  name: string;
+  status: TelemetryBudgetStatus;
+  measured_us?: number | null;
+  target_us?: number | null;
+  samples: number;
+  detail: string;
+}
+
+export interface EngineTelemetryBudgetReport {
+  overall: TelemetryBudgetStatus;
+  target_dmx_frame_rate_hz: number;
+  target_tick_interval_us: number;
+  tick_jitter_p99_target_us: number;
+  command_queue_p99_target_us: number;
+  command_to_dmx_p99_target_us: number;
+  dmx_send_interval_tolerance_us: number;
+  checks: TelemetryBudgetCheck[];
+}
+
+export interface EngineTelemetryReport {
+  version: number;
+  captured_at_unix_ms: number;
+  fixture_count: number;
+  cue_count: number;
+  effect_count: number;
+  node_graph_count: number;
+  video_layer_count: number;
+  video_output_count: number;
+  dmx_output_count: number;
+  enabled_dmx_output_count: number;
+  dmx_preview_universe_count: number;
+  clock: EngineSnapshot["clock"];
+  primary_output: DmxOutputConfig;
+  dmx_outputs: DmxOutputConfig[];
+  budget: EngineTelemetryBudgetReport;
+  telemetry: EngineSnapshot["telemetry"];
+}
+
+export interface SubmasterSummary {
+  group_id: string;
+  label: string;
+  level: number;
+  strobe_hz?: number;
+  strobe_fixture_count?: number;
+}
+
+export interface DmxUniversePreview {
+  universe: number;
+  values: number[];
+}
+
+export interface StageMapConfig {
+  locked: boolean;
+  min_x: number;
+  max_x: number;
+  min_z: number;
+  max_z: number;
+}
+
+export type StageObjectKind = "Stage" | "Truss" | "Screen" | "Riser" | "Mask";
+
+export interface StageObjectSummary {
+  id: number;
+  label: string;
+  kind: StageObjectKind;
+  x: number;
+  z: number;
+  width: number;
+  depth: number;
+  rotation_deg: number;
+  color?: string | null;
+}
+
+export interface StageMapPresetSummary {
+  label: string;
+  config: StageMapConfig;
+  stage_objects?: StageObjectSummary[] | null;
+}
+
+export type TouchControlKind =
+  | "Label"
+  | "Image"
+  | "Button"
+  | "Fader"
+  | "Dial"
+  | "IncrementalWheel"
+  | "ColorWheel"
+  | "XyGrid";
+
+export interface TouchFeaturePresetTarget {
+  fixture_id: number;
+  attribute: string;
+}
+
+export type TouchControlBinding =
+  | { kind: "fixture_attribute"; fixture_id: number; attribute: string }
+  | { kind: "group_attribute"; group_id: string; attribute: string }
+  | {
+      kind: "feature_preset";
+      targets: TouchFeaturePresetTarget[];
+      min_value: number;
+      max_value: number;
+      inverted: boolean;
+    }
+  | { kind: "fixture_color"; fixture_id: number }
+  | { kind: "group_color"; group_id: string }
+  | { kind: "fixture_pan_tilt"; fixture_id: number; pan_attribute: string; tilt_attribute: string }
+  | { kind: "group_pan_tilt"; group_id: string; pan_attribute: string; tilt_attribute: string }
+  | { kind: "cue"; cue_id: number }
+  | { kind: "group_select"; group_id: string }
+  | { kind: "group_submaster"; group_id: string }
+  | { kind: "tap_tempo" }
+  | { kind: "lighting_master" }
+  | { kind: "video_master" }
+  | { kind: "blackout" }
+  | { kind: "video_blackout" }
+  | { kind: "all_blackout" }
+  | { kind: "cue_next" }
+  | { kind: "cue_previous" }
+  | { kind: "cue_fade_pause" }
+  | { kind: "selected_fixture_attribute"; attribute: string }
+  | { kind: "selected_fixture_color" }
+  | { kind: "selected_fixture_pan_tilt"; pan_attribute: string; tilt_attribute: string };
+
+export interface TouchControlSummary {
+  id: number;
+  kind: TouchControlKind;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  label: string;
+  binding?: TouchControlBinding | null;
+}
+
+export interface TouchPageSummary {
+  id: number;
+  label: string;
+  controls: TouchControlSummary[];
+}
+
+export interface TouchSurfaceSummary {
+  pages: TouchPageSummary[];
+}
+
+export interface DirectChildTimelineTransportSummary {
+  cue_id: number;
+  position_ms: number;
+  duration_ms: number;
+  playing: boolean;
+  generation: number;
+  count_in_remaining_ms?: number;
+}
+
+export interface EngineSnapshot {
+  fixtures: PatchedFixtureSummary[];
+  cues: CueSummary[];
+  cue_lists: CueListSummary[];
+  palettes: ReferencePaletteSummary[];
+  playback_executors: PlaybackExecutorSummary[];
+  playback_master: number;
+  active_cue_id?: number | null;
+  /** Runtime-only transport state for directly triggered Super Scenes. */
+  direct_child_timeline_transports?: DirectChildTimelineTransportSummary[];
+  active_group_cue_ids?: Record<string, number>;
+  /** T17 runtime-only latched scene live overrides; never part of `.sdc` data. */
+  cue_live_modifiers?: CueLiveModifierState[];
+  /** T7 persistent identity colors per group path (#rrggbb). */
+  group_colors?: Record<string, string>;
+  active_fade?: ActiveFadeSummary | null;
+  programmer: ProgrammerSnapshot;
+  timeline: TimelineSnapshot;
+  timeline_bank?: TimelineSnapshot[];
+  video: VideoSnapshot;
+  authored_video?: VideoSnapshot | null;
+  effects: EffectSummary[];
+  node_graphs: NodeGraphSummary[];
+  output: DmxOutputConfig;
+  dmx_outputs: DmxOutputConfig[];
+  lighting_master: number;
+  submasters: SubmasterSummary[];
+  blackout: boolean;
+  authored_blackout: boolean;
+  safety_blackout_engaged: boolean;
+  clock: {
+    bpm: number;
+    beat_phase: number;
+    beat_counter: number;
+    tap_count: number;
+    source: ClockSource;
+    external_sync_age_ms: number | null;
+    external_sync_locked: boolean;
+  };
+  stage_map: StageMapConfig;
+  stage_map_presets: StageMapPresetSummary[];
+  stage_objects: StageObjectSummary[];
+  touch_surface?: TouchSurfaceSummary;
+  dmx_preview: number[];
+  dmx_previews: DmxUniversePreview[];
+  telemetry: {
+    frame_counter: number;
+    enabled_effect_count: number;
+    supported_effect_count: number;
+    effects_over_supported_envelope: boolean;
+    queue_depth: number;
+    queue_depth_abs_max: number;
+    queue_push_failure_count: number;
+    last_tick_interval_us: number;
+    tick_jitter_last_us: number;
+    tick_jitter_abs_max_us: number;
+    tick_jitter_stddev_us: number;
+    tick_jitter_p95_us: number;
+    tick_jitter_p99_us: number;
+    tick_jitter_samples: number;
+    last_command_queue_latency_us: number;
+    command_queue_latency_abs_max_us: number;
+    command_queue_latency_p95_us: number;
+    command_queue_latency_p99_us: number;
+    command_queue_latency_samples: number;
+    last_command_drain_count: number;
+    command_drain_abs_max: number;
+    command_drain_limit_hit_count: number;
+    last_command_to_dmx_tick_latency_us: number;
+    command_to_dmx_tick_latency_abs_max_us: number;
+    command_to_dmx_tick_latency_p95_us: number;
+    command_to_dmx_tick_latency_p99_us: number;
+    command_to_dmx_tick_latency_samples: number;
+    last_dmx_send_interval_us: number;
+    dmx_send_interval_min_us: number;
+    dmx_send_interval_max_us: number;
+    dmx_send_interval_samples: number;
+    low_latency_dmx_tick_request_count: number;
+    low_latency_dmx_tick_advance_count: number;
+    low_latency_dmx_tick_defer_count: number;
+    last_packet_bytes: number;
+    last_dmx_output_count: number;
+    last_dmx_send_success_count: number;
+    last_dmx_send_failure_count: number;
+    total_dmx_send_success_count: number;
+    total_dmx_send_failure_count: number;
+    last_dmx_route_results: DmxOutputRouteTelemetry[];
+    last_error?: string | null;
+  };
+}

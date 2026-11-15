@@ -1,0 +1,64 @@
+[package]
+name = "syndocal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# The normal Windows application includes the ASIO loader/commands.  The
+# separately licensed bridge DLL remains an explicit runtime payload; when it
+# is absent the UI fails closed instead of silently falling back or guessing a
+# device.  This makes ASIO a normal selectable backend without bundling the
+# SDK-derived bridge into the approved default package.
+# Windows adds NDI through tauri.windows.conf.json; other platforms keep
+# their SDK-independent defaults. Direct Windows Cargo tests select the ndi feature.
+default = ["libav", "spout", "asio", "syphon"]
+asio = ["dep:libloading"]
+show-asio = ["asio"]
+qa-native-frame-timing = ["video/qa-native-frame-timing"]
+libav = ["video/libav"]
+ndi = ["io/ndi", "video/ndi"]
+spout = ["dep:spout2-rs", "video/spout"]
+syphon = ["video/syphon"]
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+audio = { path = "../../crates/audio" }
+base64.workspace = true
+crossbeam-queue.workspace = true
+engine = { path = "../../crates/engine" }
+flate2.workspace = true
+gdtf = { path = "../../crates/gdtf" }
+getrandom = "=0.2.17"
+image.workspace = true
+io = { path = "../../crates/io" }
+minisign-verify.workspace = true
+protocol = { path = "../../crates/protocol" }
+rfd.workspace = true
+rodio.workspace = true
+roxmltree.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_path_to_error.workspace = true
+sha2.workspace = true
+tauri.workspace = true
+tauri-plugin-single-instance.workspace = true
+tauri-plugin-updater.workspace = true
+video.workspace = true
+visualizer.workspace = true
+zeroize = "=1.9.0"
+zip.workspace = true
+
+[target.'cfg(all(target_os = "windows", target_arch = "x86_64"))'.dependencies]
+spout2-rs = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+libloading = { workspace = true, optional = true }
+webview2-com = "=0.37.0"
+windows = { version = "=0.61.3", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_Devices_Display", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_NetworkListManager", "Win32_Networking_WinSock", "Win32_Security_Credentials", "Win32_Security_Authorization", "Win32_Security", "Win32_System_Threading", "Win32_System_Com", "Win32_System_Console", "Win32_UI_Input", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+
+[dev-dependencies]
+engine = { path = "../../crates/engine", features = ["test-support"] }
+tauri = { workspace = true, features = ["test"] }

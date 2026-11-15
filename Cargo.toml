@@ -1,0 +1,70 @@
+[workspace]
+resolver = "2"
+exclude = [
+    "tools/asio-bridge",
+    "vendor/tauri-runtime-wry-2.6.0-syndocal",
+]
+members = [
+    "crates/audio",
+    "crates/protocol",
+    "crates/gdtf",
+    "crates/io",
+    "crates/engine",
+    "crates/video",
+    "crates/visualizer",
+    "app/src-tauri",
+]
+
+[workspace.package]
+version = "1.2.0-rc.1"
+edition = "2021"
+license = "MIT"
+authors = ["Seraf()"]
+repository = "https://example.invalid/syndocal"
+
+[workspace.dependencies]
+audio = { path = "crates/audio" }
+base64 = "=0.22.1"
+bcdec_rs = "=0.2.0"
+crossbeam-queue = "0.3"
+gdtf = { path = "crates/gdtf" }
+grafton-ndi = { version = "=0.11.0", default-features = false }
+image = { version = "=0.24.9", default-features = false, features = ["jpeg", "png"] }
+hap-parser = "=0.2.0"
+ffmpeg-next = { version = "=8.1.0", default-features = false }
+flate2 = "=1.1.9"
+io = { path = "crates/io" }
+libloading = "=0.8.9"
+midir = "0.11"
+minisign-verify = "=0.2.5"
+mp4 = "=0.14.0"
+naga = { version = "=25.0.1", features = ["glsl-in", "wgsl-out"] }
+protocol = { path = "crates/protocol" }
+pollster = "=0.4.0"
+raw-window-handle = "=0.6.2"
+rayon = "=1.10.0"
+rfd = "0.17"
+roxmltree = "0.20"
+rosc = "0.11"
+rodio = "=0.21.1"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+serde_path_to_error = "=0.1.20"
+serialport = "4.7"
+sha2 = "=0.10.9"
+spout2-rs = { version = "=0.1.1", default-features = false, features = ["dx"] }
+tauri = { version = "=2.5.1", features = ["unstable"] }
+tauri-build = "=2.2.0"
+tauri-plugin-single-instance = "=2.2.2"
+tauri-plugin-updater = "=2.2.0"
+thiserror = "1"
+tungstenite = "=0.24.0"
+video = { path = "crates/video" }
+visualizer = { path = "crates/visualizer" }
+wgpu = { version = "=25.0.2", default-features = false, features = ["dx12", "metal", "vulkan", "gles", "wgsl"] }
+zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }
+
+[patch.crates-io]
+# Temporary Windows crash containment for tauri-apps/tauri#15408/#15793.
+# This is a source-preserving 2.6.0 vendor backport of tauri PR #15411.
+tauri-runtime-wry = { path = "vendor/tauri-runtime-wry-2.6.0-syndocal" }

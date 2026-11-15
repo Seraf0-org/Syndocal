@@ -1,0 +1,284 @@
+import { videoSourceKindLabel } from "../videoHelpers";
+import { For, Show, createSignal, type ComponentProps } from "solid-js";
+import { clampRange } from "../numericHelpers";
+import type { VideoLayerState, VideoLayerSummary, VideoOutputSummary } from "../types";
+import { formatDuration, formatVideoTime } from "../videoHelpers";
+import { VideoClipSlotBankPanel } from "./VideoClipSlotBankPanel";
+import { VideoTransitionBusPanel } from "./VideoTransitionBusPanel";
+
+interface TouchVideoPanelProps {
+  layers: VideoLayerSummary[];
+  outputs: VideoOutputSummary[];
+  selectedOutputId: number | null;
+  onSetLayerState: (layerId: number, state: VideoLayerState) => void | Promise<void>;
+  onAddCuePoint: (layerId: number) => void | Promise<void>;
+  onJumpCuePoint: (layerId: number, cuePointIndex: number) => void | Promise<void>;
+  onSelectOutput: (outputId: number) => void;
+  windowStateForOutput?: (outputId: number) => { stateLabel: string; detail: string };
+  clipSlotBank: ComponentProps<typeof VideoClipSlotBankPanel>;
+  clipSlotTake: { enabled: boolean; label: string; onTake: () => void | Promise<void> };
+  transitionBuses: ComponentProps<typeof VideoTransitionBusPanel>;
+}
+
+export function TouchVideoPanel(props: TouchVideoPanelProps) {
+  const [surface, setSurface] = createSignal<"clips" | "layers" | "outputs">("clips");
+  return (
+    <section class="panel touchPanel touchVideoPanel">
+      <div class="panelHeader">
+        <h2>Touch Video</h2>
+        <span>{props.layers.length} video layer(s) / {props.outputs.length} video output(s)</span>
+      </div>
+      <div class="touchVideoClipBankHeader">
+        <nav class="touchVideoSurfaceTabs" role="tablist" aria-label="Video live control surface">
+          <button type="button" role="tab" aria-selected={surface() === "clips"} class={surface() === "clips" ? "active" : ""} onClick={() => setSurface("clips")}>Clips</button>
+          <button type="button" role="tab" aria-selected={surface() === "layers"} class={surface() === "layers" ? "active" : ""} onClick={() => setSurface("layers")}>Layers</button>
+          <button type="button" role="tab" aria-selected={surface() === "outputs"} class={surface() === "outputs" ? "active" : ""} onClick={() => setSurface("outputs")}>Outputs</button>
+        </nav>
+        <button
+          type="button"
+          class="primary videoClipSlotTake"
+          data-video-clip-slot-take
+          disabled={!props.clipSlotTake.enabled}
+          onClick={() => void props.clipSlotTake.onTake()}
+        >{props.clipSlotTake.label}</button>
+      </div>
+      <div class="touchVideoSurface" hidden={surface() !== "clips"} role="tabpanel">
+        <VideoClipSlotBankPanel {...props.clipSlotBank} />
+        <VideoTransitionBusPanel {...props.transitionBuses} compact />
+      </div>
+      <div class="touchVideoSurface" hidden={surface() !== "outputs"} role="tabpanel">
+      <Show when={props.outputs.length > 0} fallback={<p class="empty">No configured video outputs. Add a Display output in Setup.</p>}>
+        <div class="touchVideoOutputGrid">
+          <For each={props.outputs}>
+            {(output) => {
+              const selected = () => props.selectedOutputId === output.id;
+              const selectOutput = () => props.onSelectOutput(output.id);
+              const outputDeckClass = () =>
+                [
+                  "touchVideoOutputDeck",
+                  output.enabled && !output.blackout ? "active" : "",
+                  selected() ? "selected" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ");
+
+              return (
+                <div class={outputDeckClass()}>
+                  <div class="touchVideoHeader">
+                    <div>
+                      <strong data-no-localize>{output.label}</strong>
+                      <span>
+                        {output.kind} / {output.width}x{output.height}
+                      </span>
+                    </div>
+                    <div class="touchVideoOutputStatus">
+                      <button
+                        class={selected() ? "touchVideoOutputSelect selected" : "touchVideoOutputSelect"}
+                        aria-pressed={selected()}
+                        onClick={selectOutput}
+                      >
+                        Sel
+                      </button>
+                      <small>{output.blackout ? "Blackout" : `${Math.round(output.opacity * 100)}%`}</small>
+                    </div>
+                  </div>
+                  <div class="touchVideoOutputReadOnly" role="status">
+                    <span>Authored {output.enabled ? "enabled" : "disabled"}</span>
+                    <span>{output.blackout ? "Blackout" : `${Math.round(output.opacity * 100)}% opacity`}</span>
+                    <Show when={props.windowStateForOutput?.(output.id)}>
+                      {(windowState) => (
+                        <span>
+                          Physical window: {windowState().stateLabel}
+                          <Show when={windowState().detail}><small>{windowState().detail}</small></Show>
+                        </span>
+                      )}
+                    </Show>
+                  </div>
+                </div>
+              );
+            }}
+          </For>
+        </div>
+      </Show>
+      </div>
+      <div class="touchVideoSurface" hidden={surface() !== "layers"} role="tabpanel">
+      <Show when={props.layers.length > 0} fallback={<p class="empty">No video layers. Add one in Setup &gt; Output.</p>}>
+        <div class="touchVideoDeckGrid">
+          <For each={props.layers}>
+            {(layer) => {
+              const durationMs = () => layer.source.metadata?.duration_ms ?? null;
+              const progress = () => {
+                const duration = durationMs();
+                return duration && duration > 0 ? clampRange((layer.state.position_ms / duration) * 100, 0, 100) : 0;
+              };
+              const seekTo = (positionMs: number) =>
+                props.onSetLayerState(layer.id, {
+                  ...layer.state,
+                  position_ms: durationMs()
+                    ? Math.min(durationMs()!, Math.max(0, Math.round(positionMs)))
+                    : Math.max(0, Math.round(positionMs)),
+                });
+
+              return (
+                <div class={layer.state.enabled ? "touchVideoDeck active" : "touchVideoDeck"}>
+                  <div class="touchVideoHeader">
+                    <div>
+                      <strong data-no-localize>{layer.label}</strong>
+                      <span>{layer.source.path ?? layer.source.name ?? videoSourceKindLabel(layer.source.kind)}</span>
+                    </div>
+                    <small>{formatVideoTime(layer.state.position_ms, durationMs())}</small>
+                  </div>
+                  <div class="touchVideoProgress">
+                    <span style={{ width: `${progress()}%` }} />
+                  </div>
+                  <div class="touchTransportRow">
+                    <button
+                      class={layer.state.playing ? "primary" : ""}
+                      onClick={() =>
+                        void props.onSetLayerState(layer.id, {
+                          ...layer.state,
+                          playing: !layer.state.playing,
+                        })
+                      }
+                    >
+                      {layer.state.playing ? "Pause" : "Play"}
+                    </button>
+                    <button
+                      onClick={() =>
+                        void props.onSetLayerState(layer.id, {
+                          ...layer.state,
+                          position_ms: layer.state.loop_enabled ? layer.state.loop_start_ms : 0,
+                        })
+                      }
+                    >
+                      Cue In
+                    </button>
+                    <button
+                      onClick={() =>
+                        void props.onSetLayerState(layer.id, {
+                          ...layer.state,
+                          speed: -Math.abs(layer.state.speed || 1),
+                          playing: true,
+                        })
+                      }
+                    >
+                      Rev
+                    </button>
+                    <button
+                      onClick={() =>
+                        void props.onSetLayerState(layer.id, {
+                          ...layer.state,
+                          speed: Math.abs(layer.state.speed || 1),
+                          playing: true,
+                        })
+                      }
+                    >
+                      Fwd
+                    </button>
+                  </div>
+                  <label class="touchSlider">
+                    Opacity
+                    <input
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      value={layer.state.opacity}
+                      onInput={(event) =>
+                        void props.onSetLayerState(layer.id, {
+                          ...layer.state,
+                          opacity: Number(event.currentTarget.value),
+                        })
+                      }
+                    />
+                    <strong>{Math.round(layer.state.opacity * 100)}%</strong>
+                  </label>
+                  <label class="touchSlider">
+                    Speed
+                    <input
+                      type="range"
+                      min="-4"
+                      max="4"
+                      step="0.25"
+                      value={layer.state.speed}
+                      onChange={(event) =>
+                        void props.onSetLayerState(layer.id, {
+                          ...layer.state,
+                          speed: Number(event.currentTarget.value),
+                        })
+                      }
+                    />
+                    <strong>{layer.state.speed.toFixed(2)}x</strong>
+                  </label>
+                  <Show when={durationMs()}>
+                    {(duration) => (
+                      <label class="touchSlider">
+                        Seek
+                        <input
+                          type="range"
+                          min="0"
+                          max={duration()}
+                          step="1"
+                          value={layer.state.position_ms}
+                          onChange={(event) => void seekTo(Number(event.currentTarget.value))}
+                        />
+                        <strong>{Math.round(progress())}%</strong>
+                      </label>
+                    )}
+                  </Show>
+                  <div class="touchTransportRow">
+                    <button
+                      onClick={() =>
+                        void props.onSetLayerState(layer.id, {
+                          ...layer.state,
+                          enabled: !layer.state.enabled,
+                        })
+                      }
+                    >
+                      {layer.state.enabled ? "Disable" : "Enable"}
+                    </button>
+                    <button
+                      class={layer.state.solo ? "primary" : ""}
+                      onClick={() =>
+                        void props.onSetLayerState(layer.id, {
+                          ...layer.state,
+                          solo: !layer.state.solo,
+                        })
+                      }
+                    >
+                      Solo
+                    </button>
+                    <button
+                      class={layer.state.loop_enabled ? "primary" : ""}
+                      onClick={() =>
+                        void props.onSetLayerState(layer.id, {
+                          ...layer.state,
+                          loop_enabled: !layer.state.loop_enabled,
+                        })
+                      }
+                    >
+                      Loop
+                    </button>
+                    <button onClick={() => void props.onAddCuePoint(layer.id)}>Add Cue Point</button>
+                  </div>
+                  <Show when={layer.state.cue_points_ms.length > 0}>
+                    <div class="touchCuePointRow">
+                      <For each={layer.state.cue_points_ms.slice(0, 6)}>
+                        {(cuePoint, cuePointIndex) => (
+                          <button onClick={() => void props.onJumpCuePoint(layer.id, cuePointIndex())}>
+                            {formatDuration(cuePoint) ?? `${cuePoint}ms`}
+                          </button>
+                        )}
+                      </For>
+                    </div>
+                  </Show>
+                </div>
+              );
+            }}
+          </For>
+        </div>
+      </Show>
+      </div>
+    </section>
+  );
+}

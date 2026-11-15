@@ -1,0 +1,167 @@
+{
+  "schema_version": 4,
+  "platform": "windows-x86_64",
+  "ffmpeg_build": {
+    "version": "n8.1.3-9-g29e619e767-20260930-syndocal-r40366564270",
+    "archive_url": "https://github.com/Seraf0-org/Syndocal/releases/download/ffmpeg-sdk-lgpl-n8.1.3-r40366564270/ffmpeg-n8.1.3-9-g29e619e767-win64-lgpl-shared-8.1.zip",
+    "archive_sha256": "81587fa070a9fa2da3d8ff3e63beb9654729782bc8e9899ee951baf5fc5d9f1a",
+    "license": "LGPL version 3 or later",
+    "configure": "--prefix=/ffbuild/prefix --pkg-config-flags=--static --pkg-config=pkg-config --cross-prefix=x86_64-w64-mingw32- --arch=x86_64 --target-os=mingw32 --enable-version3 --disable-debug --enable-shared --disable-static --disable-w32threads --enable-pthreads --enable-iconv --enable-zlib --enable-libxml2 --enable-libvmaf --enable-fontconfig --enable-libharfbuzz --enable-libfreetype --enable-libfribidi --enable-vulkan --enable-libshaderc --enable-libdav1d --enable-libvorbis --enable-librav1e --enable-librsvg --disable-libxcb --disable-xlib --disable-libpulse --enable-gmp --enable-lzma --enable-liblcevc-dec --enable-opencl --enable-amf --enable-libaom --disable-avisynth --disable-libdavs2 --disable-libdvdread --disable-libdvdnav --disable-libfdk-aac --enable-ffnvcodec --enable-cuda-llvm --disable-frei0r --enable-libgme --enable-libkvazaar --enable-libaribb24 --enable-libaribcaption --enable-libass --enable-libbluray --enable-libjxl --enable-libmp3lame --enable-libopus --enable-libplacebo --enable-librist --enable-libssh --enable-libtheora --enable-libvpx --enable-libwebp --enable-libzmq --enable-lv2 --enable-libvpl --enable-openal --enable-liboapv --enable-libopencore-amrnb --enable-libopencore-amrwb --enable-libopenh264 --enable-libopenjpeg --enable-libopenmpt --disable-librubberband --enable-schannel --enable-sdl2 --enable-libsnappy --enable-libsoxr --enable-libsrt --enable-libsvtav1 --enable-libtwolame --enable-libuavs3d --disable-libdrm --enable-vaapi --disable-libvidstab --enable-libvvenc --disable-whisper --disable-libx264 --disable-libx265 --disable-libxavs2 --disable-libxvid --enable-libzimg --enable-libzvbi --extra-cflags=-DLIBTWOLAME_STATIC --extra-cxxflags= --extra-libs=-lgomp --extra-ldflags=-pthread --extra-ldexeflags= --cc=x86_64-w64-mingw32-gcc --cxx=x86_64-w64-mingw32-g++ --ar=x86_64-w64-mingw32-gcc-ar --ranlib=x86_64-w64-mingw32-gcc-ranlib --nm=x86_64-w64-mingw32-gcc-nm --extra-version=20260930",
+    "source_url": "https://github.com/FFmpeg/FFmpeg/archive/29e619e767cde9045a75c29bc9a8278ae7b3a98b.tar.gz",
+    "build_recipe_url": "https://github.com/Seraf0-org/Syndocal/tree/main/tools/ffmpeg-sdk"
+  },
+  "runtime_dlls": [
+    {
+      "filename": "avcodec-62.dll",
+      "byte_size": 90940416,
+      "sha256": "0954bd519a2c7a1dbe596440b8d84abfd0de45472143612a9a4ad72c3ca672d1",
+      "pe_identity": {
+        "signature": "PE\u0000\u0000",
+        "machine": 34404,
+        "characteristics": 8750,
+        "optional_magic": 523
+      }
+    },
+    {
+      "filename": "avdevice-62.dll",
+      "byte_size": 4947456,
+      "sha256": "69a0646a626b1c60b25f2435c42cd62bd9266264235a72de252a9931367e482e",
+      "pe_identity": {
+        "signature": "PE\u0000\u0000",
+        "machine": 34404,
+        "characteristics": 8750,
+        "optional_magic": 523
+      }
+    },
+    {
+      "filename": "avfilter-11.dll",
+      "byte_size": 31212544,
+      "sha256": "bec4350bb5bc9196a344fcdccec095017b2d28f4bf3439cf00fe325fee75bac5",
+      "pe_identity": {
+        "signature": "PE\u0000\u0000",
+        "machine": 34404,
+        "characteristics": 8750,
+        "optional_magic": 523
+      }
+    },
+    {
+      "filename": "avformat-62.dll",
+      "byte_size": 19531264,
+      "sha256": "6dc37e85d82a112bef743b7d07e965723250c17a4407068cb80cf05beaa3166b",
+      "pe_identity": {
+        "signature": "PE\u0000\u0000",
+        "machine": 34404,
+        "characteristics": 8750,
+        "optional_magic": 523
+      }
+    },
+    {
+      "filename": "avutil-60.dll",
+      "byte_size": 3013632,
+      "sha256": "df1408834ab806417f2314400c12287af875c07a1c74a2c3f29fd32c6e6bcf1c",
+      "pe_identity": {
+        "signature": "PE\u0000\u0000",
+        "machine": 34404,
+        "characteristics": 8750,
+        "optional_magic": 523
+      }
+    },
+    {
+      "filename": "swresample-6.dll",
+      "byte_size": 734720,
+      "sha256": "235ef70cc3d9faa72a42504ae7c1deef39bded6ba4af5cb247886ac57f1a60c8",
+      "pe_identity": {
+        "signature": "PE\u0000\u0000",
+        "machine": 34404,
+        "characteristics": 8750,
+        "optional_magic": 523
+      }
+    },
+    {
+      "filename": "swscale-9.dll",
+      "byte_size": 12900864,
+      "sha256": "19873bf3978f3891c5c92f278115ea444a4dbf7502881127d6f37b953f472070",
+      "pe_identity": {
+        "signature": "PE\u0000\u0000",
+        "machine": 34404,
+        "characteristics": 8750,
+        "optional_magic": 523
+      }
+    }
+  ],
+  "common_resources": [
+    {
+      "source": "../../THIRD_PARTY_NOTICES.md",
+      "destination": "THIRD_PARTY_NOTICES.md",
+      "byte_size": 11301,
+      "sha256": "d41642270a8e3a218abc0ebfa8db1abd2b4e0a8ee3930ebd51d86b6aba9a12e4"
+    },
+    {
+      "source": "../../licenses/FFmpeg-LGPL-3.0.txt",
+      "destination": "licenses/FFmpeg-LGPL-3.0.txt",
+      "byte_size": 7652,
+      "sha256": "97628afebc60f026f5c2b25d7491c46a5c4ee61f693e7cfa07fbd2c03605979b"
+    },
+    {
+      "source": "../../licenses/GPL-3.0.txt",
+      "destination": "licenses/GPL-3.0.txt",
+      "byte_size": 35147,
+      "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+    },
+    {
+      "source": "../../licenses/FFmpeg-DEPENDENCIES.txt",
+      "destination": "licenses/FFmpeg-DEPENDENCIES.txt",
+      "byte_size": 2726745,
+      "sha256": "c23e70139d4f597b2915df39c6211a33ffcb3197bb6ed20a63aa05ec00180924"
+    },
+    {
+      "source": "../../licenses/Spout2-BSD-2-Clause.txt",
+      "destination": "licenses/Spout2-BSD-2-Clause.txt",
+      "byte_size": 2726,
+      "sha256": "04514504b4636462450722a84452b6fe5f671d1f74f22d68867256267f3030f6"
+    },
+    {
+      "source": "../../licenses/bcdec_rs-MIT.txt",
+      "destination": "licenses/bcdec_rs-MIT.txt",
+      "byte_size": 1060,
+      "sha256": "0194fa871df6d82a26d58f3b6e035bed033afdc413e2a6ac0ae2f15b7becbb20"
+    }
+  ],
+  "known_asio_bridge_sha256": [
+    "73ede85d5a5568f5dcad33990158c3bd755590c6d06c797166ac7041f6d786f0",
+    "14057e266192ee5ea2be66d64bf802ba79f6fe686a338002ae85ffcc38a2e853",
+    "2008c70b63272e66d1df1406498a1797114c67e96ea118c2b804adb8d80734d8",
+    "3d0d52721fd52b6769d95ffe07a99114444423f5be3e566ed16d1f2edb71a516"
+  ],
+  "recording_encoder": {
+    "filename": "ffmpeg.exe",
+    "byte_size": 540672,
+    "sha256": "cc737ff68b38ba9228ee422b1c49ad0943e9132a17ff9a2b958aa47a24598d97",
+    "pe_identity": {
+      "signature": "PE\u0000\u0000",
+      "machine": 34404,
+      "characteristics": 558,
+      "optional_magic": 523
+    }
+  },
+  "ndi_runtime": {
+    "dll": {
+      "filename": "Processing.NDI.Lib.x64.dll",
+      "version": "6.3.2.0",
+      "byte_size": 29863120,
+      "sha256": "2b6602075868ba4401f82f417d72424805d69b11ca86078023d0d489ff45dd84",
+      "pe_identity": {
+        "signature": "PE\u0000\u0000",
+        "machine": 34404,
+        "characteristics": 8226,
+        "optional_magic": 523
+      }
+    },
+    "license_resource": {
+      "source": "../../licenses/Processing.NDI.Lib.Licenses.txt",
+      "destination": "licenses/Processing.NDI.Lib.Licenses.txt",
+      "byte_size": 12347,
+      "sha256": "25fb86f3e3632769542a5edf5de5bd3d7d431da75b1a304529b7647d07e0d555"
+    }
+  }
+}

@@ -1,0 +1,216 @@
+/* The fixture-limit inspector is intentionally local: the live position
+ * controls use the same legacy class names but keep their existing layout. */
+.fixtureLimitsEditor {
+  width: 100%;
+  max-width: 680px;
+  min-width: 0;
+  justify-self: start;
+  box-sizing: border-box;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--theme-line);
+  border-radius: 0;
+  background: var(--theme-panel);
+}
+
+/* The setup context has a more-specific edge-only rule for this panel. Keep
+ * the inspector bounded when it is rendered there as well as in the sidebar. */
+.fixtureLimitsEditor[data-fixture-limits-editor] {
+  border-width: 1px;
+  border-radius: 0;
+}
+
+.fixtureLimitsEditor .fixtureLimitsSections {
+  display: grid;
+  grid-template-columns: minmax(190px, 0.8fr) minmax(320px, 1.2fr);
+  align-items: start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.fixtureLimitsEditor .fixtureLimitsSection {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--theme-line);
+  border-radius: 0;
+  background: var(--theme-raised);
+  padding: 8px;
+}
+
+.fixtureLimitsEditor .fixtureLimitsSectionHeader {
+  align-items: baseline;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--theme-line);
+  padding-bottom: 6px;
+}
+
+.fixtureLimitsEditor .fixtureLimitsSectionHeader strong {
+  color: var(--theme-text);
+  font-size: 13px;
+}
+
+.fixtureLimitsEditor .fixtureLimitsSectionHeader span {
+  text-align: right;
+}
+
+.fixtureLimitsEditor .fixtureDimmerLimitContent {
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.fixtureLimitsEditor .dimmerLimitMeter {
+  min-width: 52px;
+}
+
+.fixtureLimitsEditor .dimmerLimitTrack {
+  min-height: 132px;
+  width: 18px;
+  background: var(--theme-inset);
+}
+
+.fixtureLimitsEditor .fixtureLimitFieldGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-content: start;
+  gap: 7px;
+  min-width: 0;
+}
+
+.fixtureLimitsEditor .fixtureLimitField {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.fixtureLimitsEditor .fixtureLimitFieldLabel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  color: var(--theme-muted);
+  font-size: var(--fs-text);
+  font-weight: 400;
+}
+
+.fixtureLimitsEditor .fixtureLimitFieldLabel > span {
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.fixtureLimitsEditor .fixtureLimitFieldLabel small {
+  flex: 0 0 auto;
+  color: var(--theme-dim);
+  font-size: var(--fs-text);
+  font-variant-numeric: tabular-nums;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.fixtureLimitsEditor .fixtureLimitField input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  font-variant-numeric: tabular-nums;
+}
+
+.fixtureLimitsEditor .movementLimitEditor {
+  grid-template-columns: clamp(180px, 48%, 220px) minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.fixtureLimitsEditor .movementLimitMap {
+  width: 100%;
+  min-width: 180px;
+  max-width: 220px;
+  justify-self: start;
+  background: var(--theme-inset);
+}
+
+.fixtureLimitsEditor .movementLimitMap::before,
+.fixtureLimitsEditor .movementLimitMap::after {
+  position: absolute;
+  z-index: 0;
+  display: block;
+  background: var(--theme-line-strong);
+  content: "";
+  pointer-events: none;
+}
+
+.fixtureLimitsEditor .movementLimitMap::before {
+  top: 0;
+  bottom: 0;
+  left: calc(50% - 0.5px);
+  width: 1px;
+}
+
+.fixtureLimitsEditor .movementLimitMap::after {
+  top: calc(50% - 0.5px);
+  right: 0;
+  left: 0;
+  height: 1px;
+}
+
+.fixtureLimitsEditor .movementLimitMap > i {
+  z-index: 1;
+}
+
+.fixtureLimitsEditor .movementLimitFields {
+  min-width: 0;
+}
+
+.fixtureLimitsEditor .fixtureLimitToggleRow {
+  align-items: stretch;
+  grid-template-columns: repeat(2, minmax(90px, 1fr));
+}
+
+.fixtureLimitsEditor .fixtureLimitToggleRow label {
+  min-width: 0;
+  padding: 0 5px;
+  white-space: nowrap;
+}
+
+.fixtureLimitsEditor .fixtureLimitToggleRow input {
+  flex: 0 0 auto;
+}
+
+.fixtureLimitsEditor .fixtureLimitsActions {
+  justify-content: flex-end;
+  align-items: center;
+  border-top: 1px solid var(--theme-line);
+  padding-top: 8px;
+}
+
+.fixtureLimitsEditor .fixtureLimitsActions button {
+  min-width: 76px;
+}
+
+@media (max-width: 600px) {
+  .fixtureLimitsEditor .fixtureLimitsSections {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@container (max-width: 560px) {
+  .fixtureLimitsEditor .fixtureLimitsSections {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .fixtureLimitsEditor .movementLimitEditor {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .fixtureLimitsEditor .fixtureLimitToggleRow {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.mappingSetupContextContent > .fixtureLimitsEditor .fixtureLimitsSections {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.mappingSetupContextContent > .fixtureLimitsEditor .movementLimitEditor {
+  grid-template-columns: minmax(180px, 220px) minmax(190px, 1fr);
+}

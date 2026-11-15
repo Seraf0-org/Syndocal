@@ -1,0 +1,305 @@
+/*
+ * Setup I/O only. This is intentionally not a global density override: these
+ * rules give the operator a stable connection picker and one full-width local
+ * workbench while retaining the established controls and their hit targets.
+ */
+.layoutSetup .setupIoPanel[data-io-layout="operator"] {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.setupIoPanel[data-io-layout="operator"] .setupIoConnectionDeck {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 8px;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  container-type: inline-size;
+  container-name: setup-io-deck;
+}
+
+.setupIoPanel[data-io-layout="operator"] .setupIoConnectionCards {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  min-width: 0;
+}
+
+.setupIoPanel[data-io-layout="operator"] .setupIoConnectionCard {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+  border: 1px solid var(--theme-line);
+  border-radius: var(--ui-radius-control);
+  background: var(--theme-panel);
+}
+
+.setupIoPanel[data-io-layout="operator"] .setupIoConnectionCard.active {
+  border-color: var(--theme-selected);
+  background: var(--theme-raised);
+}
+
+.setupIoPanel[data-io-layout="operator"] .setupIoConnectionSelect {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 48px;
+  align-content: center;
+  align-self: stretch;
+  gap: 2px;
+  justify-self: stretch;
+  position: relative;
+  z-index: 1;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  padding: 7px 9px;
+  text-align: left;
+}
+
+.setupIoPanel[data-io-layout="operator"] .setupIoConnectionSelect:focus-visible {
+  outline: 2px solid var(--theme-focus);
+  outline-offset: -2px;
+}
+
+.setupIoPanel[data-io-layout="operator"] .setupIoConnectionLabel {
+  overflow: hidden;
+  color: var(--theme-text);
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.setupIoPanel[data-io-layout="operator"] .setupIoConnectionMeta {
+  display: grid;
+  align-content: center;
+  justify-items: end;
+  gap: 4px;
+  padding: 6px;
+}
+
+.setupIoPanel[data-io-layout="operator"] .setupIoConnectionState {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--theme-muted);
+  font-size: var(--fs-text);
+  white-space: nowrap;
+}
+
+.setupIoPanel[data-io-layout="operator"] .setupIoConnectionState > i {
+  width: 7px;
+  height: 7px;
+  border-radius: 0;
+  background: currentcolor;
+}
+
+.setupIoPanel[data-io-layout="operator"] .setupIoConnectionState.ok { color: var(--theme-ok); }
+.setupIoPanel[data-io-layout="operator"] .setupIoConnectionState.warning { color: var(--theme-warn); }
+.setupIoPanel[data-io-layout="operator"] .setupIoConnectionState.error { color: var(--theme-error); }
+
+.setupIoPanel[data-io-layout="operator"] .setupIoConnectionAction {
+  display: contents;
+}
+
+.setupIoPanel[data-io-layout="operator"] .setupIoConnectionAction > button {
+  min-height: 28px;
+  white-space: nowrap;
+}
+
+.setupIoPanel[data-io-layout="operator"] .setupIoConnectionWorkbench {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--theme-line);
+  border-radius: var(--ui-radius-control);
+  background: var(--theme-panel);
+}
+
+.setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 8px;
+  container-type: inline-size;
+  container-name: setup-io-workbench;
+}
+
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .ioUnifiedZone {
+  min-width: 0;
+  min-height: 0;
+  overflow: visible;
+}
+
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .ioUnifiedZone > .ioOperatorSurface {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  padding-right: 2px;
+}
+
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .dmxTestFramePanel,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .dmxRoutesPanel,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .phase1SmokeReport,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .telemetry {
+  margin: 0;
+}
+
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .blackout {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+/* The workbench body is the only vertical scroll owner for the operator deck.
+   Descendant desks retain their layout and hit targets but grow with their
+   content instead of introducing a second, hidden scrollport. */
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody > [data-io-zone],
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .ioOperatorSurface,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .midiClock,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .oscInput,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .remoteControl,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .ioDisclosureStack,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .dmxOutputConfigPanel,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .dmxEndpointDesk,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .dmxDiagnosticsDisclosure > .rawMonitor,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .dmxDiagnosticsDisclosure > .outputDiagnosticsDesk,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .dmxDiagnosticsDisclosure > .lightingRuntimeDesk,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .mappingEditorDesk,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .mappingListDesk,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .mappingListDesk > .timelineList,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .remoteServerDesk,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .remoteEndpointDesk,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .standbySyncDesk,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .rawGrid {
+  height: auto;
+  max-height: none;
+  overflow: visible;
+}
+
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody > [data-io-zone],
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .ioOperatorSurface,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .midiClock,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .oscInput,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .remoteControl {
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .ioOperatorSurface,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .midiClock,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .oscInput,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .remoteControl {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: none;
+  border-top: 0;
+  padding: 0 2px 0 0;
+}
+
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .remoteControl {
+  grid-template-rows: auto;
+  overflow: hidden;
+}
+
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .remoteControl > .ioDisclosureStack {
+  height: auto;
+  min-height: 0;
+  overflow: visible;
+  padding-right: 0;
+}
+
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .dmxDiagnosticsDisclosure > .rawMonitor,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .dmxDiagnosticsDisclosure > .outputDiagnosticsDesk,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .lightingRuntimeDesk,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .dmxEndpointDesk {
+  border-right: 1px solid var(--theme-line);
+  padding-right: 6px;
+}
+
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .dmxDiagnosticsDisclosure > .lightingRuntimeDesk {
+  border-right: 0;
+  padding-right: 0;
+}
+
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .mappingListDesk {
+  grid-template-rows: auto;
+}
+
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .ioMappingWorkbench {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .remoteEndpointGrid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* The workbench is the measuring boundary: restore the established paired
+   desks only when both can keep their existing minimum control widths. */
+@container setup-io-workbench (min-width: 980px) {
+  .layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .ioMappingWorkbench {
+    grid-template-columns: minmax(360px, 0.9fr) minmax(420px, 1.1fr);
+  }
+
+  .layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .remoteEndpointGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .ioConnectionControls,
+.layoutSetup .setupIoPanel[data-io-layout="operator"] .setupIoWorkbenchBody .remoteConnectionControls {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.setupIoPanel[data-io-layout="operator"] .ioDisclosureDescription {
+  margin: 0 0 8px;
+  color: var(--theme-muted);
+  line-height: 1.45;
+}
+
+.setupIoPanel[data-io-layout="operator"] .ioDirectSurface {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-width: 0;
+  padding: 7px;
+}
+
+@container setup-io-deck (max-width: 900px) {
+  .setupIoPanel[data-io-layout="operator"] .setupIoConnectionCards {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+/* Large work areas can use six columns. At owner width the four-column rail
+   balances seven connection cards as 4 + 3 instead of leaving DJ Link alone. */
+@container setup-io-deck (min-width: 1480px) {
+  .setupIoPanel[data-io-layout="operator"] .setupIoConnectionCards {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+}
+
+@container setup-io-deck (max-width: 620px) {
+  .setupIoPanel[data-io-layout="operator"] .setupIoConnectionCards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .setupIoPanel[data-io-layout="operator"] .setupIoConnectionCard {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .setupIoPanel[data-io-layout="operator"] .setupIoConnectionMeta {
+    grid-auto-flow: column;
+    justify-content: space-between;
+    padding: 0 8px 7px;
+  }
+}

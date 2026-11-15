@@ -1,0 +1,40 @@
+.desktopWindowModeNotice {
+  position: fixed;
+  right: max(8px, env(safe-area-inset-right));
+  bottom: max(8px, env(safe-area-inset-bottom));
+  z-index: 40;
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--theme-line);
+  border-radius: 0;
+  background: var(--theme-panel);
+  color: var(--theme-text);
+  padding: 0 8px;
+  pointer-events: none;
+  font-size: var(--fs-text);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.desktopWindowModeNotice strong {
+  color: var(--theme-text);
+  font-size: inherit;
+  font-weight: 400;
+}
+
+.desktopWindowModeNotice span {
+  color: var(--theme-muted);
+  font-variant-numeric: tabular-nums;
+  font-weight: 400;
+}
+
+.desktopWindowModeNotice[data-mode="fullscreen"] {
+  border-color: var(--theme-accent);
+}
+
+.desktopWindowModeNotice[data-mode="error"] {
+  border-color: var(--theme-error);
+  color: var(--theme-error);
+}

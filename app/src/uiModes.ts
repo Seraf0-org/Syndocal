@@ -1,0 +1,163 @@
+export type WorkspaceTab = "setup" | "control" | "touch";
+export type SetupArea = "lighting" | "video" | "mapping" | "io" | "security";
+export type SetupSubTab = "patch" | "video" | "mapping" | "io" | "authority";
+export type ControlMode = "edit" | "live" | "mixer" | "both" | "perform";
+export type ControlDomain = "lighting" | "video" | "both" | "timeline";
+export type ControlCategory = "dimmer" | "color" | "position" | "gobo" | "beam" | "focus" | "other" | "fader";
+export type TimelineDeskSurface = "show" | "automation" | "playback";
+export type TimelineContextDrawer = "none" | "cue" | "block";
+export type EditDeskSurface = "faders" | "attributes";
+
+export const workspaceLabels: Record<WorkspaceTab, string> = {
+  setup: "Setup",
+  control: "Edit",
+  touch: "Control",
+};
+
+export const workspaceLabel = (workspace: WorkspaceTab): string => workspaceLabels[workspace];
+
+export const setupAreas: { id: SetupArea; label: string; description: string; defaultTab: SetupSubTab }[] = [
+  { id: "lighting", label: "Lighting", description: "Fixture library, profiles, and DMX patch", defaultTab: "patch" },
+  { id: "video", label: "Video", description: "Compositions, displays, and projector calibration", defaultTab: "video" },
+  { id: "io", label: "I/O", description: "DMX, MIDI, OSC, and remote connections", defaultTab: "io" },
+  { id: "security", label: "Security", description: "AI principals, grants, consent, and emergency revocation", defaultTab: "authority" },
+];
+
+export const setupSubTabs: { id: SetupSubTab; area: SetupArea; label: string; description: string }[] = [
+  { id: "patch", area: "lighting", label: "Patch", description: "Fixture profiles, DMX addressing, and assignment" },
+  { id: "video", area: "video", label: "Outputs", description: "Compositions, output routing, resolution, and projection calibration" },
+  { id: "io", area: "io", label: "I/O", description: "DMX, MIDI, OSC, and remote connections" },
+  { id: "authority", area: "security", label: "AI Access", description: "Pair principals, scope grants, and revoke external control" },
+];
+
+export const setupAreaForSubTab = (tab: SetupSubTab): SetupArea =>
+  setupSubTabs.find((candidate) => candidate.id === tab)?.area ?? "lighting";
+
+export const setupSubTabsForArea = (area: SetupArea) => setupSubTabs.filter((tab) => tab.area === area);
+
+export const controlModes: { id: ControlMode; label: string; description: string }[] = [
+  { id: "edit", label: "Lighting", description: "Lighting editing, fixture attributes, visual controls, and presets" },
+  { id: "live", label: "Timeline", description: "Timeline sequence, block and cue authoring, source shelf, and inspector" },
+  { id: "mixer", label: "Video", description: "Media Library preparation, verification, preview, and clip properties" },
+  { id: "both", label: "Both", description: "Combined Lighting and Video live control overview" },
+  { id: "perform", label: "Perform", description: "Clip launch, Preview / Program and layer mixing in one performance desk" },
+];
+
+export const controlModeLabel = (mode: ControlMode): string =>
+  controlModes.find((candidate) => candidate.id === mode)?.label ?? mode;
+
+export const setupSubTabLabel = (tab: SetupSubTab): string =>
+  setupSubTabs.find((candidate) => candidate.id === tab)?.label ?? tab;
+
+// Activities and live control domains have separate chrome. The persisted mode
+// IDs remain stable for layouts, shortcuts, mappings and pane windows.
+export const editDomainModes = [
+  controlModes.find((mode) => mode.id === "edit")!,
+  controlModes.find((mode) => mode.id === "mixer")!,
+  controlModes.find((mode) => mode.id === "live")!,
+];
+
+export const controlDomainModes: { id: ControlDomain; mode: ControlMode; label: string }[] = [
+  { id: "lighting", mode: "edit", label: "Lighting" },
+  { id: "video", mode: "perform", label: "Video" },
+  { id: "both", mode: "both", label: "Both" },
+  // Playback surface for running the show. It reuses the stable "live" mode id
+  // under the Control workspace; Edit > Timeline keeps authoring under "control".
+  { id: "timeline", mode: "live", label: "Timeline" },
+];
+
+export const controlModeForDomain = (domain: ControlDomain): ControlMode =>
+  domain === "video" ? "perform" : domain === "both" ? "both" : domain === "timeline" ? "live" : "edit";
+
+export const controlDomainForMode = (mode: ControlMode): ControlDomain =>
+  mode === "perform" ? "video" : mode === "both" ? "both" : mode === "live" ? "timeline" : "lighting";
+
+export const isPerformWorkspace = (workspace: WorkspaceTab, mode: ControlMode): boolean =>
+  workspace === "touch" && mode === "perform";
+
+export const isBothWorkspace = (workspace: WorkspaceTab, mode: ControlMode): boolean =>
+  workspace === "touch" && mode === "both";
+
+/** Control > Timeline: the show-running surface. Edit > Timeline is workspace "control". */
+export const isTimelinePlaybackWorkspace = (workspace: WorkspaceTab, mode: ControlMode): boolean =>
+  workspace === "touch" && mode === "live";
+
+export const workspaceModeForTabShortcut = (workspace: WorkspaceTab, code: string): ControlMode | null => {
+  const match = code.match(/^(?:Digit|Numpad)([1-4])$/);
+  if (!match) return null;
+  const index = Number(match[1]) - 1;
+  return workspace === "touch" ? controlDomainModes[index]?.mode ?? null
+    : workspace === "control" ? editDomainModes[index]?.id ?? null : null;
+};
+
+export const controlCategories: { id: ControlCategory; label: string }[] = [
+  { id: "dimmer", label: "Dimmer" },
+  { id: "color", label: "Color" },
+  { id: "position", label: "Position" },
+  { id: "gobo", label: "Gobo" },
+  { id: "beam", label: "Beam" },
+  { id: "focus", label: "Focus" },
+  { id: "other", label: "Other" },
+  { id: "fader", label: "Fader" },
+];
+
+export const controlModeForShortcut = (code: string): ControlMode | null => {
+  switch (code) {
+    case "KeyE":
+      return "edit";
+    case "KeyL":
+      return "live";
+    case "KeyM":
+      return "mixer";
+    default:
+      return null;
+  }
+};
+
+export const workspaceTabForShortcut = (code: string): WorkspaceTab | null => {
+  switch (code) {
+    case "F1":
+      return "setup";
+    case "F2":
+      return "control";
+    case "F3":
+      return "touch";
+    default:
+      return null;
+  }
+};
+
+export const setupSubTabForShortcut = (code: string): SetupSubTab | null => {
+  const digitMatch = code.match(/^(Digit|Numpad)([1-9])$/);
+  if (!digitMatch) {
+    return null;
+  }
+  return setupSubTabs[Number(digitMatch[2]) - 1]?.id ?? null;
+};
+
+export const controlCategoryForAttribute = (attribute: string): Exclude<ControlCategory, "fader"> => {
+  const normalized = attribute.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (/(dimmer|intensity)/.test(normalized)) {
+    return "dimmer";
+  }
+  if (/(pan|tilt|position|move|movement)/.test(normalized)) {
+    return "position";
+  }
+  if (
+    /(color|colour|red|green|blue|cyan|magenta|yellow|amber|white|warmwhite|coldwhite|uv|hue|saturation|cto|ctc|ctb)/.test(
+      normalized,
+    )
+  ) {
+    return "color";
+  }
+  if (/(gobo|animationwheel)/.test(normalized)) {
+    return "gobo";
+  }
+  if (/(focus|focal)/.test(normalized)) {
+    return "focus";
+  }
+  if (/(zoom|iris|prism|frost|beam|shutter|strobe|blade|framing|wash|spot)/.test(normalized)) {
+    return "beam";
+  }
+  return "other";
+};

@@ -1,0 +1,175 @@
+/* Operator-facing Control only (internal route: touch). Keep authored tile
+   geometry and all hit targets intact; Edit and Setup do not consume these. */
+.app .layout.layoutTouch {
+  --ui-range-accent: var(--theme-fader-fill);
+  --control-surface: var(--theme-panel);
+  --control-raised: var(--theme-raised);
+  --control-border: var(--theme-line);
+  --control-muted: var(--theme-muted);
+  --control-accent: var(--theme-accent);
+  background: var(--theme-bg);
+}
+
+.app .layout.layoutTouch .touchControlDomainTabs {
+  border-color: transparent;
+  border-bottom-color: var(--control-border);
+  background: var(--control-surface);
+  gap: 4px;
+}
+
+.app .layout.layoutTouch .touchControlDomainTabs button {
+  border: 1px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--control-muted);
+  font-weight: 400;
+}
+
+.app .layout.layoutTouch .touchControlDomainTabs button.active {
+  border-color: var(--theme-selected);
+  background: var(--theme-selected);
+  color: var(--theme-on-selected);
+}
+
+.app .layout.layoutTouch .touchSurfacePanel,
+.app .layout.layoutTouch .touchVideoPanel {
+  border-color: var(--control-border);
+  background: var(--control-surface);
+}
+
+.app .layout.layoutTouch .touchSurfaceToolbar {
+  border-color: transparent;
+  border-bottom-color: var(--control-border);
+  background: transparent;
+}
+
+.app .layout.layoutTouch .touchSurfaceModeToggle {
+  gap: 0;
+  border-radius: 0;
+  background: var(--theme-inset);
+}
+
+.app .layout.layoutTouch .touchSurfaceModeToggle button,
+.app .layout.layoutTouch .touchPageTabs button {
+  border-color: transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--control-muted);
+  font-weight: 400;
+}
+
+.app .layout.layoutTouch .touchSurfaceModeToggle button.active {
+  border-color: var(--theme-selected);
+  background: var(--theme-selected);
+  color: var(--theme-on-selected);
+}
+
+/* Page creation/removal belongs to layout editing, not live playback. The
+   existing EDIT toggle exposes both controls without changing saved pages. */
+.app .layout.layoutTouch .touchSurfacePanel[data-touch-mode="live"]
+  .touchPageTabs :is(.touchPageAdd, .touchPageRemove) {
+  display: none;
+}
+
+.app .layout.layoutTouch .touchPageTabs button.active {
+  border-color: var(--control-border);
+  background: var(--control-raised);
+  color: var(--theme-text);
+}
+
+.app .layout.layoutTouch .touchSurfaceStatus {
+  color: var(--control-muted);
+  font-weight: 400;
+}
+
+.app .layout.layoutTouch .touchSurfaceGrid {
+  border-color: transparent;
+  background: var(--control-surface);
+}
+
+.app .layout.layoutTouch .touchPlacedControl {
+  border-color: transparent;
+  border-radius: 0;
+  background: var(--control-raised);
+}
+
+.app .layout.layoutTouch .touchSurfacePanel[data-touch-mode="edit"] .touchPlacedControl {
+  border-color: var(--control-border);
+}
+
+.app .layout.layoutTouch .touchPlacedControl.selected {
+  border-color: var(--control-accent);
+}
+
+.app .layout.layoutTouch .touchPlacedControl.kind-Label {
+  background: transparent;
+}
+
+.app .layout.layoutTouch .touchPlacedLabel {
+  justify-items: start;
+  padding-inline: 12px;
+  color: var(--control-muted);
+  font-weight: 400;
+}
+
+.app .layout.layoutTouch .touchPlacedImage {
+  background: var(--theme-inset);
+  color: var(--control-muted);
+}
+
+.app .layout.layoutTouch .touchPlacedFader,
+.app .layout.layoutTouch .touchPlacedDial,
+.app .layout.layoutTouch .touchPlacedColor,
+.app .layout.layoutTouch .touchPlacedIncremental {
+  color: var(--theme-text);
+  font-weight: 400;
+}
+
+.app .layout.layoutTouch .touchPlacedIncremental button {
+  border-color: var(--control-border);
+  border-radius: 0;
+  background: var(--theme-raised);
+}
+
+.app .layout.layoutTouch .touchPlacedXy {
+  border-color: var(--control-border);
+  border-radius: 0;
+  background-color: var(--theme-inset);
+}
+
+.app .layout.layoutTouch .touchPlacedColor input[type="color"] {
+  border-color: transparent;
+  border-radius: 0;
+  background: transparent;
+}
+
+.app .layout.layoutTouch .touchVideoPanel > .panelHeader,
+.app .layout.layoutTouch .videoClipSlotBankHeader {
+  border-bottom: 1px solid var(--control-border);
+  padding-bottom: 6px;
+}
+
+.app .layout.layoutTouch .videoClipSlotBankPanel {
+  border-color: var(--control-border);
+  border-radius: 0;
+  background: var(--theme-panel);
+}
+
+.app .layout.layoutTouch .mappingPersistentWorkspaceBand,
+.app .layout.layoutTouch .mappingPersistentWorkspaceGrid,
+.app .layout.layoutTouch .workspaceContextPane {
+  border-color: var(--control-border);
+  background: var(--control-surface);
+}
+
+.app .layout.layoutTouch .mappingPersistentGroups,
+.app .layout.layoutTouch .controlContextHeader,
+.app .layout.layoutTouch .mappingPersistentStage {
+  border-color: var(--control-border);
+  background: var(--control-surface);
+}
+
+.app .layout.layoutTouch :is(button, input, select):focus-visible {
+  outline: 2px solid var(--theme-focus);
+  outline-offset: -2px;
+}

@@ -1,0 +1,25 @@
+PASS 410 immutable protected file hashes
+PASS separately recorded frozen-install dependency metadata
+PASS 22 runtime and alias hashes
+PASS all 303 removed paths absent
+PASS all 10 shared dependency copies retained
+v22.22.1
+vite/6.4.2 win32-x64 node-v22.22.1
+Version 5.9.3
+Legend: production dependency, optional only, dev only
+
+syndocal@1.2.0-rc.2 C:\Users\janua\OneDrive\ドキュメント\GitHub\Syndocal\app (PRIVATE)
+
+dependencies:
+@tauri-apps/api 2.5.0
+solid-js 1.9.13
+
+devDependencies:
+@tauri-apps/cli 2.5.0
+ajv 8.17.1
+smol-toml 1.8.0
+typescript 5.9.3
+vite 6.4.2
+vite-plugin-solid 2.11.12
+{"root":"C:\\Users\\janua\\OneDrive\\\u30c9\u30ad\u30e5\u30e1\u30f3\u30c8\\GitHub\\Syndocal\\target\\qa\\ffmpeg-selfbuild-20261027\\sdk\\ffmpeg-n8.1.3-9-g29e619e767-win64-lgpl-shared-8.1"}
+PASS continued cleanup preservation and dependency checks

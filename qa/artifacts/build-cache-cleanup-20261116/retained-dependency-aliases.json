@@ -1,0 +1,82 @@
+[
+  {
+    "root": "dev",
+    "relative": "lane4-syphon-codex-20261102/src-current/app/node_modules",
+    "regular_files": 3481,
+    "native_multilink_files": 3369,
+    "single_link_logical_bytes": 378148,
+    "decision": "Retained; external native aliases reject cleanup"
+  },
+  {
+    "root": "dev",
+    "relative": "lane4-syphon-codex-20261102/src/app/node_modules",
+    "regular_files": 3481,
+    "native_multilink_files": 3369,
+    "single_link_logical_bytes": 371612,
+    "decision": "Retained; external native aliases reject cleanup"
+  },
+  {
+    "root": "dev",
+    "relative": "syphon-handoff-20261102/src/app/node_modules",
+    "regular_files": 3481,
+    "native_multilink_files": 3369,
+    "single_link_logical_bytes": 368344,
+    "decision": "Retained; external native aliases reject cleanup"
+  },
+  {
+    "root": "dev",
+    "relative": "task100-syphon-20261105/source/app/node_modules",
+    "regular_files": 3481,
+    "native_multilink_files": 3369,
+    "single_link_logical_bytes": 370795,
+    "decision": "Retained; external native aliases reject cleanup"
+  },
+  {
+    "root": "dev",
+    "relative": "task90-validation-20261102/source-matrix/app/node_modules",
+    "regular_files": 3481,
+    "native_multilink_files": 3369,
+    "single_link_logical_bytes": 378965,
+    "decision": "Retained; external native aliases reject cleanup"
+  },
+  {
+    "root": "dev",
+    "relative": "task91-ndi-20261102/source-current/app/node_modules",
+    "regular_files": 3481,
+    "native_multilink_files": 3369,
+    "single_link_logical_bytes": 374063,
+    "decision": "Retained; external native aliases reject cleanup"
+  },
+  {
+    "root": "dev",
+    "relative": "task91-ndi-20261102/source-final/app/node_modules",
+    "regular_files": 3481,
+    "native_multilink_files": 3369,
+    "single_link_logical_bytes": 372429,
+    "decision": "Retained; external native aliases reject cleanup"
+  },
+  {
+    "root": "dev",
+    "relative": "task91-ndi-20261102/source/app/node_modules",
+    "regular_files": 3481,
+    "native_multilink_files": 3369,
+    "single_link_logical_bytes": 367527,
+    "decision": "Retained; external native aliases reject cleanup"
+  },
+  {
+    "root": "repo",
+    "relative": "target/qa/task96-groupfx/source/app/node_modules",
+    "regular_files": 3481,
+    "native_multilink_files": 3369,
+    "single_link_logical_bytes": 386318,
+    "decision": "Retained; external native aliases reject cleanup"
+  },
+  {
+    "root": "repo",
+    "relative": "target/qa/task99-rgba/source/app/node_modules",
+    "regular_files": 3481,
+    "native_multilink_files": 3369,
+    "single_link_logical_bytes": 383867,
+    "decision": "Retained; external native aliases reject cleanup"
+  }
+]

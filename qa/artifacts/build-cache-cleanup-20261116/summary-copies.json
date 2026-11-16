@@ -1,0 +1,19 @@
+{
+  "date": "2026-11-17",
+  "base": "198363189046e5dd028507f643df1c83df29f88c",
+  "deleted_targets": 303,
+  "git_verified_source_components": 236,
+  "generated_frontend_outputs": 67,
+  "logical_bytes_removed": 3815072599,
+  "distinct_file_bytes_removed": 3815072599,
+  "files_removed": 154313,
+  "free_before_bytes": 446153641984,
+  "free_after_bytes": 450107682816,
+  "immutable_protected_hash_matches": 410,
+  "separately_recorded_dependency_metadata": 1,
+  "additional_runtime_hash_matches": 22,
+  "shared_dependency_copies_retained": 10,
+  "safety_tests_passed": 42,
+  "manifest_sha256": "FFA057F2A7A36CEE85A62B0BC7DA9829504629124EB2B514DF6B2B27368DEDFB",
+  "observed_free_space_change_bytes": 3954040832
+}

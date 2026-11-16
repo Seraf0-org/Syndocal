@@ -1,0 +1,7 @@
+{
+  "Command": "pnpm --dir app install --offline --frozen-lockfile --ignore-scripts",
+  "MetadataBefore": "3BFDD50F7B664B3AF23C7D83978E409B119F03AAA87D469489C03930EE961697",
+  "MetadataAfter": "9E92221ED3140F5E1A7517D7B15196222C3C1F0D8D6FA6A6E8ACA7F247CAFD45",
+  "FreeBefore": 448963354624,
+  "FreeAfter": 448963227648
+}

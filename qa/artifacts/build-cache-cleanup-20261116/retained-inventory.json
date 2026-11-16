@@ -1,8 +1,8 @@
 [
   {
     "root": "SyndocalDev",
-    "logical_bytes": 10475512257,
-    "files": 100029,
+    "logical_bytes": 10462906776,
+    "files": 99078,
     "links_not_followed": 5207,
     "largest_children": [
       {
@@ -37,13 +37,13 @@
       },
       {
         "name": "task90-validation-20261102",
-        "logical_bytes": 577781288,
-        "files": 10847
+        "logical_bytes": 571485118,
+        "files": 10374
       },
       {
         "name": "task100-syphon-20261105",
-        "logical_bytes": 577012844,
-        "files": 7520
+        "logical_bytes": 570703533,
+        "files": 7042
       },
       {
         "name": "rc2",
@@ -59,19 +59,19 @@
   },
   {
     "root": "target/qa",
-    "logical_bytes": 38573824418,
-    "files": 611380,
+    "logical_bytes": 34771357300,
+    "files": 458018,
     "links_not_followed": 483,
     "largest_children": [
       {
         "name": "steroids-60fps-design-20261025",
-        "logical_bytes": 22797561247,
-        "files": 473275
+        "logical_bytes": 19019791471,
+        "files": 321750
       },
       {
         "name": "task99-rgba",
-        "logical_bytes": 1434777914,
-        "files": 7665
+        "logical_bytes": 1428475883,
+        "files": 7190
       },
       {
         "name": "task54-release-notices",
@@ -80,8 +80,8 @@
       },
       {
         "name": "task96-groupfx",
-        "logical_bytes": 1070473623,
-        "files": 7551
+        "logical_bytes": 1064171592,
+        "files": 7076
       },
       {
         "name": "runtime-perf-2026-10-21",

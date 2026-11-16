@@ -1,7 +1,7 @@
 # Additional cleanup permits individual reproducible archives and pruning a
 # generated cache while retaining its exact runtime hardlink aliases.
 function Assert-DatedCleanupTargetKind {
-    param([string]$Path, $Spec)
+    param([string]$Path, $Spec, [string]$RepositoryRoot)
     $item = Get-Item -LiteralPath $Path -Force
     Assert-SyndocalCleanupNoReparseItem -Item $item
     if ($Spec.kind -eq 'regenerable-git-archive') {
@@ -14,8 +14,22 @@ function Assert-DatedCleanupTargetKind {
             $item.Length -ne $Spec.bytes) { throw 'Invalid Git archive target/proof' }
     } else {
         $directoryKinds = @('cargo-cache','c5-staged-runtime','obsolete-build-output','obsolete-staged-runtime',
-            'obsolete-downloaded-installer','generated-cargo-cache','generated-cargo-cache-prune','generated-qa-browser-profiles')
+            'obsolete-downloaded-installer','generated-cargo-cache','generated-cargo-cache-prune','generated-qa-browser-profiles',
+            'regenerable-git-source-copy','generated-app-dist')
         if ($Spec.kind -notin $directoryKinds -or -not $item.PSIsContainer) { throw 'Directory target type or kind changed' }
+        if ($Spec.kind -eq 'regenerable-git-source-copy') {
+            Assert-DatedCleanupSourceCopyProof -Spec $Spec
+        } elseif ($Spec.kind -eq 'generated-app-dist') {
+            $parent = Split-Path $Path -Parent
+            if ((Split-Path $Path -Leaf) -cne 'dist' -or (Split-Path $parent -Leaf) -cne 'app' -or
+                -not (Test-Path -LiteralPath (Join-Path $Path 'index.html') -PathType Leaf) -or
+                -not (Test-Path -LiteralPath (Join-Path $Path 'assets') -PathType Container)) { throw 'Invalid generated frontend output' }
+            $lock = (Get-FileHash -LiteralPath (Join-Path $parent 'pnpm-lock.yaml')).Hash
+            $activeLock = (Get-FileHash -LiteralPath (Join-Path $RepositoryRoot 'app/pnpm-lock.yaml')).Hash
+            $package = Get-Content -LiteralPath (Join-Path $parent 'package.json') -Raw | ConvertFrom-Json
+            if ($lock -ine $Spec.lock_sha256 -or $lock -ine $activeLock -or
+                $package.scripts.build -cne 'tsc --noEmit && vite build') { throw 'Generated output build provenance changed' }
+        }
     }
 }
 

@@ -1,6 +1,6 @@
 #Requires -Version 7.0
 [CmdletBinding()]
-param([switch]$Apply, [switch]$FunctionsOnly, [switch]$Additional)
+param([switch]$Apply, [switch]$FunctionsOnly, [switch]$Additional, [switch]$Copies)
 
 # One dated, reviewed target list; never enumerate new deletion targets at apply time.
 Set-StrictMode -Version Latest
@@ -9,6 +9,7 @@ $datedApply = [bool]$Apply
 $datedFunctionsOnly = [bool]$FunctionsOnly
 . (Join-Path $PSScriptRoot 'cleanup-cache-native-path.ps1')
 . (Join-Path $PSScriptRoot 'cleanup-cache-extra-policy.ps1')
+. (Join-Path $PSScriptRoot 'cleanup-source-copy-policy.ps1')
 $script:SyndocalCleanupHarnessRelativePath = 'qa/harnesses/cleanup-cache-20261116.ps1'
 
 function Resolve-DatedCleanupTarget {
@@ -24,8 +25,8 @@ function Resolve-DatedCleanupTarget {
 }
 
 function Assert-DatedCleanupSnapshot {
-    param([string]$Path, $Expected, [string[]]$KeepNames = @())
-    $actual = Get-DatedCleanupSnapshot -Path $Path -KeepNames $KeepNames
+    param([string]$Path, $Expected, [string[]]$KeepNames = @(), [switch]$ContentTree)
+    $actual = Get-DatedCleanupSnapshot -Path $Path -KeepNames $KeepNames -ContentTree:$ContentTree
     if ($null -ne $Expected) { Assert-SyndocalCleanupSnapshotsEqual -Expected $Expected -Actual $actual }
     return $actual
 }
@@ -39,7 +40,7 @@ function Get-DatedCleanupEntryProbe {
 }
 
 function Get-DatedCleanupSnapshot {
-    param([string]$Path, [string[]]$KeepNames = @())
+    param([string]$Path, [string[]]$KeepNames = @(), [switch]$ContentTree)
     Assert-SyndocalCleanupNoReparseAncestry -Path $Path
     $root = Get-Item -LiteralPath $Path -Force
     $identity = Get-DatedCleanupEntryProbe -Path $Path
@@ -52,6 +53,7 @@ function Get-DatedCleanupSnapshot {
     $stack = [Collections.Generic.Stack[IO.DirectoryInfo]]::new()
     $stack.Push($root)
     $lines = [Collections.Generic.List[string]]::new()
+    $contentLines = [Collections.Generic.List[string]]::new()
     $files = @{}
     [int64]$logical = 0
     [int64]$distinct = 0
@@ -81,7 +83,13 @@ function Get-DatedCleanupSnapshot {
                 $files[$key].Count++
                 $logical += $entry.Length
                 $fileCount++
-                $lines.Add("F|$relative|$($entry.Length)|$ticks|$key|$($probe.LinkCount)")
+                $fileLine = "F|$relative|$($entry.Length)|$ticks|$key|$($probe.LinkCount)"
+                $lines.Add($fileLine)
+                if ($ContentTree) {
+                    $normalized = $relative.TrimStart('\').Replace('\','/')
+                    $hash = (Get-FileHash -LiteralPath $entry.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                    $contentLines.Add("$normalized|$hash")
+                }
             }
         }
     }
@@ -93,12 +101,15 @@ function Get-DatedCleanupSnapshot {
     $lines.Sort([StringComparer]::Ordinal)
     if ($KeepNames.Count) { $lines.Add("K|$($retained.Fingerprint)") }
     $fingerprint = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes([string]::Join("`n", $lines))))
+    $contentLines.Sort([StringComparer]::Ordinal)
+    $contentHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes([string]::Join("`n", $contentLines))))
     return [pscustomobject]@{
         Path = $Path; ResolvedPath = $identity.FinalPath; VolumeSerialNumber = $identity.VolumeSerialNumber
         FileIndex = $identity.FileIndex; LogicalBytes = $logical; DistinctFileBytes = $distinct
         NewestWriteTicks = $newest; FileCount = $fileCount; DirectoryCount = $directoryCount
         FingerprintSha256 = $fingerprint
         RetainedFiles = $retained.Records; RetainedFingerprint = $retained.Fingerprint
+        ContentTreeSha256 = $contentHash
     }
 }
 
@@ -124,10 +135,11 @@ function Assert-DatedCleanupNoWriters {
 }
 
 if ($datedFunctionsOnly) { return }
+if ($Additional -and $Copies) { throw 'Select only one cleanup target set' }
 $Apply = $datedApply
 $repo = Get-SyndocalCleanupFullPath -Path (Join-Path $PSScriptRoot '../..')
 $dev = Get-SyndocalCleanupFullPath -Path (Join-Path $env:LOCALAPPDATA 'SyndocalDev')
-$manifestName = if ($Additional) { 'cleanup-cache-extra-20261116.targets.json' } else { 'cleanup-cache-20261116.targets.json' }
+$manifestName = if ($Copies) { 'cleanup-cache-copies-20261116.targets.json' } elseif ($Additional) { 'cleanup-cache-extra-20261116.targets.json' } else { 'cleanup-cache-20261116.targets.json' }
 $manifestPath = Join-Path $PSScriptRoot $manifestName
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 if ($manifest.schema -ne 1) { throw 'Unsupported cleanup schema' }
@@ -170,28 +182,30 @@ foreach ($spec in $manifest.targets) {
 
 if ($Apply) {
     [void](Assert-SyndocalCleanupRepositoryCheckpoint -RepositoryRoot $repo)
-    foreach ($file in @('qa/harnesses/cleanup-cache-20261116.ps1', 'qa/harnesses/cleanup-cache-native-path.ps1', 'qa/harnesses/cleanup-cache-extra-policy.ps1', ('qa/harnesses/' + $manifestName), 'qa/harnesses/test-cleanup-cache-20261116.ps1')) {
+    foreach ($file in @('qa/harnesses/cleanup-cache-20261116.ps1', 'qa/harnesses/cleanup-cache-native-path.ps1', 'qa/harnesses/cleanup-cache-extra-policy.ps1', 'qa/harnesses/cleanup-source-copy-policy.ps1', ('qa/harnesses/' + $manifestName), 'qa/harnesses/test-cleanup-cache-20261116.ps1')) {
         $tracked = @(Invoke-SyndocalCleanupGit -RepositoryRoot $repo -Arguments @('ls-files', '--', $file) -FailureCode 'TrackingFailed')
         if ($tracked.Count -ne 1) { throw "Dated cleanup file is not tracked: $file" }
     }
 }
 Assert-DatedCleanupNoWriters -Targets $targets
-$log = Join-Path $env:TEMP ('syndocal-cleanup-20261116-' + $(if ($Additional) { 'extra-' } else { '' }) + $(if ($Apply) { 'apply' } else { 'plan' }) + '.jsonl')
+$log = Join-Path $env:TEMP ('syndocal-cleanup-20261116-' + $(if ($Copies) { 'copies-' } elseif ($Additional) { 'extra-' } else { '' }) + $(if ($Apply) { 'apply' } else { 'plan' }) + '.jsonl')
 $freeBefore = (Get-PSDrive C).Free
 @{ Mode = $(if ($Apply) { 'Apply' } else { 'Plan' }); FreeBefore = $freeBefore; Started = (Get-Date).ToString('o') } | ConvertTo-Json -Compress | Set-Content -LiteralPath $log -Encoding utf8
 [int64]$bytes = 0
 foreach ($target in $targets) {
     if (-not (Test-Path -LiteralPath $target.Path)) { continue }
-    Assert-DatedCleanupTargetKind -Path $target.Path -Spec $target.Spec
+    Assert-DatedCleanupTargetKind -Path $target.Path -Spec $target.Spec -RepositoryRoot $repo
     if ($target.Spec.root -eq 'repo') { Assert-SyndocalCleanupCandidateUntracked -RepositoryRoot $repo -RelativePath $target.Spec.relative }
     Write-Output "Inspecting $($target.Spec.root)/$($target.Spec.relative)"
-    $before = Assert-DatedCleanupSnapshot -Path $target.Path -KeepNames $target.KeepNames
-    if ($null -ne $target.Spec.PSObject.Properties['sha256'] -and $before.ContentSha256 -ine $target.Spec.sha256) { throw 'Archive differs from verified Git bytes' }
+    $isSourceCopy = $target.Spec.kind -eq 'regenerable-git-source-copy'
+    $before = Assert-DatedCleanupSnapshot -Path $target.Path -KeepNames $target.KeepNames -ContentTree:$isSourceCopy
+    Assert-DatedCleanupSnapshotProof -Spec $target.Spec -Snapshot $before
     if ($Apply) {
         [void](Assert-SyndocalCleanupRepositoryCheckpoint -RepositoryRoot $repo)
-        Assert-DatedCleanupNoWriters -Targets $targets
-        Assert-DatedCleanupTargetKind -Path $target.Path -Spec $target.Spec
-        [void](Assert-DatedCleanupSnapshot -Path $target.Path -Expected $before -KeepNames $target.KeepNames)
+        Assert-DatedCleanupNoWriters -Targets @($target)
+        Assert-DatedCleanupTargetKind -Path $target.Path -Spec $target.Spec -RepositoryRoot $repo
+        $finalSnapshot = Assert-DatedCleanupSnapshot -Path $target.Path -Expected $before -KeepNames $target.KeepNames -ContentTree:$isSourceCopy
+        Assert-DatedCleanupSnapshotProof -Spec $target.Spec -Snapshot $finalSnapshot
         # No reparse points or external hardlinks are accepted. Native
         # final-path and identity probes run again immediately before deletion.
         $probe = Get-DatedCleanupEntryProbe -Path $target.Path

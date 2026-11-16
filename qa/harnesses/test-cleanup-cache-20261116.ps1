@@ -96,6 +96,33 @@ try {
     Expect-Rejection { Assert-DatedCleanupReleaseCachePolicy -RepositoryRoot $testRoot -Path (Join-Path $testRoot 'target/release/deps/child') -KeepNames $keep }
     Assert-DatedCleanupReleaseCachePolicy -RepositoryRoot $testRoot -Path (Join-Path $testRoot 'target/release/build') -KeepNames @()
     $count++
+    $sourceProofTree = Join-Path $testRoot 'source-proof'
+    [void](New-Item -ItemType Directory -Path (Join-Path $sourceProofTree 'nested') -Force)
+    [IO.File]::WriteAllText((Join-Path $sourceProofTree 'b.txt'), "first`n", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $sourceProofTree 'nested/a.txt'), "second`r`n", [Text.UTF8Encoding]::new($false))
+    $proofSpec = [pscustomobject]@{
+        root='repo';relative='target/qa/steroids-60fps-design-20261025/c5/build-111111111111-normal-2611150442/source/qa'
+        kind='regenerable-git-source-copy';commit=('1'*40);gitPrefix='qa';bytes=14;fileCount=2
+        contentTreeSha256='09e6923b4b2b28181cfdda277b1f8820e15192fadc697ed0a742824c0bcaab6e';archive_config='core.autocrlf=true'
+    }
+    Assert-DatedCleanupSourceCopyProof -Spec $proofSpec
+    $proofBefore = Assert-DatedCleanupSnapshot -Path $sourceProofTree -ContentTree
+    Assert-DatedCleanupSnapshotProof -Spec $proofSpec -Snapshot $proofBefore
+    $count++
+    $oldTicks = (Get-Item -LiteralPath (Join-Path $sourceProofTree 'b.txt')).LastWriteTimeUtc
+    [IO.File]::WriteAllText((Join-Path $sourceProofTree 'b.txt'), "other`n", [Text.UTF8Encoding]::new($false))
+    [IO.File]::SetLastWriteTimeUtc((Join-Path $sourceProofTree 'b.txt'), $oldTicks)
+    Expect-Rejection { Assert-DatedCleanupSnapshotProof -Spec $proofSpec -Snapshot (Assert-DatedCleanupSnapshot -Path $sourceProofTree -ContentTree) }
+    [IO.File]::WriteAllText((Join-Path $sourceProofTree 'b.txt'), "first`n", [Text.UTF8Encoding]::new($false))
+    Set-Content -LiteralPath (Join-Path $sourceProofTree 'new.txt') -Value 'untracked'
+    Expect-Rejection { Assert-DatedCleanupSnapshotProof -Spec $proofSpec -Snapshot (Assert-DatedCleanupSnapshot -Path $sourceProofTree -ContentTree) }
+    Remove-Item -LiteralPath (Join-Path $sourceProofTree 'new.txt')
+    Remove-Item -LiteralPath (Join-Path $sourceProofTree 'b.txt')
+    Expect-Rejection { Assert-DatedCleanupSnapshotProof -Spec $proofSpec -Snapshot (Assert-DatedCleanupSnapshot -Path $sourceProofTree -ContentTree) }
+    $proofSpec.commit = '2'*40
+    Expect-Rejection { Assert-DatedCleanupSourceCopyProof -Spec $proofSpec }
+    $proofSpec.commit = '1'*40; $proofSpec.archive_config='unsafe'
+    Expect-Rejection { Assert-DatedCleanupSourceCopyProof -Spec $proofSpec }
     Write-Output "PASS: $count dated cleanup safety checks"
 } finally {
     $verified = [IO.Path]::GetFullPath($testRoot)

@@ -1,0 +1,10 @@
+Compression sweep: 19120 planned = 19120 ledger paths = 19120 existing files.
+All 19120 planned SHA-256 values equal pre-operation and post-operation hashes.
+All 19120 file identities, lengths, creation/write times preserved; no deletions.
+Fresh protected baseline: all 411 SHA-256 values match after completion.
+Focused compression safety tests: 25 PASS.
+Pinned SDK size/SHA-256/PE/header/library check: {"root":"C:\\Users\\janua\\OneDrive\\\u30c9\u30ad\u30e5\u30e1\u30f3\u30c8\\GitHub\\Syndocal\\target\\qa\\ffmpeg-selfbuild-20261027\\sdk\\ffmpeg-n8.1.3-9-g29e619e767-win64-lgpl-shared-8.1"}
+Node: v22.22.1
+Vite: vite/6.4.2 win32-x64 node-v22.22.1
+TypeScript: Version 5.9.3
+Archived gzip ledger round-trip SHA-256 matches original JSONL.

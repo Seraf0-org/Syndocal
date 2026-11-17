@@ -1,0 +1,23 @@
+{
+  "date": "2026-11-18",
+  "apply_checkpoint": "8f0ea852d9c9ac0e3f0320f9de776c3acc7127b7",
+  "manifest_sha256": "9685805E5B6B669BCCC3DB8BA934E7B01047F0183A4AADC974BE9406CD0F8394",
+  "planned_files": 19120,
+  "verified_files": 19120,
+  "status_counts": {
+    "Compressed": 19120
+  },
+  "logical_bytes": 26241679568.0,
+  "allocated_before_bytes": 26282729472.0,
+  "allocated_after_bytes": 13897457664.0,
+  "allocated_bytes_reclaimed": 12385271808.0,
+  "free_before_bytes": 431007281152,
+  "free_after_bytes": 449746837504,
+  "observed_free_space_change_bytes": 18739556352,
+  "protected_hash_matches": 411,
+  "files_deleted": 0,
+  "post_sweep_file_metadata_matches": 19120,
+  "safety_tests_passed": 25,
+  "temporary_sample_deletion": "automatic approval review blocked by policy; retained about 66 MB",
+  "native_product_hardware_checks": "not applicable to cold-storage compression"
+}

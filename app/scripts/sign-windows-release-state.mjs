@@ -12,7 +12,7 @@ const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 // Preserve the vendor signature on the exact approved NDI redistributable.
 // A runtime upgrade must re-verify these identities; no other upstream signing
 // exception is admitted by this policy.
-export const ndiVendorCertificateThumbprint = "D5D721C160B3C125B77CBD404ACB030F5D746930";
+export const ndiVendorCertificateThumbprint = "37ABA04F7FE8CF0625E1B7754665CDCD618BDF8D";
 const isPinnedVendorNdi = (component) => component.ownership === "upstream"
   && component.path === "payload/" + canonicalPinnedNdiRuntime.dll.filename
   && component.sha256 === canonicalPinnedNdiRuntime.dll.sha256;

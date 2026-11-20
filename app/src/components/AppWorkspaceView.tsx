@@ -1143,6 +1143,9 @@ export function AppWorkspaceView(props: { model: AppWorkspaceViewModel; invokeCo
               activeGroupCueIds={snapshot().active_group_cue_ids ?? {}}
               selectedCueId={selectedSceneCueId()}
               activeFade={snapshot().active_fade}
+              bpm={snapshot().clock.bpm}
+              effects={snapshot().effects}
+              directChildTransports={snapshot().direct_child_timeline_transports}
               cueLiveModifiers={snapshot().cue_live_modifiers}
               onSetCueLiveModifier={setCueLiveModifierLive}
               onClearCueLiveModifier={clearCueLiveModifierLive}

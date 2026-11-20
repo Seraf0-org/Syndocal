@@ -32500,9 +32500,23 @@ h3 { font-size: var(--fs-control); font-weight: var(--fw-strong); color: var(--t
 }
 
 .sceneMatrixCard.active {
-  min-height: 61px;
+  border: 2px solid var(--cue-identity);
   border-left-width: 5px;
-  background: var(--theme-key);
+  background: color-mix(in srgb, var(--cue-identity) 24%, var(--theme-panel));
+  box-shadow:
+    0 0 10px color-mix(in srgb, var(--cue-identity) 30%, transparent),
+    inset 0 0 16px color-mix(in srgb, var(--cue-identity) 18%, transparent);
+}
+
+.sceneMatrixCard.active .sceneMatrixEditStrip {
+  grid-row: 1 / span 2;
+}
+
+.sceneMatrixCard.active .sceneMatrixEditStripBand {
+  width: 100%;
+  border-left: 0;
+  background: var(--cue-identity);
+  opacity: 1;
 }
 
 .sceneMatrixTrigger {
@@ -32663,24 +32677,49 @@ h3 { font-size: var(--fs-control); font-weight: var(--fw-strong); color: var(--t
 
 .sceneMatrixProgress {
   display: grid;
-  grid-column: 1 / -1;
+  grid-column: 1;
   grid-row: 2;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  gap: 5px;
-  min-height: 13px;
-  padding: 0 4px 4px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 3px;
+  padding: 0 5px 5px;
 }
 
-.sceneMatrixProgress > span {
+.sceneMatrixProgressHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-height: 12px;
+}
+
+.sceneMatrixProgressTime {
+  color: #f4f7fb;
+  font-size: var(--fs-chrome);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.02em;
+}
+
+.sceneMatrixProgressLoop {
+  color: #f4f7fb;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.sceneMatrixProgressLive {
   border-color: var(--cue-identity);
   color: var(--cue-identity-text);
+  font-size: var(--fs-chrome);
+  font-weight: 700;
+  line-height: 1;
 }
 
 .sceneMatrixProgress progress {
   width: 100%;
-  height: 7px;
-  accent-color: var(--cue-identity);
+  height: 4px;
+  background: rgba(0, 0, 0, 0.55);
+  accent-color: #f4f7fb;
 }
 
 /* T17 momentary flash pads and the per-scene live modifier strip. */
@@ -34996,12 +35035,9 @@ html[data-window-mode="fullscreen"] .desktopResizeZones {
   min-height: 0;
 }
 
-.sceneMatrixCard.selected {
+.sceneMatrixCard.selected:not(.active) {
   outline: none;
   box-shadow: none;
-}
-
-.sceneMatrixCard.selected:not(.active) {
   background: var(--theme-key);
 }
 
@@ -36150,7 +36186,10 @@ input[type="checkbox"] {
   accent-color: var(--theme-muted);
 }
 
-.sceneMatrixProgress progress,
+.sceneMatrixProgress progress {
+  accent-color: #f4f7fb !important;
+}
+
 .cueLiveModifierRow input[type="range"] {
   accent-color: var(--cue-identity, var(--ui-range-accent)) !important;
 }

@@ -1,8 +1,13 @@
-import { For, Show, onCleanup } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show, onCleanup } from "solid-js";
 import type { CueSummary, EngineSnapshot } from "../types";
 import { cueIdentityCss } from "../identityColor";
 import { authoredCueLiveModifier } from "../cueLiveModifier";
 import { bankAuthorityIssueMessage, type FullBankAuthoritySnapshot } from "../bankAuthority";
+import {
+  computeScenePlaybackIndicator,
+  formatScenePlaybackTime,
+  sceneHasDynamicPlayback,
+} from "../scenePlaybackProgress";
 import { touchSceneActive, touchSceneBanks } from "../touchScenePanel";
 import "./TouchCuePanel.css";
 
@@ -36,6 +41,67 @@ export function TouchCuePanel(props: TouchCuePanelProps) {
     for (const cueId of [...heldFlashCues]) releaseFlash(cueId);
   });
   const banks = () => touchSceneBanks(props.bankAuthority);
+  const effectsById = createMemo(
+    () => new Map((props.snapshot.effects ?? []).map((effect) => [effect.id, effect] as const)),
+  );
+  const directChildTransportByCueId = createMemo(
+    () => new Map((props.snapshot.direct_child_timeline_transports ?? []).map((transport) => [transport.cue_id, transport] as const)),
+  );
+  const cueActivatedAt = new Map<number, number>();
+  let directChildSampledAt = typeof performance !== "undefined" ? performance.now() : 0;
+  createEffect(() => {
+    void props.snapshot.direct_child_timeline_transports;
+    directChildSampledAt = typeof performance !== "undefined" ? performance.now() : 0;
+  });
+  const activeDynamicCueIds = createMemo(() => {
+    const now = typeof performance !== "undefined" ? performance.now() : 0;
+    const activeSet = new Set<number>();
+    const dynamicIds: number[] = [];
+    for (const entry of banks()) {
+      for (const cue of entry.cues) {
+        if (!touchSceneActive(cue, props.snapshot)) continue;
+        activeSet.add(cue.id);
+        if (!cueActivatedAt.has(cue.id)) {
+          cueActivatedAt.set(cue.id, now);
+        }
+        if (sceneHasDynamicPlayback(cue)) {
+          dynamicIds.push(cue.id);
+        }
+      }
+    }
+    for (const cueId of [...cueActivatedAt.keys()]) {
+      if (!activeSet.has(cueId)) {
+        cueActivatedAt.delete(cueId);
+      }
+    }
+    return dynamicIds;
+  });
+  const [playbackNowMs, setPlaybackNowMs] = createSignal(
+    typeof performance !== "undefined" ? performance.now() : 0,
+  );
+  createEffect(() => {
+    if (activeDynamicCueIds().length === 0) return;
+    if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") return;
+    setPlaybackNowMs(performance.now());
+    let frameId = 0;
+    const step = () => {
+      setPlaybackNowMs(performance.now());
+      frameId = window.requestAnimationFrame(step);
+    };
+    frameId = window.requestAnimationFrame(step);
+    onCleanup(() => window.cancelAnimationFrame(frameId));
+  });
+  const playbackIndicator = (cue: CueSummary) => computeScenePlaybackIndicator({
+    cue,
+    nowMs: playbackNowMs(),
+    activatedAtMs: cueActivatedAt.get(cue.id) ?? playbackNowMs(),
+    bpm: props.snapshot.clock.bpm,
+    effectsById: effectsById(),
+    activeFade: props.snapshot.active_fade,
+    cueLiveModifiers: props.snapshot.cue_live_modifiers,
+    directChildTransport: directChildTransportByCueId().get(cue.id) ?? null,
+    directChildSampledAtMs: directChildSampledAt,
+  });
 
   return (
     <section class="touchScenePanel" aria-label="Scenes" data-touch-scene-panel>
@@ -100,8 +166,34 @@ export function TouchCuePanel(props: TouchCuePanelProps) {
                             void (active() ? props.onReleaseCue(cue.id) : props.onTriggerCue(cue.id));
                           }}
                         >
-                          <span data-no-localize>{cue.cue_number || cue.id}</span>
-                          <strong data-no-localize>{cue.label}</strong>
+                          <span class="touchSceneButtonRow">
+                            <span data-no-localize>{cue.cue_number || cue.id}</span>
+                            <strong data-no-localize>{cue.label}</strong>
+                          </span>
+                          <Show when={active() && playbackIndicator(cue).showBar}>
+                            {(() => {
+                              const indicator = () => playbackIndicator(cue);
+                              return (
+                                <span class="touchSceneProgress" data-touch-scene-progress={cue.id}>
+                                  <Show when={indicator().elapsedMs !== null}>
+                                    <span class="touchSceneProgressMeta">
+                                      <span class="tabularNums" data-no-localize>
+                                        {formatScenePlaybackTime(indicator().elapsedMs!)}
+                                      </span>
+                                      <Show when={indicator().looping}>
+                                        <span aria-hidden="true" data-no-localize>↻</span>
+                                      </Show>
+                                    </span>
+                                  </Show>
+                                  <progress
+                                    max="1"
+                                    value={indicator().progress}
+                                    aria-label={`Scene ${cue.label} progress`}
+                                  />
+                                </span>
+                              );
+                            })()}
+                          </Show>
                         </button>
                       );
                     }}

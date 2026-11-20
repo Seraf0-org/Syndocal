@@ -4,12 +4,19 @@ import { groupIdentityCss, groupIdentityHue } from "../identityColor";
 import { handleHorizontalWheel } from "../horizontalWheel";
 import { displayNumber } from "../numberDisplay";
 import { sceneCueKind } from "../sceneCueKind";
+import {
+  computeScenePlaybackIndicator,
+  formatScenePlaybackTime,
+  sceneHasDynamicPlayback,
+} from "../scenePlaybackProgress";
 import type {
   ActiveFadeSummary,
   CueLiveDirection,
   CueLiveModifierState,
   CueListSummary,
   CueSummary,
+  DirectChildTimelineTransportSummary,
+  EffectSummary,
   TimelineTrackKind,
 } from "../types";
 import type { TimelineCueDragPoint } from "../timelineCueDrag";
@@ -46,6 +53,9 @@ interface SceneMatrixPanelProps {
   activeGroupCueIds: Record<string, number>;
   selectedCueId?: number | null;
   activeFade?: ActiveFadeSummary | null;
+  bpm?: number;
+  effects?: readonly EffectSummary[];
+  directChildTransports?: readonly DirectChildTimelineTransportSummary[];
   cueLiveModifiers?: CueLiveModifierState[];
   onSetCueLiveModifier?: (
     cueId: number,
@@ -752,9 +762,63 @@ export function SceneMatrixPanel(props: SceneMatrixPanelProps) {
       ? props.activeGroupCueIds[cue.group_id] === cue.id
       : props.activeCueId === cue.id;
   };
-  const progressValue = (cue: CueSummary) => props.activeFade?.cue_id === cue.id
-    ? Math.max(0, Math.min(1, props.activeFade.progress))
-    : 1;
+  const effectsById = createMemo(() => new Map((props.effects ?? []).map((effect) => [effect.id, effect] as const)));
+  const directChildTransportByCueId = createMemo(
+    () => new Map((props.directChildTransports ?? []).map((transport) => [transport.cue_id, transport] as const)),
+  );
+  const cueActivatedAt = new Map<number, number>();
+  let directChildSampledAt = typeof performance !== "undefined" ? performance.now() : 0;
+  createEffect(() => {
+    void props.directChildTransports;
+    directChildSampledAt = typeof performance !== "undefined" ? performance.now() : 0;
+  });
+  const activeDynamicCueIds = createMemo(() => {
+    const now = typeof performance !== "undefined" ? performance.now() : 0;
+    const activeSet = new Set<number>();
+    const dynamicIds: number[] = [];
+    for (const cue of props.bankAuthority.cues) {
+      if (!isActive(cue)) continue;
+      activeSet.add(cue.id);
+      if (!cueActivatedAt.has(cue.id)) {
+        cueActivatedAt.set(cue.id, now);
+      }
+      if (sceneHasDynamicPlayback(cue)) {
+        dynamicIds.push(cue.id);
+      }
+    }
+    for (const cueId of [...cueActivatedAt.keys()]) {
+      if (!activeSet.has(cueId)) {
+        cueActivatedAt.delete(cueId);
+      }
+    }
+    return dynamicIds;
+  });
+  const [playbackNowMs, setPlaybackNowMs] = createSignal(
+    typeof performance !== "undefined" ? performance.now() : 0,
+  );
+  createEffect(() => {
+    if (activeDynamicCueIds().length === 0) return;
+    if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") return;
+    setPlaybackNowMs(performance.now());
+    let frameId = 0;
+    const step = () => {
+      setPlaybackNowMs(performance.now());
+      frameId = window.requestAnimationFrame(step);
+    };
+    frameId = window.requestAnimationFrame(step);
+    onCleanup(() => window.cancelAnimationFrame(frameId));
+  });
+  const playbackIndicator = (cue: CueSummary) => computeScenePlaybackIndicator({
+    cue,
+    nowMs: playbackNowMs(),
+    activatedAtMs: cueActivatedAt.get(cue.id) ?? playbackNowMs(),
+    bpm: props.bpm ?? 120,
+    effectsById: effectsById(),
+    activeFade: props.activeFade,
+    cueLiveModifiers: props.cueLiveModifiers,
+    directChildTransport: directChildTransportByCueId().get(cue.id) ?? null,
+    directChildSampledAtMs: directChildSampledAt,
+  });
 
   return (
     <section
@@ -1354,15 +1418,46 @@ export function SceneMatrixPanel(props: SceneMatrixPanelProps) {
                                   data-no-localize
                                 />
                               </button>
-                              <Show when={isActive(cue)}>
-                                <div class="sceneMatrixProgress" data-scene-matrix-progress={cue.id}>
-                                  <span>LIVE</span>
-                                  <progress
-                                    max="1"
-                                    value={progressValue(cue)}
-                                    aria-label={`Cue ${cue.label} progress`}
-                                  />
-                                </div>
+                              <Show when={isActive(cue) && playbackIndicator(cue).showBar}>
+                                {(() => {
+                                  const indicator = () => playbackIndicator(cue);
+                                  return (
+                                    <div
+                                      class="sceneMatrixProgress"
+                                      classList={{
+                                        dynamic: indicator().elapsedMs !== null,
+                                        looping: indicator().looping,
+                                      }}
+                                      data-scene-matrix-progress={cue.id}
+                                    >
+                                      <div class="sceneMatrixProgressHeader">
+                                        <Show
+                                          when={indicator().elapsedMs !== null}
+                                          fallback={<span class="sceneMatrixProgressLive">LIVE</span>}
+                                        >
+                                          <span class="sceneMatrixProgressTime tabularNums" data-no-localize>
+                                            {formatScenePlaybackTime(indicator().elapsedMs!)}
+                                          </span>
+                                        </Show>
+                                        <Show when={indicator().looping}>
+                                          <span
+                                            class="sceneMatrixProgressLoop"
+                                            title="Looping scene"
+                                            aria-hidden="true"
+                                            data-no-localize
+                                          >
+                                            ↻
+                                          </span>
+                                        </Show>
+                                      </div>
+                                      <progress
+                                        max="1"
+                                        value={indicator().progress}
+                                        aria-label={`Cue ${cue.label} progress`}
+                                      />
+                                    </div>
+                                  );
+                                })()}
                               </Show>
                               <Show
                                 when={

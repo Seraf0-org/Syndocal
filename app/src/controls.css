@@ -199,7 +199,17 @@ progress::-webkit-progress-value {
 }
 
 .sceneMatrixProgress progress {
-  --progress-color: var(--cue-identity, var(--ui-range-fill));
+  --progress-color: #f4f7fb;
+  background-color: rgba(0, 0, 0, 0.55);
+}
+
+.sceneMatrixProgress progress::-webkit-progress-bar {
+  background-color: rgba(0, 0, 0, 0.55);
+}
+
+.sceneMatrixProgress progress::-webkit-progress-value {
+  background-color: #f4f7fb;
+  transition: none;
 }
 
 .liveFadeMeter progress {

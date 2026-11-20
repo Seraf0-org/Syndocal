@@ -47,6 +47,9 @@ export interface TimelineStretchProjectionInput {
   requestedEdgeMs: number;
   authoredBeats: number | null;
   bpm: number;
+  // Fixed-time Lighting blocks already store their period and explicit source rate.
+  fixedPeriodMs?: number;
+  sourceRate?: number | null;
 }
 
 export interface TimelineStretchProjection {
@@ -82,6 +85,26 @@ export const projectTimelineBlockStretch = (
   const canConform = authoredBeats !== null && authoredBeats > 0 && bpm > 0;
   const fallbackToWindow = input.mode === "RATE" && !canConform;
   if (!canConform) {
+    const periodMs = Math.round(input.fixedPeriodMs ?? 0);
+    if (periodMs > 0 && Number.isFinite(periodMs)) {
+      const sourceRate = input.sourceRate && input.sourceRate > 0 && Number.isFinite(input.sourceRate)
+        ? input.sourceRate : 1;
+      const looping = input.mode === "WINDOW";
+      const maxCount = input.edge === "start" ? Math.min(256, Math.floor(originalEndMs / periodMs)) : 256;
+      const loopCount = looping ? clamp(Math.round(durationMs / periodMs), 1, Math.max(1, maxCount)) : 1;
+      const spanMs = looping ? periodMs * loopCount : durationMs;
+      return {
+        start_ms: input.edge === "start" ? Math.max(0, originalEndMs - spanMs) : originalStartMs,
+        end_ms: input.edge === "end" ? originalStartMs + spanMs : originalEndMs,
+        duration_ms: looping ? periodMs : durationMs,
+        duration_beats: null,
+        conform_to_tempo: false,
+        loop_fill: false,
+        loop_count: loopCount,
+        rate: looping ? input.sourceRate ?? null : sourceRate * periodMs / durationMs,
+        fallback_to_window: false,
+      };
+    }
     return {
       start_ms: startMs,
       end_ms: endMs,

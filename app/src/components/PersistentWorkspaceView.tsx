@@ -627,6 +627,7 @@ export function PersistentWorkspaceView(props: { model: PersistentWorkspaceViewM
                 mediaAssets={snapshot().video.media_assets}
                 mediaAssetAvailabilityById={mediaAssetAvailabilityById()}
                 onVerify={inspectMediaAssetIds}
+                onAddAudioClip={() => addTimelineAudioClip(null)}
                 timelineLayers={timelineLayers()}
                 positionMs={activeTimeline().position_ms}
                 snapTimeMs={snapTimeMs}

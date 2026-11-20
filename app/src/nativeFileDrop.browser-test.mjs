@@ -22,6 +22,11 @@ for (const name of (await readdir(path.join(appRoot, "src-tauri"))).filter(name 
     assert.equal(window.dragDropEnabled, false, `${name}: preserve HTML5 in-app dragging`);
   }
 }
+// Platform config merges replace arrays. Verify that only the native drag flag
+// differs in the macOS window definition.
+const baseConfig = JSON.parse(await readFile(path.join(appRoot, "src-tauri/tauri.conf.json"), "utf8"));
+const macConfig = JSON.parse(await readFile(path.join(appRoot, "src-tauri/tauri.macos.conf.json"), "utf8"));
+assert.deepEqual(macConfig.app.windows, baseConfig.app.windows.map(window => ({ ...window, dragDropEnabled: true })));
 const evidence = path.resolve(process.env.NATIVE_DROP_QA_DIR ?? path.join(appRoot, "../target/qa/ui-usability-20261028/native-drop"));
 await mkdir(evidence, { recursive: true });
 const chrome = [process.env.CHROME_PATH, "C:/Program Files/Google/Chrome/Application/chrome.exe", "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe", chromium.executablePath()].find(p => p && existsSync(p));
@@ -56,11 +61,17 @@ render(() => <main style={{padding:"16px",display:"grid",gap:"24px"}}>
   <VideoControlPanel mixer={false} libraryOnly={true} layerCount={0} mediaLibrary={library} clipSlotBank={bank} clipGrid={{layers:[],thumbnailsAuthorized:false,recordingStatus:{state:"Idle",active:false,admission_allowed:false},selectedOutputId:null}} sourceCreate={{sourceKind:"File",label:"",path:""}} />
   <output data-status>{status()}</output>
   <div data-internal onDrop={event=>{ if(event.dataTransfer?.getData("application/syndocal-test")) {event.preventDefault();calls.push({name:"internal",args:[event.dataTransfer.getData("application/syndocal-test")]});}}}>Internal drag fixture</div>
-  <div hidden><div data-project-drop-surface/><div data-timeline-audio-layer-id="8"/><div data-video-clip-slot-layer-id="3" data-video-clip-slot-id="4"/></div>
+  <div data-timeline-source-shelf data-timeline-audio-drop>Sources</div>
+  <div data-audio-header data-timeline-audio-drop>Audio header</div>
+  <svg class="timelineOverview" data-visible-start-ms="2000" data-visible-end-ms="6000" viewBox="0 0 400 24" style={{width:"400px",height:"24px"}}>
+    <rect data-timeline-layer-kind="Audio" data-timeline-layer-id="8" width="400" height="24"/>
+  </svg>
+  <div hidden><div data-project-drop-surface/><div data-video-clip-slot-layer-id="3" data-video-clip-slot-id="4"/></div>
 </main>, document.getElementById("root"));
 installUiLocalization(document.body, () => locale);
-const stop = installNativeFileDrop({document,webview,onDrop:(paths,target)=>routeFileDrop(paths,target,actions),onError:actions.message,captureContext:()=>context,contextIsCurrent:old=>old===context});
-window.__dropFixture = {calls,requests,stop,unsupportedFileDropMessage,advanceContext:()=>context++,route:(paths,selector)=>routeFileDrop(paths,document.querySelector(selector),actions),
+const options = {document,onDrop:(paths,target,x)=>routeFileDrop(paths,target,x,actions),onError:actions.message,captureContext:()=>context,contextIsCurrent:old=>old===context};
+const stop = installNativeFileDrop({...options,webview});
+window.__dropFixture = {calls,requests,stop,startWithoutResolver:()=>installNativeFileDrop(options),unsupportedFileDropMessage,advanceContext:()=>context++,route:(paths,selector)=>routeFileDrop(paths,document.querySelector(selector),0,actions),
  reply:(paths, extra={})=>{const id=requests.at(-1).message.id; for(const listener of listeners) listener({data:{type:"syndocal:file-drop-result",id,paths,...extra}});}};
 `;
 const server = await createServer({root:appRoot,cacheDir:path.join(evidence,"vite-cache"),clearScreen:false,logLevel:"error",server:{host:"127.0.0.1",port:0},plugins:[{
@@ -86,7 +97,8 @@ try {
   const fx=(fn,arg)=>page.evaluate(([code,arg])=>new Function("f","arg",code)(window.__dropFixture,arg),[fn,arg]);
   const drag=async(selector,phase="drop",files=["intro.mp4"])=>page.evaluate(({selector,phase,files})=>{
    const t=document.querySelector(selector),d=new DataTransfer(); files.forEach(name=>d.items.add(new File(["test"],name)));
-   const event=new DragEvent(phase,{bubbles:true,cancelable:true,dataTransfer:d});t.dispatchEvent(event);
+   const bounds=t.getBoundingClientRect();
+   const event=new DragEvent(phase,{bubbles:true,cancelable:true,dataTransfer:d,clientX:bounds.left+bounds.width/4});t.dispatchEvent(event);
    return {prevented:event.defaultPrevented,highlighted:t.hasAttribute("data-file-drag-over"),outline:getComputedStyle(t.querySelector(".videoMediaLibrarySurface")??t).outlineStyle};
   },{selector,phase,files});
   for(const [name,selector] of [["perform",perform],["library",library]]) {
@@ -119,7 +131,18 @@ try {
   const internal=await page.evaluate(()=>{const d=new DataTransfer();d.setData("application/syndocal-test","profile/scene/FX/Timeline payload");const e=new DragEvent("drop",{bubbles:true,cancelable:true,dataTransfer:d});document.querySelector("[data-internal]").dispatchEvent(e);return e.defaultPrevented;});
   assert.equal(internal,true);assert.equal(await fx("return f.requests.length"),beforeInternal,"internal drag never enters native bridge");assert.equal(await fx("return f.calls.at(-1).name"),"internal");
   await fx("f.route(['C:\\\\show.sdc'],'[data-project-drop-surface]')");assert.equal(await fx("return f.calls.at(-1).name"),"openProject");
-  await fx("f.route(['C:\\\\track.wav'],'[data-timeline-audio-layer-id]')");assert.deepEqual(await fx("return f.calls.at(-1)"),{name:"addAudio",args:[8,"C:\\track.wav"]});
+  const audioPath = "C:\\音楽\\track.WAV";
+  for (const selector of ["[data-timeline-source-shelf]", "[data-audio-header]", "svg [data-timeline-layer-id]"]) {
+   const beforeAudioDrop = await fx("return f.calls.length");
+   assert.equal((await drag(selector, "drop", ["track.WAV"])).prevented, true);
+   await fx("f.reply(arg)", [audioPath]);
+   const args = selector.startsWith("svg") ? [8, audioPath, 3000] : [null, audioPath];
+   assert.deepEqual(await fx("return f.calls.at(-1)"), {name:"addAudio",args});
+   assert.equal(await fx("return f.calls.length"), beforeAudioDrop + 1);
+  }
+  await drag("[data-timeline-source-shelf]", "drop", ["track.WAV", "clip.mp4"]);
+  await fx("f.reply(arg)", [audioPath, paths[0]]);
+  assert.deepEqual(await fx("return f.calls.at(-1)"), {name:"message",args:["Drop one audio file at a time."]});
   await fx("f.route(arg,'[data-video-clip-slot-layer-id]')",paths);assert.deepEqual(await fx("return f.calls.at(-1)"),{name:"assignSlots",args:[paths,3,4]});
   await fx("f.route(arg,'[data-internal]')",paths);assert.equal(await fx("return f.calls.at(-1).name"),"message","off-surface visual rejected");
   const detachedCount=await fx("return f.calls.length");
@@ -133,6 +156,9 @@ try {
   }
   const beforeStop=await fx("return f.calls.length");await drag(library);await fx("f.stop();f.reply(arg)",paths);assert.equal(await fx("return f.calls.length"),beforeStop,"disposed listener cannot route");
   assert.equal((await drag("[data-internal]","dragover")).prevented,false,"disposed dragover listener is removed");
+  await fx("f.startWithoutResolver()");
+  assert.equal((await drag("[data-timeline-source-shelf]", "drop", ["track.WAV"])).prevented, true, "unresolved macOS DOM Files cannot navigate");
+  assert.equal(await fx("return f.calls.at(-1).name"), "message");
   assert.deepEqual(errors,[],`${locale}-${width}: console/page health`);
   results.push({locale,width,height,url,identity:true,notBlank:true,noOverlay:true,consoleErrors:errors,hoverContainment:true,dropRouting:true,rejection:true,internalPayload:true,staleContext:true,teardown:true});
   await page.close();

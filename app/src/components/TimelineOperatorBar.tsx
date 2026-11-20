@@ -1,4 +1,4 @@
-import { onCleanup, Show } from "solid-js";
+import { createSignal, onCleanup, Show } from "solid-js";
 import type { TimelineContextDrawer, TimelineDeskSurface } from "../uiModes";
 import type {
   TimelineFollowRuntimeSummary,
@@ -157,6 +157,53 @@ export function TimelineOperatorBar(props: TimelineOperatorBarProps) {
   const abortFollowFromOperator = async (button: HTMLButtonElement) => {
     props.followAbortFocusFence.schedule(await props.onAbortFollow(), () => button.focus(), requestAnimationFrame);
   };
+  const compactQuery = window.matchMedia("(max-width: 1180px)");
+  const [compactToolbar, setCompactToolbar] = createSignal(compactQuery.matches);
+  const updateCompactToolbar = (event: MediaQueryListEvent) => setCompactToolbar(event.matches);
+  compactQuery.addEventListener("change", updateCompactToolbar);
+  onCleanup(() => compactQuery.removeEventListener("change", updateCompactToolbar));
+  const MetronomeControls = () => (
+    <div class="timelineMetronomeControls" role="group" aria-label="Timeline click controls">
+      <button
+        type="button"
+        classList={{ active: props.metronomeEnabled }}
+        aria-pressed={props.metronomeEnabled}
+        data-timeline-metronome
+        onClick={() => void props.onSetMetronome(!props.metronomeEnabled, props.countInBeats || 4)}
+      >
+        クリック
+      </button>
+      <button
+        type="button"
+        classList={{ active: props.countInBeats > 0 }}
+        aria-pressed={props.countInBeats > 0}
+        data-timeline-count-in
+        title="One bar count-in (4 beats)"
+        onClick={() => void props.onSetMetronome(props.metronomeEnabled, props.countInBeats > 0 ? 0 : 4)}
+      >
+        1小節
+      </button>
+      <Show when={props.countInRemainingMs > 0}>
+        <output class="timelineCountInReadout tabularNums" aria-label="Count-in remaining">
+          {`${Math.ceil(props.countInRemainingMs / Math.max(1, 60_000 / props.bpm))}`}
+        </output>
+      </Show>
+      <button type="button" classList={{ active: props.guideEnabled }} aria-pressed={props.guideEnabled} data-timeline-guide title="Announce phases and loop transitions" onClick={() => void props.onSetGuideEnabled(!props.guideEnabled)}>Guide</button>
+      <Show when={props.cueAudioStatus.lifecycle === "fault" || props.cueAudioStatus.lastError}>
+        {(error) => <output class="timelineCueAudioFault" role="status" title={props.cueAudioStatus.lastError ?? props.cueAudioStatus.faultCode}>Cue fault</output>}
+      </Show>
+    </div>
+  );
+  const LoopControls = () => (
+    <div class="timelineLoopControls" role="group" aria-label="Timeline A-B loop controls">
+      <button type="button" data-timeline-loop-boundary title="Set loop A at playhead" onClick={() => setLoopBoundary("a")}>A</button>
+      <button type="button" data-timeline-loop-boundary title="Set loop B at playhead" onClick={() => setLoopBoundary("b")}>B</button>
+      <button type="button" classList={{ active: loopEnabled() }} aria-pressed={loopEnabled()} disabled={props.loopRegion === null} title={loopEnabled() ? "Disable loop (Break)" : "Enable or arm loop"} data-timeline-loop-toggle onClick={() => void props.onSetLoopEnabled(!loopEnabled())}>Loop</button>
+      <button type="button" title="Halve loop length" disabled={props.loopRegion === null} onClick={() => void props.onScaleLoop("half")}>1/2</button>
+      <button type="button" title="Double loop length" disabled={props.loopRegion === null} onClick={() => void props.onScaleLoop("double")}>×2</button>
+      <output class={`timelineLoopState ${props.loopRuntime.status}`} aria-live="polite" data-no-localize>{props.loopRuntime.status === "armed" ? "ARMED" : props.loopRuntime.status === "looping" ? `LOOP ×${props.loopRuntime.wrap_count}` : "OFF"}</output>
+    </div>
+  );
   return (
     <div class="timelineOperatorBar" role="toolbar" aria-label="Timeline tools" data-timeline-operator-bar>
       <div class="timelineTransport" role="group" aria-label="Timeline transport">
@@ -166,9 +213,17 @@ export function TimelineOperatorBar(props: TimelineOperatorBarProps) {
         <button type="button" title="Pause timeline" aria-label="Pause timeline" onClick={() => void props.onPause()} disabled={!props.playing}>
           <span class="timelineToolIcon" aria-hidden="true" data-no-localize>Ⅱ</span>
         </button>
-        <button type="button" class="primary" title="Play timeline" aria-label="Play timeline" onClick={() => void props.onPlay()} disabled={props.durationMs === 0 || props.playing}>
+        <button type="button" class="primary" title={props.durationMs === 0 ? "Add a Scene or Audio Clip before playing the Timeline." : "Play timeline"} aria-label="Play timeline" onClick={() => void props.onPlay()} disabled={props.durationMs === 0 || props.playing}>
           <span class="timelineToolIcon" aria-hidden="true" data-no-localize>▶</span>
         </button>
+      </div>
+      <div class="timelineResizeModes" role="group" aria-label="Scene Block stretch mode" data-timeline-stretch-mode-toggle>
+        <button type="button" title="Stretch by rate" aria-label="Stretch by rate"
+          classList={{ active: props.stretchMode === "RATE" }} aria-pressed={props.stretchMode === "RATE"}
+          data-timeline-stretch-mode="RATE" data-timeline-tool="stretch-rate" onClick={() => props.onStretchMode("RATE")}>Speed</button>
+        <button type="button" title="Repeat the Scene when resizing" aria-label="Repeat the Scene when resizing"
+          classList={{ active: props.stretchMode === "WINDOW" }} aria-pressed={props.stretchMode === "WINDOW"}
+          data-timeline-stretch-mode="WINDOW" data-timeline-tool="stretch-window" onClick={() => props.onStretchMode("WINDOW")}>Repeat</button>
       </div>
       <div class="timelineFollowOperatorRuntime" role="group" aria-label="Timeline Follow runtime" data-timeline-follow-operator-runtime>
         <output class={`timelineFollowState ${props.followRuntime.status}`} aria-live="polite" data-timeline-follow-operator-badge>
@@ -192,50 +247,20 @@ export function TimelineOperatorBar(props: TimelineOperatorBarProps) {
           </button>
         </Show>
       </div>
-      <div class="timelineMetronomeControls" role="group" aria-label="Timeline click controls">
-        <button
-          type="button"
-          classList={{ active: props.metronomeEnabled }}
-          aria-pressed={props.metronomeEnabled}
-          data-timeline-metronome
-          onClick={() => void props.onSetMetronome(!props.metronomeEnabled, props.countInBeats || 4)}
-        >
-          クリック
-        </button>
-        <button
-          type="button"
-          classList={{ active: props.countInBeats > 0 }}
-          aria-pressed={props.countInBeats > 0}
-          data-timeline-count-in
-          title="One bar count-in (4 beats)"
-          onClick={() => void props.onSetMetronome(props.metronomeEnabled, props.countInBeats > 0 ? 0 : 4)}
-        >
-          1小節
-        </button>
-        <Show when={props.countInRemainingMs > 0}>
-          <output class="timelineCountInReadout tabularNums" aria-label="Count-in remaining">
-            {`${Math.ceil(props.countInRemainingMs / Math.max(1, 60_000 / props.bpm))}`}
-          </output>
-        </Show>
-        <button type="button" classList={{ active: props.guideEnabled }} aria-pressed={props.guideEnabled} data-timeline-guide title="Announce phases and loop transitions" onClick={() => void props.onSetGuideEnabled(!props.guideEnabled)}>Guide</button>
-        <Show when={props.cueAudioStatus.lifecycle === "fault" || props.cueAudioStatus.lastError}>
-          {(error) => <output class="timelineCueAudioFault" role="status" title={props.cueAudioStatus.lastError ?? props.cueAudioStatus.faultCode}>Cue fault</output>}
-        </Show>
-      </div>
-      <div class="timelineLoopControls" role="group" aria-label="Timeline A-B loop controls">
-        <button type="button" data-timeline-loop-boundary title="Set loop A at playhead" onClick={() => setLoopBoundary("a")}>A</button>
-        <button type="button" data-timeline-loop-boundary title="Set loop B at playhead" onClick={() => setLoopBoundary("b")}>B</button>
-        <button type="button" classList={{ active: loopEnabled() }} aria-pressed={loopEnabled()} disabled={props.loopRegion === null} title={loopEnabled() ? "Disable loop (Break)" : "Enable or arm loop"} data-timeline-loop-toggle onClick={() => void props.onSetLoopEnabled(!loopEnabled())}>Loop</button>
-        <button type="button" title="Halve loop length" disabled={props.loopRegion === null} onClick={() => void props.onScaleLoop("half")}>1/2</button>
-        <button type="button" title="Double loop length" disabled={props.loopRegion === null} onClick={() => void props.onScaleLoop("double")}>×2</button>
-        <output class={`timelineLoopState ${props.loopRuntime.status}`} aria-live="polite" data-no-localize>{props.loopRuntime.status === "armed" ? "ARMED" : props.loopRuntime.status === "looping" ? `LOOP ×${props.loopRuntime.wrap_count}` : "OFF"}</output>
-      </div>
+      <Show when={!compactToolbar()}>
+        <MetronomeControls />
+        <LoopControls />
+      </Show>
       <details class="timelineToolsDisclosure" name="timeline-header-disclosure"
         onToggle={(event) => constrainToolsToViewport(event.currentTarget)}>
         <summary title="Timeline tools" aria-label="Timeline tools">
           <span class="timelineToolIcon" aria-hidden="true" data-no-localize>▤</span>
         </summary>
         <div class="timelineToolsDisclosurePanel">
+          <Show when={compactToolbar()}>
+            <MetronomeControls />
+            <LoopControls />
+          </Show>
           <Show when={props.childTimelineLabel}>
             {(label) => (
               <nav class="timelineBreadcrumb" aria-label="Timeline breadcrumb" data-timeline-breadcrumb>
@@ -330,14 +355,6 @@ export function TimelineOperatorBar(props: TimelineOperatorBarProps) {
             </output>
           </nav>
           <div class="timelineDirectToolbar" aria-label="Timeline block direct manipulation">
-            <div class="timelineStretchModeToggle" role="group" aria-label="Stretch mode" data-timeline-stretch-mode-toggle>
-              <button type="button" title="Stretch by rate" aria-label="Stretch by rate" classList={{ active: props.stretchMode === "RATE" }} aria-pressed={props.stretchMode === "RATE"} data-timeline-stretch-mode="RATE" data-timeline-tool="stretch-rate" onClick={() => props.onStretchMode("RATE")}>
-                <span class="timelineToolIcon" aria-hidden="true" data-no-localize>↯</span>
-              </button>
-              <button type="button" title="Stretch block window" aria-label="Stretch block window" classList={{ active: props.stretchMode === "WINDOW" }} aria-pressed={props.stretchMode === "WINDOW"} data-timeline-stretch-mode="WINDOW" data-timeline-tool="stretch-window" onClick={() => props.onStretchMode("WINDOW")}>
-                <span class="timelineToolIcon" aria-hidden="true" data-no-localize>↔</span>
-              </button>
-            </div>
         <button type="button" classList={{ active: props.magnetEnabled }} aria-pressed={props.magnetEnabled} aria-label={props.magnetEnabled ? "Disable edge magnet" : "Enable edge magnet"} title={props.magnetEnabled ? "Disable edge magnet" : "Enable edge magnet"} data-timeline-magnet-toggle data-timeline-tool="magnet" onClick={() => props.onMagnetEnabled(!props.magnetEnabled)}>
           <span class="timelineToolIcon" aria-hidden="true" data-no-localize>∩</span>
         </button>

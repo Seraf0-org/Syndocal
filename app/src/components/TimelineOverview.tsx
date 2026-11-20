@@ -189,7 +189,7 @@ interface TimelineOverviewProps {
     targetLayer: TimelineLayerSummary,
     timeMs: number,
   ) => void | Promise<void>;
-  onAddAudioClip: (layerId: number) => void | Promise<void>;
+  onAddAudioClip: (layerId: number | null) => void | Promise<void>;
   onUpdateAudioClip: (clip: TimelineAudioClipSummary) => void | Promise<void>;
   onUpdateVideoClip: (clip: TimelineVideoClipSummary) => void | Promise<void>;
   isTimelineItemLinked: (item: TimelineItemRef) => boolean;
@@ -262,6 +262,7 @@ interface TimelineEventResizeDrag {
   eventId: number;
   pointerId: number;
   edge: "start" | "end";
+  mode: TimelineStretchMode;
   startClientX: number;
   moved: boolean;
   originalStartMs: number;
@@ -1240,7 +1241,7 @@ export function TimelineOverview(props: TimelineOverviewProps) {
     edge: "start" | "end",
   ) => {
     const svg = event.currentTarget.ownerSVGElement;
-    if (!svg || overviewEvent.duration_ms <= 0) return;
+    if (event.button !== 0 || !svg || overviewEvent.duration_ms <= 0) return;
     event.preventDefault();
     event.stopPropagation();
     const layer = layerById().get(overviewEvent.layer_id);
@@ -1254,6 +1255,7 @@ export function TimelineOverview(props: TimelineOverviewProps) {
       eventId: overviewEvent.id,
       pointerId: event.pointerId,
       edge,
+      mode: props.stretchMode,
       startClientX: event.clientX,
       moved: false,
       originalStartMs: overviewEvent.time_ms,
@@ -1338,7 +1340,7 @@ export function TimelineOverview(props: TimelineOverviewProps) {
       drag.eventId,
       drag.edge,
       drag.edge === "start" ? drag.startMs : drag.endMs,
-      props.stretchMode,
+      drag.mode,
       false,
     );
   };
@@ -2437,7 +2439,7 @@ export function TimelineOverview(props: TimelineOverviewProps) {
   const nameCharWidthPx = 6.6;
   const eventPreviewStartMs = (event: TimelineOverviewEvent) => {
     const resize = eventResizeDrag();
-    if (resize?.eventId === event.id) return resize.startMs;
+    if (resize?.eventId === event.id) return eventStretchProjection(event)?.start_ms ?? resize.startMs;
     const move = markerDrag();
     return move?.eventId === event.id ? move.timeMs : event.time_ms;
   };
@@ -2452,26 +2454,29 @@ export function TimelineOverview(props: TimelineOverviewProps) {
   const eventPreviewEndMs = (event: TimelineOverviewEvent) => {
     const resize = eventResizeDrag();
     return resize?.eventId === event.id
-      ? resize.endMs
+      ? eventStretchProjection(event)?.end_ms ?? resize.endMs
       : eventPreviewStartMs(event) + sceneBlockDisplaySpanMs(event);
   };
   const eventPreviewSpanMs = (event: TimelineOverviewEvent) => Math.max(0, eventPreviewEndMs(event) - eventPreviewStartMs(event));
   const eventStretchProjection = (event: TimelineOverviewEvent) => {
     const resize = eventResizeDrag();
-    if (resize?.eventId !== event.id) return null;
+    if (resize?.eventId !== event.id || !resize.moved
+      || props.isTimelineItemLinked({ kind: "lighting_event", event_id: event.id })) return null;
     return projectTimelineBlockStretch({
-      mode: props.stretchMode,
+      mode: resize.mode,
       edge: resize.edge,
       originalStartMs: resize.originalStartMs,
       originalEndMs: resize.originalEndMs,
       requestedEdgeMs: resize.edge === "start" ? resize.startMs : resize.endMs,
       authoredBeats: event.authored_beats,
       bpm: props.bpm,
+      fixedPeriodMs: event.track === "Lighting" ? event.duration_ms : undefined,
+      sourceRate: event.rate,
     });
   };
   const eventPreviewRate = (event: TimelineOverviewEvent) => {
     const projection = eventStretchProjection(event);
-    return projection?.rate ?? event.rate;
+    return projection ? projection.rate : event.rate;
   };
   const eventPreviewFadeMs = (event: TimelineOverviewEvent, edge: "in" | "out") => {
     const drag = eventFadeDrag();
@@ -2486,12 +2491,25 @@ export function TimelineOverview(props: TimelineOverviewProps) {
   );
   const sceneBlockHasReadableBody = (event: TimelineOverviewEvent) => sceneBlockPixelWidth(event) >= 16;
   const sceneBlockShowsDuration = (event: TimelineOverviewEvent) => sceneBlockPixelWidth(event) >= 48;
+  const sceneBlockRepeatBoundaries = (event: TimelineOverviewEvent) => {
+    const projection = eventStretchProjection(event);
+    const duration = projection?.duration_ms ?? event.duration_ms;
+    const conformed = projection?.conform_to_tempo ?? event.conform_to_tempo;
+    const fill = projection?.loop_fill ?? event.loop_fill;
+    const periodMs = !conformed ? duration : fill && event.authored_beats && props.bpm > 0
+      ? Math.round(event.authored_beats * 60_000 / props.bpm) : 0;
+    const spanMs = eventPreviewSpanMs(event);
+    const periodPx = periodMs * overviewW() / timelineVisibleWindowSpanMs(props.visibleWindow);
+    if (periodPx < 4 || spanMs <= periodMs) return [];
+    const count = Math.min(256, Math.ceil(spanMs / periodMs));
+    return Array.from({ length: count - 1 }, (_, index) => (index + 1) * periodPx);
+  };
   type SceneBlockBadgeKind = "loop" | "rate";
   const sceneBlockBadgeEntries = (event: TimelineOverviewEvent) => {
     const entries: { kind: SceneBlockBadgeKind; label: string }[] = [];
-    const loopCount = Math.max(1, Math.round(event.loop_count));
-    if (loopCount > 1) entries.push({ kind: "loop", label: `×${loopCount}` });
     const projection = eventStretchProjection(event);
+    const loopCount = Math.max(1, Math.round(projection?.loop_count ?? event.loop_count));
+    if (loopCount > 1) entries.push({ kind: "loop", label: `×${loopCount}` });
     const rate = eventPreviewRate(event);
     if (
       !projection?.fallback_to_window &&
@@ -2788,6 +2806,7 @@ export function TimelineOverview(props: TimelineOverviewProps) {
   const renderLayeredGutter = () => (
     <div
       class="timelineOverviewGutter timelineOverviewGutterLayered"
+      classList={{ timelineNamedLaneGutter: sectionLayout().sections.some((section) => section.layers.length > 1) }}
       aria-label="Timeline layer gutters"
       style={{ height: `${sectionLayout().contentHeight}px` }}
     >
@@ -2805,6 +2824,7 @@ export function TimelineOverview(props: TimelineOverviewProps) {
             <div
               class="timelineLayerSectionHeader"
               data-timeline-section-separator
+              data-timeline-audio-drop={section.kind === "Audio" ? "" : undefined}
               style={{ height: `${timelineSectionHeaderHeightPx}px` }}
             >
               <button
@@ -2835,22 +2855,21 @@ export function TimelineOverview(props: TimelineOverviewProps) {
                   </Show>
                 </svg>
               </span>
-              <Show when={section.kind === "Audio" && section.layers.length > 0}>
+              <span
+                class="timelineLayerSectionLabel"
+                title={section.layers.length === 1 ? section.layers[0].label : section.kind}
+                data-no-localize={section.layers.length === 1 ? "" : undefined}
+              >
+                {section.layers.length === 1 ? section.layers[0].label : section.kind}
+              </span>
+              <Show when={section.kind === "Audio"}>
                 <button
                   type="button"
                   class="timelineAudioClipAdd"
                   data-timeline-add-audio-clip
-                  data-timeline-audio-layer-id={(section.layers.find((layer) => !layer.locked) ?? section.layers[0]).id}
                   aria-label="Add Audio Clip"
                   title="Add Audio Clip"
-                  onClick={() => {
-                    const target = section.layers.find((layer) => !layer.locked) ?? section.layers[0];
-                    if (target.locked) {
-                      props.onStatus("The Audio section has no unlocked lane for a new clip.");
-                      return;
-                    }
-                    void props.onAddAudioClip(target.id);
-                  }}
+                  onClick={() => void props.onAddAudioClip(null)}
                 >
                   <svg viewBox="0 0 16 16" aria-hidden="true">
                     <path d="M7 2h2v5h5v2H9v5H7V9H2V7h5z" />
@@ -2912,6 +2931,9 @@ export function TimelineOverview(props: TimelineOverviewProps) {
                       >
                         {layerSequenceById().get(layer.id) ?? 0}
                       </button>
+                      <Show when={section.layers.length > 1}>
+                        <span class="timelineLaneInlineName" title={layer.label} data-no-localize>{layer.label}</span>
+                      </Show>
                       <button
                         type="button"
                         class="timelineLaneDetailsToggle"
@@ -2963,7 +2985,6 @@ export function TimelineOverview(props: TimelineOverviewProps) {
                       </button>
                       <Show when={expanded()}>
                         <div class="timelineLaneExpandedDetails" data-timeline-layer-details>
-                          <span class="timelineLaneExpandedName" data-no-localize>{layer.label}</span>
                           <span class="timelineLaneExpandedCount tabularNums" data-no-localize>
                             {props.layerItemCounts.get(layer.id) ?? 0}
                           </span>
@@ -3044,6 +3065,7 @@ export function TimelineOverview(props: TimelineOverviewProps) {
           {(section) => (
             <rect
               class={`timelineLayerSectionBackground ${section.kind.toLowerCase()}`}
+              data-timeline-audio-drop={section.kind === "Audio" ? "" : undefined}
               x="0"
               y={section.top}
               width={overviewW()}
@@ -3877,6 +3899,10 @@ export function TimelineOverview(props: TimelineOverviewProps) {
                   height={blockUpperBandHeightPx()}
                   rx="1"
                 />
+                <For each={sceneBlockRepeatBoundaries(event)}>
+                  {(x) => <line class="timelineSceneBlockRepeatBoundary" data-timeline-repeat-boundary
+                    x1={x} x2={x} y1={-blockHeightPx() / 2} y2={blockHeightPx() / 2} />}
+                </For>
                 <Show when={sceneBlockFadeRampPoints(event, "in")}>
                   {(points) => (
                     <polygon
@@ -3977,11 +4003,8 @@ export function TimelineOverview(props: TimelineOverviewProps) {
                   </text>
                 )}
               </Show>
-              <Show when={event.duration_ms > 0 && (
-                props.selectedEventId === event.id
-                || eventResizeDrag()?.eventId === event.id
-                || eventFadeDrag()?.eventId === event.id
-              )}>
+              <Show when={event.duration_ms > 0 && (sceneBlockPixelWidth(event) >= 16
+                || props.selectedEventId === event.id || eventResizeDrag()?.eventId === event.id)}>
                 <rect
                   class="timelineSceneBlockResizeHandle start"
                   data-timeline-scene-block-resize="start"
@@ -4012,6 +4035,10 @@ export function TimelineOverview(props: TimelineOverviewProps) {
                   onPointerUp={endEventResize}
                   onPointerCancel={cancelEventResize}
                 />
+              </Show>
+              <Show when={event.duration_ms > 0 && (
+                props.selectedEventId === event.id || eventFadeDrag()?.eventId === event.id
+              )}>
                 <rect
                   class="timelineSceneBlockFadeHandle in"
                   data-timeline-scene-block-fade="in"

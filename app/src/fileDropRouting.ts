@@ -1,6 +1,7 @@
 import { isVideoPerformFirstShowDropTarget } from "./videoPerformFirstShow";
 import { videoClipSlotDropTarget } from "./videoClipSlotBankModel";
 import { unsupportedFileDropMessage } from "./nativeFileDrop";
+import { timelineVisibleRatioToTimeMs } from "./timelineViewport";
 
 const visualExtensions = ["mp4", "mov", "mxf", "avi", "mkv", "webm", "gif", "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"];
 const audioExtensions = ["wav", "mp3", "m4a", "aac", "flac", "aiff", "aif", "ogg", "opus"];
@@ -8,12 +9,12 @@ export const isVisualMediaFilePath = (path: string) => visualExtensions.some(ext
 export const isTimelineAudioFilePath = (path: string) => audioExtensions.some(extension => path.trim().toLowerCase().endsWith(`.${extension}`));
 export const isSyndocalProjectPath = (path: string) => path.trim().toLowerCase().endsWith(".sdc");
 
-export function routeFileDrop(paths: string[], target: Element | null, actions: {
+export function routeFileDrop(paths: string[], target: Element | null, clientX: number, actions: {
   firstShow: (paths: string[]) => unknown;
   importMedia: (paths: string[]) => unknown;
   assignSlots: (paths: string[], layerId: number, beforeSlotId: number | null) => unknown;
   openProject: (path: string) => unknown;
-  addAudio: (layerId: number, path: string) => unknown;
+  addAudio: (layerId: number | null, path: string, timeMs?: number) => unknown;
   message: (message: string) => void;
 }): void {
   if (paths.length === 0) return;
@@ -34,10 +35,28 @@ export function routeFileDrop(paths: string[], target: Element | null, actions: 
   }
   const audio = paths.find(isTimelineAudioFilePath);
   if (audio) {
-    const lane = target?.closest<HTMLElement>("[data-timeline-audio-layer-id], [data-timeline-layer-kind='Audio'][data-timeline-layer-id]");
-    const id = Number(lane?.dataset.timelineAudioLayerId ?? lane?.dataset.timelineLayerId);
-    if (!Number.isFinite(id)) actions.message("Drop Audio Clips on the Audio section header or an Audio lane.");
-    else void actions.addAudio(id, audio);
+    if (paths.length !== 1) {
+      actions.message("Drop one audio file at a time.");
+      return;
+    }
+    // SVG lane backgrounds and clips expose attributes, not HTMLElement.dataset.
+    const lane = target?.closest("[data-timeline-layer-kind='Audio'][data-timeline-layer-id]");
+    const id = lane ? Number(lane.getAttribute("data-timeline-layer-id")) : null;
+    if (id !== null && Number.isSafeInteger(id)) {
+      const canvas = lane?.closest("svg.timelineOverview");
+      const bounds = canvas?.getBoundingClientRect();
+      const timeMs = canvas && bounds && bounds.width > 0
+        ? timelineVisibleRatioToTimeMs((clientX - bounds.left) / bounds.width, {
+          start_ms: Number(canvas.getAttribute("data-visible-start-ms")),
+          end_ms: Number(canvas.getAttribute("data-visible-end-ms")),
+        })
+        : undefined;
+      void actions.addAudio(id, audio, timeMs);
+    } else if (target?.closest("[data-timeline-audio-drop]")) {
+      void actions.addAudio(null, audio);
+    } else {
+      actions.message("Drop audio on Sources, the Audio section header, or an Audio lane.");
+    }
     return;
   }
   const visual = paths.filter(isVisualMediaFilePath);

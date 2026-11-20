@@ -546,8 +546,8 @@ assert.match(
 );
 assert.match(
   automationSource,
-  /const setTimelinePlaying = async \(playing: boolean\) => \{[\s\S]*?await options\.setTimelinePlaying\(playing\);/,
-  "Timeline controller must delegate Play/Pause to its injected strict callback",
+  /const setTimelinePlaying = async \(playing: boolean\) => \{[\s\S]*?if \(!await options\.setTimelinePlaying\(playing\)\) return;[\s\S]*?options\.setMessage\(/,
+  "Timeline controller only publishes success after the strict callback accepts Play/Pause",
 );
 assert.doesNotMatch(automationSource, /"set_timeline_playing"/,
   "Timeline controller must not retain a raw root set_timeline_playing fallback");

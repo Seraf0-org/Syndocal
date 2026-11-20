@@ -782,6 +782,7 @@ export const normalizeTimelineEventDraft = (
     conform_to_tempo: event.conform_to_tempo ?? false,
     loop_fill: event.loop_fill ?? false,
     source_offset_ms: event.source_offset_ms ?? 0,
+    ...(event.rate ? { rate: event.rate } : {}),
     fade_in_ms: event.fade_in_ms ?? 0,
     fade_out_ms: event.fade_out_ms ?? 0,
     loop_count: event.loop_count ?? 1,
@@ -826,6 +827,7 @@ export const normalizeTimelineEventDraft = (
     source_offset_ms: durationMs > 0
       ? Math.round(finiteOr(source.source_offset_ms, 0))
       : 0,
+    ...(durationMs > 0 && !conformToTempo && source.rate !== undefined ? { rate: source.rate } : {}),
     fade_in_ms: durationMs > 0 ? Math.round(clamp(finiteOr(source.fade_in_ms, 0), 0, durationMs)) : 0,
     fade_out_ms: durationMs > 0 ? Math.round(clamp(finiteOr(source.fade_out_ms, 0), 0, durationMs)) : 0,
     loop_count: loopCount,
@@ -956,6 +958,7 @@ export const createTimelineSceneBlockController = (options: TimelineSceneBlockCo
         conformToTempo: next.conform_to_tempo,
         loopFill: next.loop_fill,
         sourceOffsetMs: next.source_offset_ms,
+        ...(next.rate === undefined ? {} : { rate: next.rate }),
         fadeInMs: next.fade_in_ms,
         fadeOutMs: next.fade_out_ms,
         loopCount: next.loop_count,
@@ -1149,6 +1152,8 @@ export const createTimelineSceneBlockController = (options: TimelineSceneBlockCo
         requestedEdgeMs: edgeMs,
         authoredBeats: options.getCueAuthoredBeats(currentDraft.cue_id),
         bpm: options.getBpm(),
+        fixedPeriodMs: currentDraft.track === "Lighting" ? currentDraft.duration_ms : undefined,
+        sourceRate: currentDraft.rate ?? event.rate,
       });
       try {
         const next = await commitTimingOnly(event, normalizeTimelineEventDraft(
@@ -1161,6 +1166,7 @@ export const createTimelineSceneBlockController = (options: TimelineSceneBlockCo
           conform_to_tempo: projection.conform_to_tempo,
           loop_fill: projection.loop_fill,
           loop_count: projection.loop_count,
+          rate: projection.rate ?? undefined,
           },
           snapEnabled ? options.snapTimeMs : (value) => Math.max(0, Math.round(value)),
           options.hasEventId,

@@ -10,8 +10,8 @@ export const unsupportedFileDropMessage = "Drop a .sdc project, visual media, or
 
 export function installNativeFileDrop<Context>(options: {
   document: Document;
-  webview: FileDropWebView;
-  onDrop: (paths: string[], target: Element) => void;
+  webview?: FileDropWebView;
+  onDrop: (paths: string[], target: Element, clientX: number) => void;
   onError: (message: string) => void;
   captureContext: () => Context;
   contextIsCurrent: (context: Context) => boolean;
@@ -19,7 +19,7 @@ export function installNativeFileDrop<Context>(options: {
   const { document, webview } = options;
   let nextId = 0;
   // One outstanding gesture. A newer drop invalidates an older reply.
-  let pending: { id: number; target: Element; context: Context; timer: ReturnType<typeof setTimeout> } | null = null;
+  let pending: { id: number; target: Element; clientX: number; context: Context; timer: ReturnType<typeof setTimeout> } | null = null;
   const clear = () => {
     if (pending) clearTimeout(pending.timer);
     pending = null;
@@ -33,10 +33,9 @@ export function installNativeFileDrop<Context>(options: {
     event.dataTransfer.dropEffect = "copy";
   };
   const drop = (event: DragEvent) => {
-    const files = Array.from(event.dataTransfer?.files ?? []);
     // Internal profile, scene, FX and Timeline drags have no Files. Let their
     // original handlers receive the event and their custom DataTransfer intact.
-    if (files.length === 0 || !(event.target instanceof Element)) return;
+    if (!event.dataTransfer?.types.includes("Files")) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     // Notify the existing hover owners too (Perform keeps a Solid signal).
@@ -44,9 +43,14 @@ export function installNativeFileDrop<Context>(options: {
       element.dispatchEvent(new DragEvent("dragleave", { bubbles: true }));
     });
     clear();
+    const files = Array.from(event.dataTransfer.files);
+    if (!webview || files.length === 0 || !(event.target instanceof Element)) {
+      options.onError("This drop did not provide a local file. Use the file picker to import it.");
+      return;
+    }
     const id = ++nextId;
     const context = options.captureContext();
-    pending = { id, target: event.target, context, timer: setTimeout(() => {
+    pending = { id, target: event.target, clientX: event.clientX, context, timer: setTimeout(() => {
       clear();
       if (options.contextIsCurrent(context)) options.onError(unsupportedFileDropMessage);
     }, 10_000) };
@@ -60,7 +64,7 @@ export function installNativeFileDrop<Context>(options: {
   const message = (event: MessageEvent) => {
     const reply = event.data;
     if (reply?.type !== "syndocal:file-drop-result" || !pending || reply.id !== pending.id) return;
-    const { target, context } = pending;
+    const { target, clientX, context } = pending;
     clear();
     if (!target.isConnected || !options.contextIsCurrent(context)) return;
     if (reply.error || !Array.isArray(reply.paths) || reply.paths.length === 0
@@ -68,15 +72,15 @@ export function installNativeFileDrop<Context>(options: {
       options.onError(unsupportedFileDropMessage);
       return;
     }
-    options.onDrop(reply.paths, target);
+    options.onDrop(reply.paths, target, clientX);
   };
   document.addEventListener("drop", drop, true);
   document.addEventListener("dragover", dragOver, true);
-  webview.addEventListener("message", message);
+  webview?.addEventListener("message", message);
   return () => {
     clear();
     document.removeEventListener("drop", drop, true);
     document.removeEventListener("dragover", dragOver, true);
-    webview.removeEventListener("message", message);
+    webview?.removeEventListener("message", message);
   };
 }

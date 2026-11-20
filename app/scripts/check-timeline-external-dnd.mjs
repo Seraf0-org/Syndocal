@@ -39,8 +39,9 @@ const overviewPreflight = await import(`data:text/javascript;base64,${Buffer.fro
   transpile(overviewPreflightMatch[0], "TimelineOverview.preflight.ts").outputText,
 ).toString("base64")}`);
 const appSource = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+const workspaceSource = await readFile(new URL("../src/components/PersistentWorkspaceView.tsx", import.meta.url), "utf8");
 assert.match(
-  appSource,
+  workspaceSource,
   /onTimelineStatus=\{\(source\) => setMessage\(translateUiText\(source, uiLocale\(\)\)\)\}/,
   "TimelineOverview's production status callback must localize at the App edge",
 );
@@ -702,7 +703,7 @@ assert.match(
   "the exact Timeline drop lane is the media primary target",
 );
 assert.match(
-  appSource,
+  workspaceSource,
   /<TimelineSourceShelf[\s\S]*?onPlace=\{placeTimelineExternalSource\}/,
   "the mounted Timeline Sources shelf must use the App production placement orchestrator",
 );

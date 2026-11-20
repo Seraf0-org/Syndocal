@@ -1,4 +1,20 @@
 {
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Syndocal",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 640,
+        "maximized": false,
+        "resizable": true,
+        "decorations": false,
+        "dragDropEnabled": true
+      }
+    ]
+  },
   "bundle": {
     "resources": {
       "../../licenses/Syphon-BSD.txt": "licenses/Syphon-BSD.txt"

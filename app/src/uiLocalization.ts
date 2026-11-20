@@ -1370,6 +1370,12 @@ const japaneseText: Record<string, string> = {
   "Timeline click disabled.": "タイムラインのクリックを無効にしました。",
   "Timeline position": "タイムライン位置",
   "Stretch by rate": "レートでストレッチ",
+  "Scene Block stretch mode": "シーンブロックの伸縮方式",
+  "Repeat the Scene when resizing": "速度を保ってシーンを繰り返す",
+  "Speed": "速度",
+  "Choose a Lighting lane or drag the Scene onto it.": "照明レーンを選ぶか、シーンを照明レーンにドラッグしてください。",
+  "Add a Scene or Audio Clip before playing the Timeline.": "シーンか音声クリップを追加すると、タイムラインを再生できます。",
+  "The Timeline is at the end. Return to the start to play again.": "タイムラインの末尾です。先頭に戻るボタンを押してから再生してください。",
   "Stretch block window": "ブロック範囲をストレッチ",
   "Timeline layer menu": "タイムラインレイヤーメニュー",
   "Layer name": "レイヤー名",
@@ -4221,8 +4227,17 @@ const japaneseText: Record<string, string> = {
   "Audio Clips can only move within Audio lanes. No changes were made.":
     "音声クリップは音声レーン内でのみ移動できます。変更は行われませんでした。",
   "Audio Clips can only be placed on Audio lanes.": "音声クリップは音声レーンにのみ配置できます。",
-  "Drop Audio Clips on the Audio section header or an Audio lane.":
-    "音声クリップを音声セクションのヘッダーまたは音声レーンへドロップしてください。",
+  "Add or drop audio here to place it at the playhead.":
+    "ここで音声を選ぶかドロップすると、再生ヘッドの位置に配置されます。",
+  "Drop audio on Sources, the Audio section header, or an Audio lane.":
+    "音声ファイルをソース、音声セクションのヘッダー、または音声レーンへドロップしてください。",
+  "Drop one audio file at a time.": "音声ファイルは1つずつドロップしてください。",
+  "This drop did not provide a local file. Use the file picker to import it.":
+    "ローカルファイルを取得できませんでした。ファイル選択から読み込んでください。",
+  "An audio import is already in progress.": "音声ファイルを読み込み中です。",
+  "The project changed during audio import. Choose the audio file again.":
+    "読み込み中にプロジェクトが変更されました。音声ファイルを選び直してください。",
+  "Choose an unlocked Audio lane before importing.": "ロックされていない音声レーンを選んでください。",
   "Add Audio Clip canceled.": "音声クリップの追加をキャンセルしました。",
   "The Audio section has no unlocked lane for a new clip.":
     "音声セクションに新しいクリップを追加できるロック解除済みレーンがありません。",

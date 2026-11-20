@@ -42,6 +42,7 @@ export interface TimelineSourceShelfProps {
   mediaAssetAvailabilityById: Record<number, MediaAssetAvailability>;
   /** The App-owned machine-local inspection authority; never a Shelf-local probe. */
   onVerify: (assetIds: MediaAssetId[]) => void | Promise<void>;
+  onAddAudioClip: () => void | Promise<void>;
   timelineLayers: TimelineLayerSummary[];
   positionMs: number;
   snapTimeMs: (timeMs: number) => number;
@@ -249,7 +250,7 @@ export function TimelineSourceShelf(props: TimelineSourceShelfProps) {
           : resolution.mode === "ambiguous"
           ? payload.kind === "media_asset"
             ? `Select an unlocked ${payload.lane_kind} Timeline lane before placing media.`
-            : `An unlocked ${payload.lane_kind} Timeline lane is required.`
+            : "Choose a Lighting lane or drag the Scene onto it."
           : `An unlocked ${payload.lane_kind} Timeline lane is required.`,
       ));
       return;
@@ -326,7 +327,8 @@ export function TimelineSourceShelf(props: TimelineSourceShelfProps) {
   );
 
   return (
-    <section class="timelineExternalSourceShelf" aria-label="Timeline source shelf" data-timeline-source-shelf>
+    <section class="timelineExternalSourceShelf" aria-label="Timeline source shelf" data-timeline-source-shelf
+      data-timeline-audio-drop={sourceContextMode() === "sources" ? "" : undefined}>
       <header class="timelineExternalSourceShelfHeader">
         <div>
           <h3>{localizedSourceText(sourceContextMode() === "sources" ? "Sources" : sourceContextMode() === "inspector" ? "Inspector" : "Video Preview")}</h3>
@@ -358,6 +360,8 @@ export function TimelineSourceShelf(props: TimelineSourceShelfProps) {
       <Show when={sourceContextMode() === "sources"}>
         <div id="timeline-source-context-panel-sources" role="tabpanel" aria-labelledby="timeline-source-context-tab-sources" class="timelineExternalSourceShelfBody">
           <div class="timelineExternalSourceShelfFilters" role="group" aria-label={localizedSourceText("Timeline source filters and verification")}>
+            <button type="button" title={localizedSourceText("Add or drop audio here to place it at the playhead.")}
+              onClick={() => void props.onAddAudioClip()}>{localizedSourceText("Add Audio Clip")}</button>
             <For each={["All", "Lighting", "Video", "Audio"] as const}>
               {(filter) => (
                 <button

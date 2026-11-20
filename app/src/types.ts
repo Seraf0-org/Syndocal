@@ -3761,6 +3761,7 @@ export interface TimelineEventPlacementUpdate {
   duration_beats: number | null;
   conform_to_tempo: boolean;
   loop_fill: boolean;
+  rate?: number;
   fade_in_ms: number;
   fade_out_ms: number;
   loop_count: number;

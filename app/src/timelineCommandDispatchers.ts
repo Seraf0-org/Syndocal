@@ -17,6 +17,13 @@ import type {
   VideoParam,
 } from "./types";
 
+export interface TimelineProjectMutationFence {
+  __expectedProjectEpoch: number;
+  __expectedProjectRevision: number;
+  __expectedCheckpointHash: string;
+  __shouldAbortProjectMutation: () => boolean;
+}
+
 export type TimelineCommandDispatcherOptions = {
   viewportFixture: () => string | null;
   timelineAuthorityReady: (operation: string) => boolean;
@@ -27,6 +34,7 @@ export type TimelineCommandDispatcherOptions = {
   persistChildTimeline: (
     cueId: number,
     update: (child: ChildTimelineSummary) => ChildTimelineSummary,
+    fence?: TimelineProjectMutationFence,
   ) => Promise<void>;
   childTimelineNextAutomationId: () => number;
   childTimelineDurationForKeyframes: (keyframes: Array<{ time_ms: number }>) => number;
@@ -232,15 +240,19 @@ export const invokeTimelineSceneBlockCommand = async <T,>(
         duration_beats: command === "set_timeline_scene_block" && args?.durationBeats !== null && args?.durationBeats !== undefined ? Number(args.durationBeats) : null,
         conform_to_tempo: conformToTempo, loop_fill: loopFill,
         source_offset_ms: command === "set_timeline_scene_block" ? Math.round(Number(args?.sourceOffsetMs ?? source.source_offset_ms ?? 0)) : 0,
-        rate: conformToTempo && !loopFill && authoredBeats !== null && durationMs > 0
-          ? (authoredBeats * 60_000 / options.snapshot().clock.bpm) / durationMs : null,
+        rate: !conformToTempo && durationMs > 0
+          ? args?.rate === undefined ? source.rate ?? null : Number(args.rate)
+          : conformToTempo && !loopFill && authoredBeats !== null && durationMs > 0
+            ? (authoredBeats * 60_000 / options.snapshot().clock.bpm) / durationMs : null,
         fade_in_ms: command === "set_timeline_scene_block" ? Math.min(Number(args?.fadeInMs ?? source.fade_in_ms ?? 0), durationMs) : 0,
         fade_out_ms: command === "set_timeline_scene_block" ? Math.min(Number(args?.fadeOutMs ?? source.fade_out_ms ?? 0), durationMs) : 0,
         loop_count: command === "set_timeline_scene_block" ? Number(args?.loopCount ?? source.loop_count) : 1,
         jump_to_event_id: command === "set_timeline_scene_block" && args?.jumpToEventId !== null && args?.jumpToEventId !== undefined ? Number(args.jumpToEventId) : null,
       };
       await options.persistChildTimeline(childCueId, (child) => ({ ...child,
-        events: (child.events ?? []).map((event) => event.id === eventId ? nextEvent : event) }));
+        events: (child.events ?? []).map((event) => event.id === eventId ? nextEvent : event),
+        duration_ms: Math.max(child.duration_ms ?? 0, timelinePlacementDisplayEndMs(nextEvent)),
+      }));
       return undefined as T;
     }
     if (command === "remove_timeline_scene_block" || command === "remove_timeline_event") {
@@ -294,7 +306,10 @@ export const invokeTimelineSceneBlockCommand = async <T,>(
           duration_beats: command === "set_timeline_scene_block" && args?.durationBeats !== null && args?.durationBeats !== undefined ? Number(args.durationBeats) : null,
           conform_to_tempo: conformToTempo, loop_fill: loopFill,
           source_offset_ms: command === "set_timeline_scene_block" ? Math.round(Number(args?.sourceOffsetMs ?? event.source_offset_ms ?? 0)) : 0,
-          rate: conformToTempo && !loopFill && authoredBeats !== null && durationMs > 0 ? (authoredBeats * 60_000 / current.clock.bpm) / durationMs : null,
+          rate: !conformToTempo && durationMs > 0
+            ? args?.rate === undefined ? event.rate ?? null : Number(args.rate)
+            : conformToTempo && !loopFill && authoredBeats !== null && durationMs > 0
+              ? (authoredBeats * 60_000 / current.clock.bpm) / durationMs : null,
           fade_in_ms: command === "set_timeline_scene_block" ? Math.min(Number(args?.fadeInMs ?? event.fade_in_ms ?? 0), durationMs) : 0,
           fade_out_ms: command === "set_timeline_scene_block" ? Math.min(Number(args?.fadeOutMs ?? event.fade_out_ms ?? 0), durationMs) : 0,
           loop_count: command === "set_timeline_scene_block" ? Number(args?.loopCount ?? event.loop_count) : 1,
@@ -315,6 +330,7 @@ export const invokeTimelineLayerCommand = async <T,>(
   options: TimelineCommandDispatcherOptions,
   command: FrontendTauriInvokeCommand,
   args?: Record<string, unknown>,
+  fence?: TimelineProjectMutationFence,
 ): Promise<T> => {
   const localFixture = options.viewportFixture() === "timeline-layered";
   if (!localFixture && !options.timelineAuthorityReady(command)) {
@@ -329,7 +345,7 @@ export const invokeTimelineLayerCommand = async <T,>(
         const baseLayers = effectiveTimelineLayers(child.layers);
         return { ...child, layers: [...baseLayers, { id: layerId, label: String(args?.label ?? `${kind} Layer`),
           order: baseLayers.length, muted: false, locked: false, solo: false, expanded: false, kind }] };
-      });
+      }, fence);
       return layerId as T;
     }
     if (command === "update_timeline_layer") {
@@ -373,7 +389,7 @@ export const invokeTimelineLayerCommand = async <T,>(
       return undefined as T;
     }
   }
-  if (!localFixture) return options.invoke<T>(command, args);
+  if (!localFixture) return options.invoke<T>(command, fence ? { ...args, ...fence } : args);
   if (command === "add_timeline_layer") {
     const layerId = Math.max(1, ...options.timelineLayers().map((layer) => layer.id)) + 1;
     const kind = String(args?.kind ?? "Lighting") as TimelineLayerSummary["kind"];

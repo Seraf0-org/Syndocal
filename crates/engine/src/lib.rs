@@ -4889,6 +4889,7 @@ define_engine_command! {
         conform_to_tempo: bool,
         loop_fill: bool,
         source_offset_ms: i64,
+        rate: Option<f32>,
         fade_in_ms: u64,
         fade_out_ms: u64,
         loop_count: u16,
@@ -10445,6 +10446,7 @@ impl EngineHandle {
         conform_to_tempo: bool,
         loop_fill: bool,
         source_offset_ms: i64,
+        rate: Option<f32>,
         fade_in_ms: u64,
         fade_out_ms: u64,
         loop_count: u16,
@@ -10463,6 +10465,7 @@ impl EngineHandle {
             conform_to_tempo,
             loop_fill,
             source_offset_ms,
+            rate,
             fade_in_ms,
             fade_out_ms,
             loop_count,
@@ -20112,6 +20115,29 @@ fn resolve_timeline_event_timing_values(
     Ok(values)
 }
 
+fn resolve_timeline_placement_rate(
+    event_id: TimelineEventId,
+    current_rate: Option<f32>,
+    requested_rate: Option<f32>,
+    duration_ms: u64,
+    conform_to_tempo: bool,
+) -> Result<Option<f32>, String> {
+    let Some(rate) = requested_rate else {
+        return Ok(current_rate);
+    };
+    if !rate.is_finite() || rate <= 0.0 {
+        return Err(format!(
+            "Scene Block {event_id} source rate must be finite and greater than zero"
+        ));
+    }
+    if duration_ms == 0 || conform_to_tempo {
+        return Err(format!(
+            "Scene Block {event_id} source rate can only be edited on a fixed-time block"
+        ));
+    }
+    Ok(Some(rate))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum TimelineCueOccurrenceKind {
     End,
@@ -28321,6 +28347,7 @@ impl EngineRuntime {
                 conform_to_tempo,
                 loop_fill,
                 source_offset_ms,
+                rate,
                 fade_in_ms,
                 fade_out_ms,
                 loop_count,
@@ -28341,28 +28368,31 @@ impl EngineRuntime {
                 let result = if Instant::now() > expires_at {
                     Err("Scene Block update expired before engine execution".to_string())
                 } else {
-                    self.set_timeline_scene_block_state(RuntimeTimelineEvent {
-                        id: event_id,
-                        cue_id,
-                        time_ms,
-                        time_beats,
-                        track,
-                        layer_id,
-                        resolved_layer_id: 0,
-                        layer_order: 0,
-                        layer_muted_effective: false,
-                        duration_ms,
-                        duration_beats,
-                        conform_to_tempo,
-                        loop_fill,
-                        source_offset_ms,
-                        iteration_period_ms: duration_ms,
-                        rate: None,
-                        fade_in_ms: fade_in_ms.min(duration_ms),
-                        fade_out_ms: fade_out_ms.min(duration_ms),
-                        loop_count,
-                        jump_to_event_id,
-                    })
+                    self.set_timeline_scene_block_state(
+                        RuntimeTimelineEvent {
+                            id: event_id,
+                            cue_id,
+                            time_ms,
+                            time_beats,
+                            track,
+                            layer_id,
+                            resolved_layer_id: 0,
+                            layer_order: 0,
+                            layer_muted_effective: false,
+                            duration_ms,
+                            duration_beats,
+                            conform_to_tempo,
+                            loop_fill,
+                            source_offset_ms,
+                            iteration_period_ms: duration_ms,
+                            rate: None,
+                            fade_in_ms: fade_in_ms.min(duration_ms),
+                            fade_out_ms: fade_out_ms.min(duration_ms),
+                            loop_count,
+                            jump_to_event_id,
+                        },
+                        rate,
+                    )
                 };
                 self.last_error = if result.is_ok() {
                     None
@@ -40133,7 +40163,13 @@ impl EngineRuntime {
                 loop_fill: update.loop_fill,
                 source_offset_ms: self.timeline_events[index].source_offset_ms,
                 iteration_period_ms: update.duration_ms,
-                rate: None,
+                rate: resolve_timeline_placement_rate(
+                    update.event_id,
+                    self.timeline_events[index].rate,
+                    update.rate,
+                    update.duration_ms,
+                    update.conform_to_tempo,
+                )?,
                 fade_in_ms: update.fade_in_ms.min(update.duration_ms),
                 fade_out_ms: update.fade_out_ms.min(update.duration_ms),
                 loop_count: update.loop_count,
@@ -40257,6 +40293,7 @@ impl EngineRuntime {
     fn set_timeline_scene_block_state(
         &mut self,
         mut event: RuntimeTimelineEvent,
+        requested_rate: Option<f32>,
     ) -> Result<(), String> {
         let Some(index) = self
             .timeline_events
@@ -40272,6 +40309,13 @@ impl EngineRuntime {
             ));
         }
         event.layer_id = event.layer_id.or(self.timeline_events[index].layer_id);
+        event.rate = resolve_timeline_placement_rate(
+            event.id,
+            self.timeline_events[index].rate,
+            requested_rate,
+            event.duration_ms,
+            event.conform_to_tempo,
+        )?;
         event = self.resolve_timeline_event_timing(event, self.clock.project_bpm)?;
         self.validate_timeline_scene_block(&event)?;
         self.validate_timeline_event_target_layer(&event)?;
@@ -54356,7 +54400,13 @@ pub fn canonical_timeline_event_after_placement_update(
             duration_beats: update.duration_beats,
             conform_to_tempo: update.conform_to_tempo,
             loop_fill: update.loop_fill,
-            rate: current.rate,
+            rate: resolve_timeline_placement_rate(
+                current.id,
+                current.rate,
+                update.rate,
+                update.duration_ms,
+                update.conform_to_tempo,
+            )?,
             fade_in_ms: update.fade_in_ms,
             fade_out_ms: update.fade_out_ms,
             loop_count: update.loop_count,
@@ -78690,6 +78740,7 @@ mod tests {
             conform_to_tempo: false,
             loop_fill: false,
             source_offset_ms: 0,
+            rate: None,
             fade_in_ms: 0,
             fade_out_ms: 0,
             loop_count: 1,
@@ -127729,6 +127780,7 @@ mod tests {
             duration_beats: None,
             conform_to_tempo: true,
             loop_fill: true,
+            rate: None,
             fade_in_ms: current.fade_in_ms,
             fade_out_ms: current.fade_out_ms,
             loop_count: current.loop_count,
@@ -128197,6 +128249,89 @@ mod tests {
     }
 
     #[test]
+    fn fixed_time_scene_block_edits_preserve_and_update_source_rate() {
+        let mut runtime = runtime_with_lfo_effects(&[]);
+        create_effect_only_cue(&mut runtime, 1, Vec::new());
+        runtime
+            .add_timeline_scene_block_state(test_scene_block(10, 1, 0, 2_000, 1, 1.5))
+            .unwrap();
+
+        for requested_rate in [None, Some(0.75)] {
+            let before = runtime.build_persistence_snapshot();
+            let current = &before.timeline.events[0];
+            let update = TimelineEventPlacementUpdate {
+                event_id: current.id,
+                cue_id: current.cue_id,
+                time_ms: current.time_ms,
+                time_beats: None,
+                track: current.track.clone(),
+                layer_id: current.layer_id,
+                duration_ms: current.duration_ms + 1_000,
+                duration_beats: None,
+                conform_to_tempo: false,
+                loop_fill: false,
+                rate: requested_rate,
+                fade_in_ms: 0,
+                fade_out_ms: 0,
+                loop_count: 1,
+                jump_to_event_id: None,
+            };
+            let candidate =
+                canonical_timeline_event_after_placement_update(&before, current, &update)
+                    .unwrap();
+            assert_eq!(candidate.rate, requested_rate.or(current.rate));
+            runtime
+                .snap_timeline_items_state(TimelineSnapRequest {
+                    event_placements: vec![update.clone()],
+                    ..TimelineSnapRequest::default()
+                })
+                .unwrap();
+            assert_eq!(
+                runtime.build_persistence_snapshot().timeline.events[0],
+                candidate
+            );
+
+            for (rate, duration_ms, conform_to_tempo) in [
+                (f32::NAN, 1_000, false),
+                (0.0, 1_000, false),
+                (1.0, 0, false),
+                (1.0, 1_000, true),
+            ] {
+                let invalid = TimelineEventPlacementUpdate {
+                    rate: Some(rate),
+                    duration_ms,
+                    conform_to_tempo,
+                    ..update.clone()
+                };
+                let error =
+                    canonical_timeline_event_after_placement_update(&before, current, &invalid)
+                        .unwrap_err();
+                assert!(error.contains("source rate"));
+                assert_eq!(
+                    runtime.snap_timeline_items_state(TimelineSnapRequest {
+                        event_placements: vec![invalid],
+                        ..TimelineSnapRequest::default()
+                    }),
+                    Err(error)
+                );
+                assert_eq!(
+                    runtime.build_persistence_snapshot().timeline.events[0],
+                    candidate
+                );
+            }
+        }
+
+        for (requested_rate, expected_rate) in [(None, 0.75), (Some(1.25), 1.25)] {
+            let mut event = runtime.timeline_events[0].clone();
+            event.duration_ms += 1_000;
+            runtime
+                .set_timeline_scene_block_state(event, requested_rate)
+                .unwrap();
+            assert_eq!(runtime.timeline_events[0].rate, Some(expected_rate));
+        }
+    }
+
+    #[test]
     fn no_effect_conform_rate_is_stable_across_cue_change_and_project_load() {
         let mut source = runtime_with_lfo_effects(&[(1, false)]);
         create_effect_only_cue(
@@ -128217,7 +128352,7 @@ mod tests {
 
         let mut changed = source.timeline_events[0].clone();
         changed.cue_id = 2;
-        source.set_timeline_scene_block_state(changed).unwrap();
+        source.set_timeline_scene_block_state(changed, None).unwrap();
         assert_eq!(source.timeline_events[0].rate, Some(1.0));
 
         let snapshot = source.build_snapshot(0);
@@ -129993,7 +130128,7 @@ mod tests {
 
         let mut moved = runtime.timeline_events[0].clone();
         moved.time_ms = 200;
-        runtime.set_timeline_scene_block_state(moved).unwrap();
+        runtime.set_timeline_scene_block_state(moved, None).unwrap();
         runtime.rebuild_effect_activations(started_at + Duration::from_millis(50));
 
         assert!(runtime.active_effect_activation_indices.is_empty());
@@ -130533,6 +130668,7 @@ mod tests {
             conform_to_tempo: false,
             loop_fill: false,
             source_offset_ms: 0,
+            rate: None,
             fade_in_ms: 0,
             fade_out_ms: 0,
             event_id: 10,
@@ -131015,6 +131151,7 @@ mod tests {
                     duration_beats: None,
                     conform_to_tempo: false,
                     loop_fill: false,
+                    rate: None,
                     fade_in_ms: 0,
                     fade_out_ms: 0,
                     event_id: 10,
@@ -131031,6 +131168,7 @@ mod tests {
                     duration_beats: None,
                     conform_to_tempo: false,
                     loop_fill: false,
+                    rate: None,
                     fade_in_ms: 0,
                     fade_out_ms: 0,
                     event_id: 20,
@@ -131109,6 +131247,7 @@ mod tests {
                     duration_beats: None,
                     conform_to_tempo: false,
                     loop_fill: false,
+                    rate: None,
                     fade_in_ms: 0,
                     fade_out_ms: 0,
                     event_id: 10,
@@ -131153,6 +131292,7 @@ mod tests {
                         duration_beats: None,
                         conform_to_tempo: false,
                         loop_fill: false,
+                        rate: None,
                         fade_in_ms: 0,
                         fade_out_ms: 0,
                         event_id: 10,
@@ -131169,6 +131309,7 @@ mod tests {
                         duration_beats: None,
                         conform_to_tempo: false,
                         loop_fill: false,
+                        rate: None,
                         fade_in_ms: 0,
                         fade_out_ms: 0,
                         event_id: 20,
@@ -131525,6 +131666,7 @@ mod tests {
             conform_to_tempo: false,
             loop_fill: false,
             source_offset_ms: 0,
+            rate: None,
             fade_in_ms: 0,
             fade_out_ms: 0,
             event_id: 100,
@@ -131554,6 +131696,7 @@ mod tests {
                     duration_beats: None,
                     conform_to_tempo: false,
                     loop_fill: false,
+                    rate: None,
                     fade_in_ms: 0,
                     fade_out_ms: 0,
                     event_id: 100,

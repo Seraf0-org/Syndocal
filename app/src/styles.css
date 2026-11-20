@@ -214,6 +214,7 @@
 }
 
 .timelineOperatorBar > .timelineTransport,
+.timelineOperatorBar > .timelineResizeModes,
 .timelineOperatorBar > .timelineMetronomeControls,
 .timelineOperatorBar > .timelineLoopControls {
   display: inline-flex;
@@ -237,6 +238,20 @@
   padding-inline: 7px;
   font-size: var(--fs-control);
   font-weight: 750;
+}
+
+.timelineOperatorBar > .timelineResizeModes button {
+  min-width: 44px;
+  min-height: 44px;
+  padding-inline: 7px;
+  font-size: var(--fs-control);
+  font-weight: 750;
+}
+
+.timelineOperatorBar > .timelineResizeModes button.active {
+  border-color: var(--theme-focus);
+  background: var(--theme-panel);
+  color: var(--theme-text);
 }
 
 .timelineOperatorBar button,
@@ -436,6 +451,20 @@
   .timelineOperatorBar > .timelineLoopControls [data-timeline-loop-boundary] {
     display: none;
   }
+}
+
+.timelineToolsDisclosurePanel > :is(.timelineMetronomeControls, .timelineLoopControls) {
+  display: flex;
+  flex: 1 0 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+}
+
+.timelineToolsDisclosurePanel > :is(.timelineMetronomeControls, .timelineLoopControls) > button {
+  min-width: 44px;
+  height: 44px;
+  min-height: 44px;
 }
 
 @container (max-width: 680px) {
@@ -3974,13 +4003,6 @@ h3 {
   font-size: var(--fs-text);
   line-height: 1;
   pointer-events: none;
-}
-
-.timelineLaneExpandedName {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .timelineLaneExpandedCount {
@@ -14845,6 +14867,13 @@ input[type="color"] {
   opacity: 0;
   pointer-events: all;
   touch-action: none;
+}
+
+.timelineSceneBlockRepeatBoundary {
+  stroke: currentColor;
+  opacity: 0.55;
+  stroke-dasharray: 2 2;
+  pointer-events: none;
 }
 
 .timelineMarker:hover .timelineSceneBlockResizeHandle,
@@ -29900,12 +29929,6 @@ h3 { font-size: var(--fs-control); font-weight: var(--fw-strong); color: var(--t
   font-size: var(--fs-control);
 }
 
-/* F7 timeline audio clips: additive lane-local styling. The fixed overview
-   frame/scrollport geometry remains the sole layout owner. */
-.timelineLayerSection.audio .timelineLayerSectionHeader {
-  grid-template-columns: 18px minmax(0, 1fr) auto auto;
-}
-
 .timelineAudioClipAdd {
   min-width: 0;
   height: 16px;
@@ -33105,12 +33128,18 @@ h3 { font-size: var(--fs-control); font-weight: var(--fw-strong); color: var(--t
   background: var(--theme-panel);
 }
 
+.timelineOverviewLayered .timelineOverviewGutterLayered.timelineNamedLaneGutter {
+  flex-basis: 156px;
+  width: 156px;
+  min-width: 156px;
+}
+
 .timelineOverviewLayered .timelineLayerSection {
   border-top: 1px solid var(--theme-line);
 }
 
 .timelineOverviewLayered .timelineLayerSectionHeader {
-  grid-template-columns: 14px 14px minmax(0, 1fr);
+  grid-template-columns: 14px 14px minmax(0, 1fr) auto;
   align-items: center;
   gap: 0;
   overflow: hidden;
@@ -33139,8 +33168,21 @@ h3 { font-size: var(--fs-control); font-weight: var(--fw-strong); color: var(--t
 }
 
 .timelineOverviewLayered .timelineLayerSectionHeader .timelineAudioClipAdd {
+  grid-column: 4;
   justify-self: end;
   color: var(--theme-muted);
+}
+
+.timelineLayerSectionLabel,
+.timelineLaneInlineName {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--theme-muted);
+  font-size: var(--fs-text);
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-left: 2px;
 }
 
 .timelineOverviewLayered .timelineLayerSectionKindIcon {
@@ -33184,6 +33226,14 @@ h3 { font-size: var(--fs-control); font-weight: var(--fw-strong); color: var(--t
   border-bottom: 1px solid var(--theme-line);
   padding: 0 1px;
 }
+
+.timelineOverviewLayered .timelineNamedLaneGutter .timelineUserLaneGutter {
+  grid-template-columns: 24px minmax(0, 1fr) 22px 22px 22px;
+}
+
+.timelineNamedLaneGutter .timelineUserLaneGutter > .timelineLaneDetailsToggle { grid-column: 3; }
+.timelineNamedLaneGutter .timelineUserLaneGutter > .timelineLaneEye { grid-column: 4; }
+.timelineNamedLaneGutter .timelineUserLaneGutter > .timelineLaneLock { grid-column: 5; }
 
 .timelineOverviewLayered .timelineUserLaneGutter[data-timeline-layer-kind="Audio"] {
   box-shadow: inset 2px 0 #d69a47;
@@ -33271,14 +33321,9 @@ h3 { font-size: var(--fs-control); font-weight: var(--fw-strong); color: var(--t
   pointer-events: none;
 }
 
-.timelineLaneExpandedName {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .timelineLaneExpandedCount {
+  grid-column: 2;
+  justify-self: end;
   color: var(--theme-dim);
 }
 
@@ -37858,7 +37903,7 @@ html .app .layoutSharedWorkspace.layoutControl.controlModeMixer
    remaining height and scrolls only its internal layer surface. */
 .layout.layoutSharedWorkspace.layoutControl.controlModeLive > .liveControlPanel {
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: 48px minmax(0, 1fr);
+  grid-template-rows: 46px minmax(0, 1fr);
   gap: 0;
   padding: 0;
   overflow: visible;
@@ -37878,8 +37923,8 @@ html .app .layoutSharedWorkspace.layoutControl.controlModeMixer
   grid-column: 1;
   grid-row: 1;
   min-width: 0;
-  min-height: 48px;
-  max-height: 48px;
+  min-height: 46px;
+  max-height: 46px;
 }
 
 .layout.layoutSharedWorkspace.layoutControl.controlModeLive
@@ -38072,7 +38117,7 @@ html .app .layoutSharedWorkspace.layoutControl.controlModeMixer
   grid-template-columns: minmax(0, 1fr);
   align-items: center;
   overflow: visible;
-  padding-block: 2px;
+  padding-block: 0;
 }
 
 .layout.layoutSharedWorkspace.layoutControl.controlModeLive
@@ -38123,7 +38168,7 @@ html .app .layoutSharedWorkspace.layoutControl.controlModeMixer
 
 /* These disclosures used to open upward from the lower workspace. They now
    live in the upper arranger header, so keep their full controls below the
-   48px header and inside the viewport instead of projecting off-screen. */
+   header and inside the viewport instead of projecting off-screen. */
 .layout.layoutSharedWorkspace.layoutControl.controlModeLive
   > .liveControlPanel
   > .timelineArrangerHeader

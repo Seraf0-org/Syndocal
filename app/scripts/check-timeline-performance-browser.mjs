@@ -806,6 +806,11 @@ const measureArrangerGeometry = (client) => evaluate(client, `(() => {
           return bounds.width > 0 && bounds.height > 0 && bounds.height < 43.5;
         }).length
       : -1,
+    stretchModes: [...(header?.querySelectorAll('.timelineResizeModes > button') ?? [])].map((button) => ({
+      mode: button.getAttribute('data-timeline-stretch-mode'),
+      pressed: button.getAttribute('aria-pressed'),
+      bounds: rect(button),
+    })),
     shortTargetDetails: header instanceof Element
       ? [...header.querySelectorAll('button, summary')].map((element) => {
           const bounds = element.getBoundingClientRect();
@@ -833,7 +838,13 @@ const assertArrangerGeometry = (geometry, viewport) => {
   const [shelfLeft, shelfTop, shelfRight, shelfBottom, , shelfHeight] = geometry.sourceShelf;
   const [, sourceHeaderTop, , sourceHeaderBottom, , sourceHeaderHeight] = geometry.sourceShelfHeader;
   const [, sourceBodyTop, , sourceBodyBottom, , sourceBodyHeight] = geometry.sourceShelfBody;
-  assert.ok(headerHeight >= 47.5 && headerHeight <= 48.5, `Timeline header owns one 48px row at ${viewport.width}x${viewport.height}: ${JSON.stringify(geometry)}`);
+  assert.ok(headerHeight >= 45.5 && headerHeight <= 46.5, `Timeline header owns one 46px row at ${viewport.width}x${viewport.height}: ${JSON.stringify(geometry)}`);
+  assert.deepEqual(geometry.stretchModes.map(({ mode }) => mode), ['RATE', 'WINDOW'], 'both resize modes appear in the top arranger row');
+  assert.equal(geometry.stretchModes.filter(({ pressed }) => pressed === 'true').length, 1);
+  for (const { bounds } of geometry.stretchModes) {
+    assert.ok(bounds[0] >= headerLeft && bounds[1] >= headerTop && bounds[2] <= headerRight && bounds[3] <= headerBottom && bounds[5] >= 43.5,
+      `Resize mode stays inside the header with a full-height target at ${viewport.width}x${viewport.height}`);
+  }
   assert.ok(Math.abs(headerTop - liveTop) <= 1 && Math.abs(hostTop - headerBottom) <= 1 && Math.abs(hostBottom - liveBottom) <= 1, `Timeline header and arranger are contiguous and consume the Live panel at ${viewport.width}x${viewport.height}: ${JSON.stringify(geometry)}`);
   assert.ok(Math.abs(headerLeft - hostLeft) <= 1 && Math.abs(headerRight - hostRight) <= 1 && Math.abs(headerWidth - hostWidth) <= 2 && liveWidth - headerWidth <= 12, `Timeline header and arranger share the Live panel width at ${viewport.width}x${viewport.height}: ${JSON.stringify(geometry)}`);
   assert.ok(hostLeft >= liveLeft && hostRight <= liveRight && hostHeight > 0, `Timeline arranger spans the Live panel remainder at ${viewport.width}x${viewport.height}: ${JSON.stringify(geometry)}`);
@@ -2144,6 +2155,15 @@ try {
     () => evaluate(client, "window.__timelineDirectResizeFixture?.ready === true"),
     "Timeline direct-resize fixture",
   );
+  const singleAudioHeading = await evaluate(client, `(() => {
+    const section = document.querySelector('[data-timeline-section-kind="Audio"]');
+    const label = section.querySelector('.timelineLayerSectionLabel');
+    const icon = section.querySelector('.timelineLayerSectionKindIcon');
+    return [label.textContent, label.title, label.getBoundingClientRect().left >= icon.getBoundingClientRect().right - 0.5,
+      section.querySelector('.timelineLaneExpandedDetails').textContent.trim()];
+  })()`);
+  assert.deepEqual(singleAudioHeading, ['Audio 1', 'Audio 1', true, '2'],
+    'single-track custom name is next to the icon and the expanded row contains only the item count');
   await dragTimelineResize(client, '[data-timeline-event-id="101"]', '.timelineSceneBlockResizeHandle.start', "start");
   await dragTimelineResize(client, '[data-timeline-event-id="102"]', '.timelineSceneBlockResizeHandle.end', "end");
   await dragTimelineResize(client, '[data-timeline-audio-clip-id="201"]', '[data-timeline-audio-resize="end"]', "end");

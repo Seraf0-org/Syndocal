@@ -4936,6 +4936,9 @@ pub struct TimelineEventPlacementUpdate {
     pub conform_to_tempo: bool,
     #[serde(default)]
     pub loop_fill: bool,
+    /// Optional source rate edit for a fixed-time Scene Block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate: Option<f32>,
     #[serde(default)]
     pub fade_in_ms: u64,
     #[serde(default)]
@@ -15069,6 +15072,7 @@ mod tests {
                 duration_beats: Some(4.0),
                 conform_to_tempo: true,
                 loop_fill: true,
+                rate: None,
                 fade_in_ms: 350,
                 fade_out_ms: 700,
                 loop_count: 4,
@@ -15095,6 +15099,7 @@ mod tests {
         let encoded = serde_json::to_string(&request).unwrap();
         let decoded: super::TimelineSnapRequest = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, request);
+        assert!(!encoded.contains("\"rate\""));
 
         let legacy_placement: super::TimelineEventPlacementUpdate =
             serde_json::from_value(serde_json::json!({
@@ -15106,6 +15111,7 @@ mod tests {
             .unwrap();
         assert_eq!(legacy_placement.time_beats, None);
         assert_eq!(legacy_placement.duration_beats, None);
+        assert_eq!(legacy_placement.rate, None);
         assert!(!legacy_placement.conform_to_tempo);
         assert!(!legacy_placement.loop_fill);
         assert_eq!(legacy_placement.fade_in_ms, 0);

@@ -5,7 +5,7 @@ import { TimelineOverview } from "../../src/components/TimelineOverview.tsx";
 import "../../src/styles.css";
 
 const layers = [
-  { id: 1, label: "Audio", order: 0, muted: false, locked: false, solo: false, expanded: true, kind: "Audio" },
+  { id: 1, label: "Audio 1", order: 0, muted: false, locked: false, solo: false, expanded: true, kind: "Audio" },
   { id: 2, label: "Lighting", order: 1, muted: false, locked: false, solo: false, expanded: true, kind: "Lighting" },
   { id: 3, label: "Video", order: 2, muted: false, locked: false, solo: false, expanded: true, kind: "Video" },
 ];

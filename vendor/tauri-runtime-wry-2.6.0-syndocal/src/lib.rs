@@ -4543,7 +4543,30 @@ fn create_webview<T: UserEvent>(
   if webview_attributes.drag_drop_handler_enabled {
     let proxy = context.proxy.clone();
     let window_id_ = window_id.clone();
+    #[cfg(target_os = "macos")]
+    let file_drag = std::cell::Cell::new(false);
     webview_builder = webview_builder.with_drag_drop_handler(move |event| {
+      // Leave HTML5 drags to WKWebView. Wry calls the same handler for both
+      // Finder files and internal WebKit drags, including Over and Leave.
+      #[cfg(target_os = "macos")]
+      {
+        let handle = match &event {
+          WryDragDropEvent::Enter { paths, .. } => {
+            file_drag.set(!paths.is_empty());
+            file_drag.get()
+          }
+          WryDragDropEvent::Over { .. } => file_drag.get(),
+          WryDragDropEvent::Drop { paths, .. } => {
+            file_drag.set(false);
+            !paths.is_empty()
+          }
+          WryDragDropEvent::Leave => file_drag.replace(false),
+          _ => false,
+        };
+        if !handle {
+          return false;
+        }
+      }
       let event = match event {
         WryDragDropEvent::Enter {
           paths,

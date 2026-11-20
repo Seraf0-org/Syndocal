@@ -56,6 +56,7 @@ export interface TimelineEventDraft {
   conform_to_tempo: boolean;
   loop_fill: boolean;
   source_offset_ms: number;
+  rate?: number;
   fade_in_ms: number;
   fade_out_ms: number;
   loop_count: number;

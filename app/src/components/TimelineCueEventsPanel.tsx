@@ -235,7 +235,7 @@ interface TimelineCueEventsPanelProps {
   onAnalyzeAudio: () => void | Promise<void>;
   onClearAudio: () => void | Promise<void>;
   onApplyAudioBpm: () => void | Promise<void>;
-  onAddAudioClip: (layerId: number) => void | Promise<void>;
+  onAddAudioClip: (layerId: number | null) => void | Promise<void>;
   onUpdateAudioClip: (clip: TimelineAudioClipSummary) => void | Promise<void>;
   onSetAudioClipOutputBus: (clip: TimelineAudioClipSummary, outputBus: TimelineAudioOutputBus) => void | Promise<void>;
   onUpdateVideoClip: (clip: TimelineVideoClipSummary) => void | Promise<void>;

@@ -108,6 +108,16 @@ const rateStretch = gestures.projectTimelineBlockStretch({
 assert.equal(rateStretch.duration_ms, 1_000);
 assert.equal(rateStretch.duration_beats, 2);
 assert.equal(rateStretch.rate, 2, "shortening a four-beat authored block to one second doubles RATE");
+const fixedStretch = {
+  mode: "RATE", edge: "end", originalStartMs: 1_000, originalEndMs: 3_000,
+  requestedEdgeMs: 5_000, authoredBeats: null, bpm: 120, fixedPeriodMs: 2_000, sourceRate: 1,
+};
+const fixedSlow = gestures.projectTimelineBlockStretch(fixedStretch);
+assert.deepEqual([fixedSlow.duration_ms, fixedSlow.loop_count, fixedSlow.rate], [4_000, 1, 0.5]);
+const fixedFast = gestures.projectTimelineBlockStretch({ ...fixedStretch, requestedEdgeMs: 2_000 });
+assert.deepEqual([fixedFast.duration_ms, fixedFast.loop_count, fixedFast.rate], [1_000, 1, 2]);
+const fixedRepeat = gestures.projectTimelineBlockStretch({ ...fixedStretch, mode: "WINDOW", sourceRate: 0.5 });
+assert.deepEqual([fixedRepeat.end_ms, fixedRepeat.duration_ms, fixedRepeat.loop_count, fixedRepeat.rate], [5_000, 2_000, 2, 0.5]);
 assert.equal(rateStretch.loop_fill, false);
 
 const windowStretch = gestures.projectTimelineBlockStretch({

@@ -182,7 +182,7 @@ assert.match(
 );
 assert.match(
   appSource,
-  /dispatchTimelineLayerCommand<T>\(timelineCommandDispatcherOptions\(\), command, args\)/,
+  /dispatchTimelineLayerCommand<T>\(timelineCommandDispatcherOptions\(\), command, args, fence\)/,
   "Timeline layer dispatch must evaluate dispatcher options at invocation time",
 );
 const commitStart = appSource.indexOf("const commitTimelineAdvanced = async");

@@ -217,6 +217,7 @@ import {
   cueDropDurationMs,
   effectiveTimelineLayers,
   sameTimelineLayerSummaries,
+  sortedTimelineLayers,
   timelineLayerIdForEvent,
 } from "./timelineLayers";
 import {
@@ -731,6 +732,7 @@ import {
   invokeTimelineLayerCommand as dispatchTimelineLayerCommand,
   invokeTimelineSceneBlockCommand as dispatchTimelineSceneBlockCommand,
 } from "./timelineCommandDispatchers";
+import type { TimelineProjectMutationFence } from "./timelineCommandDispatchers";
 import { createVideoRuntimeController } from "./createVideoRuntimeController";
 import { createFxLiveSession } from "./createFxLiveSession";
 import { createFxAuditionSession } from "./createFxAuditionSession";
@@ -3457,6 +3459,7 @@ function createAppView() {
       : snapshot().direct_child_timeline_transports?.find((transport) => transport.cue_id === cueId) ?? null;
   });
   const normalizedChildTimeline = (child: ChildTimelineSummary): ChildTimelineSummary => ({
+    ...child,
     layers: child.layers ?? [],
     events: child.events ?? [],
     automations: child.automations ?? [],
@@ -11062,6 +11065,7 @@ function createAppView() {
   const persistChildTimeline = async (
     cueId: number,
     update: (child: ChildTimelineSummary) => ChildTimelineSummary,
+    fence?: TimelineProjectMutationFence,
   ) => {
     const localFixture = viewportFixture === "timeline-layered"
       || viewportFixture === "scene-block-large"
@@ -11073,7 +11077,7 @@ function createAppView() {
     if (!cue?.child_timeline) throw new Error(`Timeline Cue ${cueId} was not found`);
     const childTimeline = normalizedChildTimeline(update(normalizedChildTimeline(cue.child_timeline)));
     if (!localFixture) {
-      await invoke("set_cue_child_timeline", { cueId, childTimeline });
+      await invoke("set_cue_child_timeline", { cueId, childTimeline, ...fence });
       await refreshSnapshot();
       return;
     }
@@ -11139,7 +11143,8 @@ function createAppView() {
   const invokeTimelineLayerCommand = async <T,>(
     command: FrontendTauriInvokeCommand,
     args?: Record<string, unknown>,
-  ): Promise<T> => dispatchTimelineLayerCommand<T>(timelineCommandDispatcherOptions(), command, args);
+    fence?: TimelineProjectMutationFence,
+  ): Promise<T> => dispatchTimelineLayerCommand<T>(timelineCommandDispatcherOptions(), command, args, fence);
 
   const zoomTimelineOverviewAt = (anchorMs: number, scale: number) => {
     setTimelineViewportState((current) => ({
@@ -11204,6 +11209,7 @@ function createAppView() {
         duration_beats: next.duration_beats,
         conform_to_tempo: next.conform_to_tempo,
         loop_fill: next.loop_fill,
+        ...(next.rate === undefined ? {} : { rate: next.rate }),
         fade_in_ms: next.fade_in_ms,
         fade_out_ms: next.fade_out_ms,
         loop_count: next.loop_count,
@@ -12693,7 +12699,7 @@ function createAppView() {
     if (!isTauriRuntime()) return;
     let disposed = false;
     let unlistenProjectDrop: (() => void) | null = null;
-    const routeDrop = (paths: string[], target: Element | null) => routeFileDrop(paths, target, {
+    const routeDrop = (paths: string[], target: Element | null, clientX: number) => routeFileDrop(paths, target, clientX, {
       firstShow: createFirstRunVjShow,
       importMedia: importMediaFilesFromPaths,
       assignSlots: importAndAssignVideoClipSlots,
@@ -12703,15 +12709,25 @@ function createAppView() {
     });
     // Keep Windows DOM dragging intact. Only OS-backed file drops enter the
     // WebView2 path resolver, then this same validated project/import router.
+    const isMac = navigator.platform.startsWith("Mac");
     const webview = (window as Window & { chrome?: { webview?: FileDropWebView } }).chrome?.webview;
-    // Detached panes retain their existing Tauri-native drop handler. This
-    // resolver is installed on the main WebView whose OLE interceptor is off.
-    if (!paneWindow && typeof webview?.postMessageWithAdditionalObjects === "function") {
-      onCleanup(installNativeFileDrop({ document, webview, onDrop: routeDrop, onError: setMessage,
-        captureContext: captureProjectAuthorityIdentity,
-        contextIsCurrent: isProjectAuthorityIdentityCurrent,
+    const resolver = !paneWindow && typeof webview?.postMessageWithAdditionalObjects === "function" ? webview : undefined;
+    // A WKWebView DOM file drop has no accessible path. Swallow unresolved
+    // drops so WebKit cannot replace the workspace with its file player.
+    if (resolver || isMac) {
+      onCleanup(installNativeFileDrop({ document, webview: resolver, onDrop: routeDrop, onError: setMessage,
+        captureContext: () => ({
+          authority: captureProjectAuthorityIdentity(),
+          timelineId: activeTimeline().id,
+          childCueId: timelineChildCueId(),
+        }),
+        contextIsCurrent: (context) => isProjectAuthorityIdentityCurrent(context.authority)
+          && context.timelineId === activeTimeline().id && context.childCueId === timelineChildCueId(),
       }));
     }
+    // WKWebView's Wry events report AppKit points. WebView2's native pane
+    // events report physical pixels. DOM drops already supply CSS pixels.
+    const nativeDropScale = () => isMac ? 1 : window.devicePixelRatio || 1;
     void getCurrentWebview()
       .onDragDropEvent((event) => {
         if (event.payload.type === "enter") {
@@ -12719,7 +12735,7 @@ function createAppView() {
             setProjectDropState(null);
             return;
           }
-          const scale = Math.max(1, window.devicePixelRatio || 1);
+          const scale = nativeDropScale();
           const target = document.elementFromPoint(
             event.payload.position.x / scale,
             event.payload.position.y / scale,
@@ -12736,11 +12752,10 @@ function createAppView() {
           return;
         }
         setProjectDropState(null);
-        const scale = window.devicePixelRatio || 1;
-        routeDrop(event.payload.paths, document.elementFromPoint(
-          event.payload.position.x / scale,
-          event.payload.position.y / scale,
-        ));
+        const scale = nativeDropScale();
+        const x = event.payload.position.x / scale;
+        const y = event.payload.position.y / scale;
+        routeDrop(event.payload.paths, document.elementFromPoint(x, y), x);
       })
       .then((unlisten) => {
         if (disposed) {
@@ -18116,6 +18131,7 @@ function createAppView() {
     layerId: number,
     analysis: AudioAnalysisSummary,
     startMs: number,
+    fence: TimelineProjectMutationFence,
   ) => {
     const layer = timelineLayers().find((candidate) => candidate.id === layerId);
     if (!layer || layer.kind !== "Audio") {
@@ -18149,7 +18165,7 @@ function createAppView() {
           output_bus: "PROGRAM",
         }],
         duration_ms: Math.max(child.duration_ms ?? 0, startMs + Math.max(1, analysis.duration_ms)),
-      }));
+      }), fence);
       setMessage(`Added child Audio Clip ${analysis.path}.`);
       return;
     }
@@ -18186,15 +18202,79 @@ function createAppView() {
       gain: 1,
       fadeInMs: 0,
       fadeOutMs: 0,
+      ...fence,
     });
     await refreshSnapshot();
     setMessage(`Added Audio Clip ${analysis.path}.`);
   };
 
-  const addTimelineAudioClip = async (layerId: number) => {
+  let timelineAudioImportInFlight = false;
+  const importTimelineAudioClip = async (
+    layerId: number | null,
+    loadAudio: () => Promise<AudioAnalysisSummary | null>,
+    timeMs = activeTimeline().position_ms,
+  ) => {
+    if (timelineAudioImportInFlight) {
+      setMessage("An audio import is already in progress.");
+      return;
+    }
+    timelineAudioImportInFlight = true;
+    const authority = captureProjectAuthorityIdentity();
+    const childCueId = timelineChildCueId();
+    const timelineId = activeTimeline().id;
+    const startMs = snapTimeMs(timeMs);
+    const sameTimeline = () => authority.project_epoch === projectMappingsAuthority().project_epoch
+      && timelineChildCueId() === childCueId && activeTimeline().id === timelineId;
+    const mutationFence = (token: ProjectAuthorityToken): TimelineProjectMutationFence => ({
+      __expectedProjectEpoch: token.project_epoch,
+      __expectedProjectRevision: token.project_revision,
+      __expectedCheckpointHash: token.checkpoint_hash,
+      __shouldAbortProjectMutation: () => !sameTimeline(),
+    });
     try {
-      if (viewportFixture === "timeline-layered") {
-        const analysis = audioAnalysis() ?? {
+      const audioLanes = sortedTimelineLayers(timelineLayers()).filter((layer) => layer.kind === "Audio");
+      if (layerId === null) {
+        layerId = audioLanes.find((layer) => !layer.locked)?.id ?? null;
+        if (layerId === null && audioLanes.length > 0) {
+          setMessage("The Audio section has no unlocked lane for a new clip.");
+          return;
+        }
+      }
+      if (layerId !== null) {
+        const target = audioLanes.find((layer) => layer.id === layerId);
+        if (!target || target.locked) {
+          setMessage("Choose an unlocked Audio lane before importing.");
+          return;
+        }
+      }
+      const analysis = await loadAudio();
+      if (!sameTimeline()) return;
+      if (!isProjectAuthorityIdentityCurrent(authority)) {
+        setMessage("The project changed during audio import. Choose the audio file again.");
+        return;
+      }
+      if (!analysis) {
+        setMessage("Add Audio Clip canceled.");
+        return;
+      }
+      let fence = mutationFence(authority);
+      if (layerId === null) {
+        layerId = await invokeTimelineLayerCommand<number>("add_timeline_layer", { label: "Audio", kind: "Audio" }, fence);
+        if (childCueId === null && viewportFixture !== "timeline-layered") await refreshSnapshot();
+        if (!sameTimeline()) return;
+        fence = mutationFence(captureProjectAuthorityIdentity());
+      }
+      await commitTimelineAudioClip(layerId, analysis, startMs, fence);
+    } catch (error) {
+      if (sameTimeline()) setMessage(String(error));
+    } finally {
+      timelineAudioImportInFlight = false;
+    }
+  };
+
+  const addTimelineAudioClip = (layerId: number | null) => importTimelineAudioClip(layerId, async () =>
+    viewportFixture === "timeline-layered"
+      ? audioAnalysis() ?? {
           path: "C:/fixture/audio/added-loop.wav",
           sample_rate: 48_000,
           channels: 2,
@@ -18203,29 +18283,12 @@ function createAppView() {
           waveform: [],
           spectrum: [],
           beats: [],
-        };
-        await commitTimelineAudioClip(layerId, analysis, snapTimeMs(activeTimeline().position_ms));
-        return;
       }
-      const analysis = await invoke<AudioAnalysisSummary | null>("select_timeline_audio_clip_file");
-      if (!analysis) {
-        setMessage("Add Audio Clip canceled.");
-        return;
-      }
-      await commitTimelineAudioClip(layerId, analysis, snapTimeMs(activeTimeline().position_ms));
-    } catch (error) {
-      setMessage(String(error));
-    }
-  };
+      : invoke<AudioAnalysisSummary | null>("select_timeline_audio_clip_file"),
+  );
 
-  const addTimelineAudioClipPath = async (layerId: number, path: string) => {
-    try {
-      const analysis = await invoke<AudioAnalysisSummary>("analyze_timeline_audio_clip_path", { path });
-      await commitTimelineAudioClip(layerId, analysis, snapTimeMs(activeTimeline().position_ms));
-    } catch (error) {
-      setMessage(String(error));
-    }
-  };
+  const addTimelineAudioClipPath = (layerId: number | null, path: string, timeMs?: number) =>
+    importTimelineAudioClip(layerId, () => invoke<AudioAnalysisSummary>("analyze_timeline_audio_clip_path", { path }), timeMs);
 
   const updateTimelineAudioClip = async (clip: TimelineAudioClipSummary) => {
     try {
@@ -20942,13 +21005,23 @@ function createAppView() {
     refreshCanonicalSnapshot: refreshTimelineLoopCanonicalSnapshot,
   });
   const setCanonicalTimelinePlaying = async (playing: boolean) => {
-    if (!timelineAuthorityReady("Timeline transport change")) return;
+    if (!timelineAuthorityReady("Timeline transport change")) return false;
     const childCueId = timelineChildCueId();
+    const timeline = activeTimeline();
+    if (playing && timeline.duration_ms <= 0) {
+      setMessage("Add a Scene or Audio Clip before playing the Timeline.");
+      return false;
+    }
+    if (playing && childCueId === null && timeline.position_ms >= timeline.duration_ms) {
+      setMessage("The Timeline is at the end. Return to the start to play again.");
+      return false;
+    }
     if (childCueId !== null) {
       await invoke("set_direct_child_timeline_playing", { cueId: childCueId, playing });
-      return;
+      return true;
     }
     await timelineTransportRuntime.setPlaying(playing);
+    return true;
   };
 
   const {

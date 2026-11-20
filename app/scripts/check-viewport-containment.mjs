@@ -29614,6 +29614,13 @@ async function measureTimelineSlimVisual(client) {
       const toolbarRect = toolbar.getBoundingClientRect();
       return buttonRect.left < toolbarRect.left - 1 || buttonRect.right > toolbarRect.right + 1;
     }).length;
+    const stretchOptions = [...document.querySelectorAll('.timelineArrangerHeader .timelineResizeModes > button')]
+      .filter(isRendered).map((button) => ({
+        mode: button.dataset.timelineStretchMode,
+        pressed: button.getAttribute('aria-pressed'),
+        label: semanticText(button),
+        minHeight: Number.parseFloat(getComputedStyle(button).minHeight),
+      }));
 
     const gutters = [...document.querySelectorAll('.timelineUserLaneGutter')].filter(isRendered);
     const gutterRows = gutters.map((gutter) => {
@@ -29775,6 +29782,7 @@ async function measureTimelineSlimVisual(client) {
         icon: hasIcon(button),
       })),
       toolbarToolIds: toolbarButtons.map((button) => button.getAttribute('data-timeline-tool') || ''),
+      stretchOptions,
       gutterCount: gutterRows.length,
       gutterRows,
       visibleGutterNameCount: gutterRows.reduce((sum, row) => sum + row.visibleNameCount, 0),
@@ -31424,8 +31432,13 @@ async function exerciseTimelineSourceShelfSceneDragPlacement(client) {
   };
 }
 
+const timelineSourceShelfAuthorityCommands = [
+  'get_output_ownership_status', 'query_output_lease_authority_v1',
+  'standby_sync_status', 'agent_authority_status_v1',
+];
+
 function timelineSourceShelfReadOnlyPollChecks(capture) {
-  const allowed = new Set(['get_output_ownership_status', 'query_output_lease_authority_v1']);
+  const allowed = new Set(timelineSourceShelfAuthorityCommands);
   const reads = capture?.authorityReadCalls ?? [];
   const rawReads = (capture?.commands ?? []).filter((command) => allowed.has(command));
   const backgroundReads = (capture?.backgroundCommands ?? []).filter((command) => allowed.has(command));
@@ -31444,7 +31457,7 @@ function timelineSourceShelfReadOnlyPollChecks(capture) {
 }
 
 async function installTimelineSourceShelfProductionCapture(client) {
-  return await evaluatePageFunction(client, () => {
+  return await evaluatePageFunction(client, (authorityCommands) => {
     const installedWithoutExistingInternals = window.__TAURI_INTERNALS__ === undefined;
     const clone = (value) => value === undefined ? undefined : structuredClone(value);
     const capture = {
@@ -31476,11 +31489,11 @@ async function installTimelineSourceShelfProductionCapture(client) {
         capture.commands.push(command);
         // Installing this fixture enables the app's existing output-drive
         // status poll (App.tsx -> outputDriveQuery.ts). The pre-Batch2 bundle
-        // also interleaves these two pure reads with Scene placement. Admit
+        // also interleaves these pure reads with Scene placement. Admit
         // exactly their no-argument wire, record them separately, and retain
         // the exact five-command placement sequence below without filtering
         // arbitrary commands or accepting any output-authority mutation.
-        if (command === 'get_output_ownership_status' || command === 'query_output_lease_authority_v1') {
+        if (authorityCommands.includes(command)) {
           if (args === null || typeof args !== 'object' || Array.isArray(args)
             || Object.getPrototypeOf(args) !== Object.prototype || Object.keys(args).length !== 0) {
             throw new Error(`Timeline Sources authority read ${command} requires empty arguments.`);
@@ -31506,9 +31519,9 @@ async function installTimelineSourceShelfProductionCapture(client) {
             role: 'Standby', effective_role: 'Standby', desired_role: 'Standby', persisted_role: 'Standby',
             state: 'Ready', generation: 0, epoch: 0, lighting_allowed: false, video_allowed: false,
             lighting_reason: 'BlockedByMachineRole', video_reason: 'BlockedByMachineRole', error: null,
-          } : {
+          } : command === 'query_output_lease_authority_v1' ? {
             operation_id: 'syndocal.output.lease.authority.query.v1', statuses: [{ status: 'unavailable' }],
-          };
+          } : null;
           capture.backgroundCommands.push(command);
           capture.authorityReadCalls.push({ command, args: clone(args), phase: capture.phase,
             transactionCountBefore, transactionCountAfter: capture.transactionCommands.length,
@@ -31766,7 +31779,7 @@ async function installTimelineSourceShelfProductionCapture(client) {
       }
     };
     return installedWithoutExistingInternals;
-  });
+  }, timelineSourceShelfAuthorityCommands);
 }
 
 async function finishTimelineSourceShelfProductionCapture(client) {
@@ -31811,8 +31824,7 @@ async function exerciseTimelineSourceShelfProductionClickPlacement(client) {
         command === 'remote_control_status' ||
         command === 'get_dj_link_machine_status' ||
         command === 'list_dj_link_wired_candidates' ||
-        command === 'get_output_ownership_status' ||
-        command === 'query_output_lease_authority_v1') &&
+        timelineSourceShelfAuthorityCommands.includes(command)) &&
       placement.passed &&
       JSON.stringify(capture?.transactionCommands) === JSON.stringify(exactCommands) &&
       capture.ownerRegistrationArgs.ownerId === capture.beginArgs?.ownerId &&
@@ -31863,8 +31875,7 @@ async function exerciseTimelineSourceShelfProductionDragPlacement(client) {
         command === 'remote_control_status' ||
         command === 'get_dj_link_machine_status' ||
         command === 'list_dj_link_wired_candidates' ||
-        command === 'get_output_ownership_status' ||
-        command === 'query_output_lease_authority_v1') &&
+        timelineSourceShelfAuthorityCommands.includes(command)) &&
       placement.passed &&
       JSON.stringify(capture?.transactionCommands) === JSON.stringify(exactCommands) &&
       capture.ownerRegistrationArgs.ownerId === capture.beginArgs?.ownerId &&
@@ -32325,8 +32336,6 @@ async function runTimelineSlimViewport(client, viewport, recycleClient = null) {
     'pan-prev',
     'reveal-playhead',
     'reveal-selected',
-    'stretch-rate',
-    'stretch-window',
     'super-scene',
     'zoom-in',
     'zoom-out',
@@ -32348,6 +32357,10 @@ async function runTimelineSlimViewport(client, viewport, recycleClient = null) {
       visual.toolbarToolIds.length === expectedTimelineToolIds.length &&
       new Set(visual.toolbarToolIds).size === expectedTimelineToolIds.length &&
       JSON.stringify([...visual.toolbarToolIds].sort()) === JSON.stringify(expectedTimelineToolIds)],
+    ['timelineSlimExposesTwoStretchModesInTransport', () =>
+      JSON.stringify(visual.stretchOptions.map((option) => option.mode)) === JSON.stringify(['RATE', 'WINDOW']) &&
+      visual.stretchOptions.filter((option) => option.pressed === 'true').length === 1 &&
+      visual.stretchOptions.every((option) => option.label.length > 0 && option.minHeight >= 44)],
     ['timelineSlimBlockPropertiesDrawerIsDockedReachableAndContained', () => blockPropertiesDrawer.passed],
     ['timelineSlimLaneCountsStayStableAcrossZoomAndPan', () => laneCountStability.passed],
     ['timelineSlimKeyboardFocusKeepsVisibleWhiteStroke', () => blockKeyboardFocus.passed],

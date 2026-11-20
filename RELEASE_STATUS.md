@@ -1,6 +1,6 @@
 # Syndocal 1.2.0 release status
 
-Current product version: `1.2.0-rc.2` (release candidate).
+Current product version: `1.2.0-rc.3` (release candidate).
 
 ## Verified
 

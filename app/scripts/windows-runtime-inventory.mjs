@@ -73,7 +73,7 @@ export const canonicalPinnedRecordingEncoder = Object.freeze({
 });
 
 export const canonicalPinnedCommonResourceIdentity = Object.freeze(new Map([
-  ["../../THIRD_PARTY_NOTICES.md\0THIRD_PARTY_NOTICES.md", Object.freeze({ byte_size: 11301, sha256: "d41642270a8e3a218abc0ebfa8db1abd2b4e0a8ee3930ebd51d86b6aba9a12e4" })],
+  ["../../THIRD_PARTY_NOTICES.md\0THIRD_PARTY_NOTICES.md", Object.freeze({ byte_size: 11301, sha256: "3d0fb54adb0c44f8a8e9ffbfd98b968beb8b10d7e06ae006b867b2b3f120963f" })],
   ["../../licenses/FFmpeg-LGPL-3.0.txt\0licenses/FFmpeg-LGPL-3.0.txt", Object.freeze({ byte_size: 7652, sha256: "97628afebc60f026f5c2b25d7491c46a5c4ee61f693e7cfa07fbd2c03605979b" })],
   ["../../licenses/GPL-3.0.txt\0licenses/GPL-3.0.txt", Object.freeze({ byte_size: 35147, sha256: "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903" })],
   ["../../licenses/FFmpeg-DEPENDENCIES.txt\0licenses/FFmpeg-DEPENDENCIES.txt", Object.freeze({ byte_size: 2726745, sha256: "c23e70139d4f597b2915df39c6211a33ffcb3197bb6ed20a63aa05ec00180924" })],
@@ -84,9 +84,9 @@ export const canonicalPinnedCommonResourceIdentity = Object.freeze(new Map([
 export const canonicalPinnedNdiRuntime = Object.freeze({
   dll: Object.freeze({
     filename: "Processing.NDI.Lib.x64.dll",
-    version: "6.3.2.0",
-    byte_size: 29863120,
-    sha256: "2b6602075868ba4401f82f417d72424805d69b11ca86078023d0d489ff45dd84",
+    version: "6.4.0.2",
+    byte_size: 30878928,
+    sha256: "adca7e9c98ddddb01a1b684f90c97d0bd764990ee2839524fde51ab37f21028a",
     pe_identity: Object.freeze({
       ...anchoredAmd64PeIdentity,
       characteristics: 0x2022,

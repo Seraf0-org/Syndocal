@@ -38,7 +38,7 @@ import { verifyArchiveResourceAttributes } from "./archive-resource-attributes.m
 
 export { withMaterializedVerifiedExecutable } from "./verified-materialization.mjs";
 
-export const expectedVersion = "1.2.0-rc.2";
+export const expectedVersion = "1.2.0-rc.3";
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const appRoot = resolve(scriptDir, "..");
 const workspaceRoot = resolve(appRoot, "..");

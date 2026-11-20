@@ -149,9 +149,9 @@ feature (Windows platform `build.features = ["ndi"]`), delay-loads
 bundles the unmodified Windows x64 NDI 6 runtime DLL alongside its third-party
 notice file:
 
-- Runtime DLL: `Processing.NDI.Lib.x64.dll` (NDI 6 Runtime `6.3.2.0`,
-  29,863,120 bytes, SHA-256
-  `2b6602075868ba4401f82f417d72424805d69b11ca86078023d0d489ff45dd84`)
+- Runtime DLL: `Processing.NDI.Lib.x64.dll` (NDI 6 Runtime `6.4.0.2`,
+  30,878,928 bytes, SHA-256
+  `adca7e9c98ddddb01a1b684f90c97d0bd764990ee2839524fde51ab37f21028a`)
 - Runtime component third-party notices: `licenses/Processing.NDI.Lib.Licenses.txt`
   (12,347 bytes, SHA-256
   `25fb86f3e3632769542a5edf5de5bd3d7d431da75b1a304529b7647d07e0d555`)

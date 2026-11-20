@@ -75,6 +75,7 @@ const prepareTimelineRuntimeSnapshotIngress = (candidate) => rejected ? null : c
 const engineDmxPreviews = (candidate) => candidate.dmx_previews ?? [];
 const setLiveDmxPreviews = (candidate) => { liveDmx.push(candidate); };
 const setLiveFixtures = (candidate) => { liveFixtures.push(candidate); };
+const updateLiveTimelineAnchorFromSnapshot = () => {};
 const setSnapshotRevision = (candidate) => { snapshotRevision = candidate; };
 const applyAcceptedEngineSnapshot = (next, syncProjectState, resetEditorDrafts) => {
   ${acceptedPrefix}

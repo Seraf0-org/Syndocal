@@ -86,7 +86,7 @@ versioned Tauri outputs. The output must be a new directory below the
 repository-owned `target/qa/windows-release-candidate` tree:
 
 ```powershell
-$version = "1.2.0-rc.2"
+$version = "1.2.0-rc.3"
 $nsis = (Resolve-Path "target/release/bundle/nsis/Syndocal_${version}_x64-setup.exe").Path
 $msi = (Resolve-Path "target/release/bundle/msi/Syndocal_${version}_x64_ja-JP.msi").Path
 # createUpdaterArtifacts=true emits a direct signed installer; use that exact

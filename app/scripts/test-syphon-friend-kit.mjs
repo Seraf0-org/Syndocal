@@ -13,7 +13,7 @@ const project = JSON.parse(readFileSync(projectUrl, 'utf8'));
 const collectorSource = readFileSync(collector, 'utf8');
 const validator = collectorSource.match(/\/\/ BEGIN DIAGNOSTIC VALIDATOR[^\n]*\n([\s\S]*?)\/\/ END DIAGNOSTIC VALIDATOR/)[1];
 const commit = 'a'.repeat(40);
-const kit = { schema_version: 2, commit, version: '1.2.0-rc.2', syphon_input_enabled: true };
+const kit = { schema_version: 2, commit, version: '1.2.0-rc.3', syphon_input_enabled: true };
 const goodReport = () => ({ schema_version: 2, process_id: 123, app_version: kit.version, build_commit: commit,
   input_enabled: true, external_client_verified: false, routes: { '1': { output_id: 1, server_name: 'Syndocal-Syphon-Test',
     native: { macos_version: '15.0', metal_device_name: 'Test Metal', has_unified_memory: true },

@@ -744,9 +744,14 @@ export function SceneMatrixPanel(props: SceneMatrixPanelProps) {
     }, moved, canceled);
   };
 
-  const isActive = (cue: CueSummary) => cue.group_id
-    ? props.activeGroupCueIds[cue.group_id] === cue.id
-    : props.activeCueId === cue.id;
+  const isActive = (cue: CueSummary) => {
+    if (cueLists().some((bank) => bank.id === cue.cue_list_id && bank.active_cue_id === cue.id)) {
+      return true;
+    }
+    return cue.group_id
+      ? props.activeGroupCueIds[cue.group_id] === cue.id
+      : props.activeCueId === cue.id;
+  };
   const progressValue = (cue: CueSummary) => props.activeFade?.cue_id === cue.id
     ? Math.max(0, Math.min(1, props.activeFade.progress))
     : 1;

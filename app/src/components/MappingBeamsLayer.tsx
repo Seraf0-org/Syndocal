@@ -1,4 +1,4 @@
-import { For } from "solid-js";
+import { Index, Show } from "solid-js";
 import type { VisualizerFixtureBeam } from "../mappingRuntime";
 
 export interface MappingBeamFixture {
@@ -16,29 +16,31 @@ type MappingBeamsLayerProps = {
 
 export function MappingBeamsLayer(props: MappingBeamsLayerProps) {
   return (
-    <For each={props.fixtures.filter((fixture) => fixture.intensity > 0)}>
+    <Index each={props.fixtures}>
       {(fixture) => {
-        const beams = () => fixture.beams ?? [{
+        const beams = () => fixture().beams ?? [{
           cellIndex: 1,
-          points: fixture.beamPoints,
-          intensity: fixture.intensity,
-          color: fixture.color,
+          points: fixture().beamPoints,
+          intensity: fixture().intensity,
+          color: fixture().color,
         }];
         return (
-          <For each={beams()}>
-            {(beam) => (
-              <polygon
-                class="stageBeam"
-                data-stage-beam-fixture-id={fixture.id}
-                data-stage-beam-cell={beam.cellIndex}
-                points={beam.points}
-                fill={beam.color}
-                opacity={Math.max(0.08, beam.intensity * 0.55)}
-              ><title>{fixture.beamDescription}</title></polygon>
-            )}
-          </For>
+          <Show when={fixture().intensity > 0}>
+            <Index each={beams()}>
+              {(beam) => (
+                <polygon
+                  class="stageBeam"
+                  data-stage-beam-fixture-id={fixture().id}
+                  data-stage-beam-cell={beam().cellIndex}
+                  points={beam().points}
+                  fill={beam().color}
+                  opacity={Math.max(0.08, beam().intensity * 0.55)}
+                ><title>{fixture().beamDescription}</title></polygon>
+              )}
+            </Index>
+          </Show>
         );
       }}
-    </For>
+    </Index>
   );
 }

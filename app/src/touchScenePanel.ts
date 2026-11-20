@@ -31,11 +31,24 @@ export const touchSceneBanks = (authority: FullBankAuthoritySnapshot): TouchScen
 
 /** Same activity rule as the Edit > Lighting Scene matrix. */
 export const touchSceneActive = (
-  cue: CueSummary,
-  snapshot: Pick<EngineSnapshot, "active_cue_id" | "active_group_cue_ids">,
-) => cue.group_id
-  ? snapshot.active_group_cue_ids?.[cue.group_id] === cue.id
-  : snapshot.active_cue_id === cue.id;
+  cue: Pick<CueSummary, "id" | "cue_list_id" | "group_id">,
+  snapshot: {
+    active_cue_id?: number | null;
+    active_group_cue_ids?: Record<string, number> | null;
+    cue_lists?: readonly Pick<CueListSummary, "id" | "active_cue_id">[] | null;
+  },
+) => {
+  if (
+    snapshot.cue_lists?.some(
+      (bank) => bank.id === cue.cue_list_id && bank.active_cue_id === cue.id,
+    )
+  ) {
+    return true;
+  }
+  return cue.group_id
+    ? snapshot.active_group_cue_ids?.[cue.group_id] === cue.id
+    : snapshot.active_cue_id === cue.id;
+};
 
 /** True when no control of the page occupies the columns the panel covers. */
 export const touchScenePanelColumnsFree = (page: TouchPageSummary | undefined) =>

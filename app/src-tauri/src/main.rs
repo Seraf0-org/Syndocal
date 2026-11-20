@@ -20073,9 +20073,21 @@ fn sync_timeline_audio_without_blocking_playback_lock(
             || expected_external_wdm_timeline_fence
                 .is_some_and(|fence| fence.owner.is_some() || fence.generation != 0);
         #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "asio"))]
-        if external_wdm_commit_required
-            && explicit_wdm_commit_fence != expected_external_wdm_timeline_fence
-        {
+        let normal_authoring_clip_missing_explicit_wdm_fence =
+            expected_external_wdm_timeline_fence.is_some_and(|fence| {
+                fence.owner == Some(ExplicitWdmTimelineOwner::NormalAuthoring)
+            }) && prepared_clips.iter().any(|prepared| {
+                prepared
+                    .as_ref()
+                    .ok()
+                    .is_some_and(|prepared| prepared.explicit_wdm_timeline_fence.is_none())
+            });
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "asio"))]
+        let explicit_wdm_fence_mismatch = explicit_wdm_commit_fence
+            .is_some_and(|fence| Some(fence) != expected_external_wdm_timeline_fence)
+            || normal_authoring_clip_missing_explicit_wdm_fence;
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "asio"))]
+        if external_wdm_commit_required && explicit_wdm_fence_mismatch {
             stop_prepared_timeline_audio_clips(prepared_clips);
             for (seek, _) in seek_results.take().unwrap_or_default() {
                 seek.sink.stop();
@@ -20753,6 +20765,11 @@ impl MediaAudioSyncRuntime {
                     // fenced, so a Follow that retired while device work was
                     // in flight simply rejects this stale report.
                     if let Some((context, timeline_sync_result)) = timeline_sync_result {
+                        if let Err(ref fault) = timeline_sync_result {
+                            if let Ok(mut playback) = audio.try_lock() {
+                                playback.timeline_last_sync_error = Some(fault.clone());
+                            }
+                        }
                         let current_context = TimelineAudioPrepareCoordinator::context(
                             &engine,
                             &audio,
@@ -44989,21 +45006,32 @@ fn play_video_layer_audio_monitor(
         handoff.suppress_through(auto_vj_last_action.as_ref());
         (generation, recovery_target)
     };
-    let result = state
-        .media_audio
-        .lock()
-        .map_err(|_| "Media audio monitor lock was poisoned".to_string())
-        .and_then(|mut audio| {
-            audio.play(
-                layer_id,
-                Path::new(path),
-                layer_state.position_ms,
-                layer_state.speed,
-                volume,
-                device_name.as_deref(),
-            )?;
-            Ok(audio.status())
-        });
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "asio"))]
+    let normal_output_ready = match state.audio_output_router.as_ref() {
+        Some(slot) => {
+            ensure_normal_program_output(&state.media_audio, slot, device_name.clone()).map(|_| ())
+        }
+        None => Err("Normal PROGRAM output router process owner is unavailable".to_string()),
+    };
+    #[cfg(not(all(target_os = "windows", target_arch = "x86_64", feature = "asio")))]
+    let normal_output_ready: Result<(), String> = Ok(());
+    let result = normal_output_ready.and_then(|()| {
+        state
+            .media_audio
+            .lock()
+            .map_err(|_| "Media audio monitor lock was poisoned".to_string())
+            .and_then(|mut audio| {
+                audio.play(
+                    layer_id,
+                    Path::new(path),
+                    layer_state.position_ms,
+                    layer_state.speed,
+                    volume,
+                    device_name.as_deref(),
+                )?;
+                Ok(audio.status())
+            })
+    });
     if result.is_err()
         && state
             .program_audio_handoff

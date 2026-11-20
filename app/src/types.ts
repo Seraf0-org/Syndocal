@@ -1550,12 +1550,17 @@ export interface ProjectHistoryStatus {
   redo_checkpoint_hash?: string | null;
 }
 
+export interface EngineSnapshotSyncDelta extends Partial<EngineSnapshot> {
+  timeline_position_ms?: number;
+  fixture_attribute_values?: [number, AttributeValueSummary[]][];
+}
+
 export interface EngineSnapshotSyncResponse {
   revision: number;
   /** Mandatory engine-owned runtime projection; never reconstructed from `.sdc`. */
   timeline_runtime: TimelineRuntimeSnapshotWire;
   full?: EngineSnapshot | null;
-  delta?: Partial<EngineSnapshot> | null;
+  delta?: EngineSnapshotSyncDelta | null;
 }
 
 export interface Phase1SmokeReport {

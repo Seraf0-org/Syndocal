@@ -463,7 +463,24 @@ fn merge_wire_payload(current: &mut serde_json::Value, payload: &SnapshotSyncPay
             .as_object_mut()
             .expect("delta must follow a full snapshot");
         for (field, value) in delta {
-            object.insert(field.clone(), value.clone());
+            if field == "timeline_position_ms" {
+                object["timeline"]["position_ms"] = value.clone();
+            } else if field == "fixture_attribute_values" {
+                let updates = value.as_array().unwrap();
+                let fixtures = object["fixtures"].as_array_mut().unwrap();
+                for entry in updates {
+                    let pair = entry.as_array().unwrap();
+                    let fixture_id = pair[0].as_u64().unwrap();
+                    if let Some(fixture) = fixtures
+                        .iter_mut()
+                        .find(|candidate| candidate["id"].as_u64() == Some(fixture_id))
+                    {
+                        fixture["attribute_values"] = pair[1].clone();
+                    }
+                }
+            } else {
+                object.insert(field.clone(), value.clone());
+            }
         }
     }
 }
@@ -553,4 +570,68 @@ fn snapshot_delta_transmits_authored_and_safety_blackout_independently_of_effect
             );
         }
     }
+}
+
+#[test]
+fn snapshot_delta_uses_lightweight_timeline_position_and_fixture_value_fast_paths() {
+    let mut before = EngineSnapshot::default();
+    before.timeline.playing = true;
+    before.timeline.duration_ms = 10_000;
+    before.timeline.position_ms = 100;
+    before.fixtures.push(protocol::PatchedFixtureSummary {
+        id: 7,
+        label: "Spot 1".into(),
+        profile_source_path: String::new(),
+        profile_name: "Spot".into(),
+        manufacturer: "Test".into(),
+        mode_name: "Std".into(),
+        universe: 0,
+        address: 1,
+        group_ids: vec!["Front".into()],
+        position: protocol::Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        rotation: protocol::Rotation3 {
+            pitch: 0.0,
+            yaw: 0.0,
+            roll: 0.0,
+        },
+        geometries: Vec::new(),
+        controls: Vec::new(),
+        stage_layout: None,
+        attribute_values: vec![protocol::AttributeValueSummary {
+            attribute: "Dimmer".into(),
+            value: 0,
+        }],
+        limits: protocol::FixtureLimits::default(),
+        highlighted: false,
+        soloed: false,
+        parked: false,
+    });
+
+    let mut after = before.clone();
+    after.timeline.position_ms = 233;
+    after.fixtures[0].attribute_values[0].value = 32_768;
+
+    let mut sync = SnapshotSyncState::default();
+    let first = sync.publish(None, before.clone()).unwrap();
+    let mut reconstructed = serde_json::Value::Null;
+    merge_wire_payload(&mut reconstructed, &first);
+
+    let second = sync.publish(Some(first.revision), after.clone()).unwrap();
+    let delta = second.delta.as_ref().expect("delta payload");
+    assert!(delta.timeline.is_none(), "position-only tick must not resend full TimelineSnapshot");
+    assert_eq!(delta.timeline_position_ms, Some(233));
+    assert!(delta.fixtures.is_none(), "value-only fade tick must not resend full PatchedFixtureSummary");
+    assert_eq!(
+        delta.fixture_attribute_values.as_ref().map(Vec::len),
+        Some(1)
+    );
+
+    merge_wire_payload(&mut reconstructed, &second);
+    let decoded: EngineSnapshot = serde_json::from_value(reconstructed).unwrap();
+    assert_eq!(decoded.timeline.position_ms, 233);
+    assert_eq!(decoded.fixtures[0].attribute_values[0].value, 32_768);
 }

@@ -33128,6 +33128,67 @@ h3 { font-size: var(--fs-control); font-weight: var(--fw-strong); color: var(--t
   background: var(--theme-panel);
 }
 
+.timelineOverviewLayered .timelineRulerGutterCorner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  background: var(--theme-panel);
+  border-bottom: 1px solid var(--theme-line);
+  box-sizing: border-box;
+}
+
+.timelineRulerBackground {
+  fill: var(--theme-panel);
+}
+
+.timelineRulerBottomLine {
+  stroke: var(--theme-line);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.timelineOverviewLayered .timelineEmptyAudioLaneGutter {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  box-shadow: inset 2px 0 #d69a47;
+  border-bottom: 1px solid var(--theme-line);
+  box-sizing: border-box;
+}
+
+.timelineOverviewLayered .timelineEmptyAudioLaneTrigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 22px;
+  min-height: 22px;
+  padding: 0 6px;
+  border: 1px dashed var(--theme-line-strong);
+  border-radius: 2px;
+  background: transparent;
+  color: var(--theme-muted);
+  font-size: var(--fs-text);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.timelineOverviewLayered .timelineEmptyAudioLaneTrigger:hover,
+.timelineOverviewLayered .timelineEmptyAudioLaneTrigger:focus-visible {
+  border-color: #d69a47;
+  color: var(--theme-text);
+  background: rgba(214, 154, 71, 0.10);
+}
+
+.timelineEmptyAudioLaneBackground {
+  fill: rgba(214, 154, 71, 0.04);
+}
+
 .timelineOverviewLayered .timelineOverviewGutterLayered.timelineNamedLaneGutter {
   flex-basis: 156px;
   width: 156px;
@@ -38132,6 +38193,8 @@ html .app .layoutSharedWorkspace.layoutControl.controlModeMixer
   > .timelineArrangerHeader
   .controlContextHeaderTools {
   display: flex;
+  flex: 1 1 auto;
+  margin-left: 0;
   min-width: 0;
   align-items: center;
   flex-wrap: nowrap;
@@ -40334,6 +40397,10 @@ body.outputBody, body.outputBody #root { background: #000; color: #fff; }
 .app .controlContextPane:has(> .controlContextHeader) { grid-template-rows: var(--pane-header-h) minmax(0, 1fr); }
 .app .controlContextHeader { justify-content: flex-start; }
 .app .controlContextHeader > .controlContextHeaderTools:not(.controlContextHeaderPaneActions) { margin-left: auto; }
+.app .controlContextHeader.timelineArrangerHeader > .controlContextHeaderTools {
+  flex: 1 1 auto;
+  margin-left: 0;
+}
 .app .controlContextHeader > .controlContextHeaderTools:empty { display: none; }
 .app .controlContextHeader > .controlContextHeaderTools:empty + .controlContextHeaderPaneActions { margin-left: auto; }
 /* Edit > Video mixer: the monitors and the Outputs / Layers tabs label their

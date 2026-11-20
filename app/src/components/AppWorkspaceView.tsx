@@ -247,6 +247,7 @@ export function AppWorkspaceView(props: { model: AppWorkspaceViewModel; invokeCo
     setTimelinePaneExpanded,
     setTimelineUpperHost,
     activeTimeline,
+    liveActiveTimelinePositionMs,
     timelineChildCue,
     seekTimeline,
     registerVideoLiveControlsDialog,
@@ -1261,7 +1262,7 @@ export function AppWorkspaceView(props: { model: AppWorkspaceViewModel; invokeCo
             nextCueId={nextCue()?.id ?? null}
             activeFade={snapshot().active_fade ?? null}
             timelineEvents={activeTimeline().events}
-            timelinePositionMs={activeTimeline().position_ms}
+            timelinePositionMs={liveActiveTimelinePositionMs()}
             timelineDurationMs={activeTimeline().duration_ms}
             timelinePlaying={activeTimeline().playing}
             childTimelineLabel={timelineChildCue()?.label ?? null}

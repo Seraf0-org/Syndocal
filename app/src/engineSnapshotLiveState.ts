@@ -36,11 +36,28 @@ export const mergeEngineSnapshotSyncResponse = (
     active_group_cue_ids: activeGroupCueIds,
     cue_live_modifiers: cueLiveModifiers,
     group_colors: groupColors,
+    timeline_position_ms: timelinePositionMs,
+    fixture_attribute_values: fixtureAttributeValues,
     ...delta
   } = response.delta ?? {};
+  const nextTimeline = delta.timeline !== undefined
+    ? delta.timeline
+    : timelinePositionMs !== undefined
+      ? { ...current.timeline, position_ms: timelinePositionMs }
+      : current.timeline;
+  let nextFixtures = delta.fixtures !== undefined ? delta.fixtures : current.fixtures;
+  if (delta.fixtures === undefined && fixtureAttributeValues && fixtureAttributeValues.length > 0) {
+    const updates = new Map<number, AttributeValueSummary[]>(fixtureAttributeValues);
+    nextFixtures = current.fixtures.map((fixture) => {
+      const updated = updates.get(fixture.id);
+      return updated ? { ...fixture, attribute_values: updated } : fixture;
+    });
+  }
   return normalizeEngineSnapshotVideoMediaAssets({
     ...current,
     ...delta,
+    timeline: nextTimeline,
+    fixtures: nextFixtures,
     ...(activeGroupCueIds === undefined
       ? {}
       : { active_group_cue_ids: activeGroupCueIds }),
@@ -53,6 +70,11 @@ export const mergeEngineSnapshotSyncResponse = (
 
 const activeSnapshotCues = (snapshot: EngineSnapshot) => {
   const activeCueIds = new Set<number>(Object.values(snapshot.active_group_cue_ids ?? {}));
+  for (const cueList of snapshot.cue_lists ?? []) {
+    if (cueList.active_cue_id !== null && cueList.active_cue_id !== undefined) {
+      activeCueIds.add(cueList.active_cue_id);
+    }
+  }
   if (snapshot.active_cue_id !== null && snapshot.active_cue_id !== undefined) {
     activeCueIds.add(snapshot.active_cue_id);
   }

@@ -257,7 +257,11 @@ export function ControlTimelinePlaybackPanel(props: ControlTimelinePlaybackPanel
             <ol class="controlPlaybackCues">
               <For each={props.cues}>
                 {(cue) => {
-                  const isActive = () => cue.id === props.activeCueId;
+                  const isActive = () =>
+                    cue.id === props.activeCueId
+                    || props.cueLists.some(
+                      (list) => list.id === cue.cue_list_id && list.active_cue_id === cue.id,
+                    );
                   const isNext = () => cue.id === props.nextCueId && !isActive();
                   return (
                     <li>

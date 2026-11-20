@@ -588,9 +588,14 @@ export function CueManagementPanel(props: CueManagementPanelProps) {
                 mib_fixture_ids: enabled ? [...fixtureIds, fixtureId] : fixtureIds,
               });
             };
+            const cueIsActive = () =>
+              cue.id === props.activeCueId
+              || props.bankAuthority.cueLists.some(
+                (list) => list.id === cue.cue_list_id && list.active_cue_id === cue.id,
+              );
             return (
               <div
-                class={cue.id === props.activeCueId ? "cueItem active" : "cueItem"}
+                class={cueIsActive() ? "cueItem active" : "cueItem"}
                 style={{
                   "--identity": cueIdentityCss(
                     cue.id,

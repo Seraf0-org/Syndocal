@@ -33,6 +33,26 @@ assert.equal(scenes.touchSceneActive(cue(4,1),{active_cue_id:4}),true);
 assert.equal(scenes.touchSceneActive(cue(4,1),{active_cue_id:5}),false);
 assert.equal(scenes.touchSceneActive(cue(4,1,{group_id:'front'}),{active_cue_id:4,active_group_cue_ids:{front:7}}),false,'grouped Scenes follow their group activity');
 assert.equal(scenes.touchSceneActive(cue(7,1,{group_id:'front'}),{active_cue_id:null,active_group_cue_ids:{front:7}}),true);
+assert.equal(
+  scenes.touchSceneActive(cue(1,1),{active_cue_id:2,cue_lists:[{id:1,active_cue_id:1},{id:2,active_cue_id:2}]}),
+  true,
+  'Bank 1 Scene remains active when Bank 2 Scene is activated simultaneously',
+);
+assert.equal(
+  scenes.touchSceneActive(cue(2,2),{active_cue_id:2,cue_lists:[{id:1,active_cue_id:1},{id:2,active_cue_id:2}]}),
+  true,
+  'Bank 2 Scene is active alongside Bank 1 Scene',
+);
+assert.equal(
+  scenes.touchSceneActive(cue(1,1),{active_cue_id:null,cue_lists:[{id:1,active_cue_id:1},{id:2,active_cue_id:null}]}),
+  true,
+  'Bank 1 Scene stays active after Bank 2 Scene is released and clears active_cue_id',
+);
+assert.equal(
+  scenes.touchSceneActive(cue(4,1),{active_cue_id:2,cue_lists:[{id:1,active_cue_id:1},{id:2,active_cue_id:2}]}),
+  false,
+  'inactive Scene in Bank 1 stays inactive',
+);
 
 // The Default Desk is one submaster per existing group, nothing else.
 const groups=Array.from({length:12},(_,index)=>({id:`g${index}`,label:`Group ${index}`}));

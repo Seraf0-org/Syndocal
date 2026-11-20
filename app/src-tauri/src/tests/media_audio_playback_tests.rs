@@ -5183,3 +5183,92 @@ fn rapid_program_audio_reenable_keeps_the_pending_stop_barrier() {
         })
     );
 }
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "asio"))]
+#[test]
+fn follow_program_timeline_audio_commits_and_plays_with_active_cue_audio_runtime() {
+    let suffix = current_unix_ms();
+    let clip_path =
+        std::env::temp_dir().join(format!("syndocal-follow-program-clip-{suffix}.wav"));
+    write_timeline_audio_test_wav(&clip_path);
+
+    let engine = EngineHandle::start_for_tests(DmxOutputConfig {
+        enabled: false,
+        ..DmxOutputConfig::default()
+    });
+    engine
+        .add_timeline_layer(protocol::TimelineLayerSummary {
+            id: 51,
+            label: "Audio 1".to_owned(),
+            order: 0,
+            muted: false,
+            locked: false,
+            solo: false,
+            expanded: true,
+            kind: TimelineLayerKind::Audio,
+        })
+        .unwrap();
+    engine
+        .add_timeline_audio_clip(TimelineAudioClipSummary {
+            id: 811,
+            layer_id: 51,
+            media_asset_id: None,
+            path: clip_path.to_string_lossy().into_owned(),
+            start_ms: 0,
+            offset_ms: 0,
+            duration_ms: 2_000,
+            gain: 1.0,
+            fade_in_ms: 0,
+            fade_out_ms: 0,
+            output_bus: protocol::TimelineAudioOutputBus::Program,
+        })
+        .unwrap();
+    let transport = engine.snapshot().timeline;
+    engine
+        .set_timeline_playing_published(
+            transport.transport_epoch,
+            transport.transport_generation,
+            true,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+    let timeline = engine.video_audio_runtime_snapshot().timeline_audio;
+
+    let timeline_cue_audio = Arc::new(TimelineCueAudioRuntime::default());
+    {
+        let mut state = timeline_cue_audio.state.lock().unwrap();
+        state.normal_admission_open = true;
+        state.desired.route = timeline_cue_audio::TimelineCueAudioRoute::FollowProgram;
+    }
+    let (mixer, _source) = rodio::mixer::mixer(2, 48_000);
+    let audio = Arc::new(Mutex::new(MediaAudioPlayback {
+        timeline_test_mixer: Some(mixer),
+        ..MediaAudioPlayback::default()
+    }));
+    timeline_cue_audio.observe_external_wdm_timeline_route_on_worker_tick(&audio);
+
+    sync_timeline_audio_without_blocking_playback_lock(
+        &engine,
+        &audio,
+        None,
+        None,
+        Some(Arc::clone(&timeline_cue_audio)),
+        &timeline,
+        &Arc::new(Mutex::new(TimelineAudioPrepareCommitState::default())),
+        || {},
+        || {},
+    )
+    .expect("default FollowProgram timeline audio clip must commit instead of aborting on fence mismatch");
+
+    {
+        let playback = audio.lock().unwrap();
+        assert_eq!(playback.timeline_sinks.len(), 1);
+        assert!(
+            !playback.timeline_sinks.values().next().unwrap().is_paused(),
+            "committed FollowProgram sink must be unpaused and playing"
+        );
+        assert_eq!(playback.external_wdm_timeline_owner, None);
+    }
+
+    let _ = fs::remove_file(&clip_path);
+}

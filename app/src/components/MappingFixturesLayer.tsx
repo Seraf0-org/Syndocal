@@ -1,4 +1,4 @@
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createMemo, createSignal, For, Index, onCleanup, onMount, Show } from "solid-js";
 import type { FixtureLiveColorSegment } from "../fixtureLiveColor";
 import type {
   MappingFixtureSegmentOrder,
@@ -107,91 +107,91 @@ export function MappingFixturesLayer(props: MappingFixturesLayerProps) {
   return (
     <>
       <g ref={stageMarker} data-mapping-fixtures-layer-marker="true" pointer-events="none" />
-      <For each={props.fixtures}>
+      <Index each={props.fixtures}>
         {(fixture) => {
-          const selected = () => props.selectedFixtureIds.has(fixture.id);
+          const selected = () => props.selectedFixtureIds.has(fixture().id);
           const className = () => [
             "stageFixture",
             "stageFixtureBlock",
-            `kind-${fixture.visualKind}`,
+            `kind-${fixture().visualKind}`,
             selected() ? "selected picked" : "",
-            props.isDragging(fixture.id) ? "dragging" : "",
-            props.selectedGroupId && fixture.inGroupFilter ? "groupMatch" : "",
-            props.selectedTypeKey && fixture.typeKey === props.selectedTypeKey ? "typeMatch" : "",
-            fixture.highlighted ? "highlighted" : "",
-            fixture.soloed ? "soloed" : "",
-            fixture.parked ? "parked" : "",
+            props.isDragging(fixture().id) ? "dragging" : "",
+            props.selectedGroupId && fixture().inGroupFilter ? "groupMatch" : "",
+            props.selectedTypeKey && fixture().typeKey === props.selectedTypeKey ? "typeMatch" : "",
+            fixture().highlighted ? "highlighted" : "",
+            fixture().soloed ? "soloed" : "",
+            fixture().parked ? "parked" : "",
           ].filter(Boolean).join(" ");
           return (
             <>
               <g
                 class={className()}
-                data-stage-fixture-id={fixture.id}
-                data-stage-fixture-hovered={hoveredFixtureId() === fixture.id ? "true" : "false"}
-                data-live-color-applied={fixture.liveColorApplied ? "true" : "false"}
-                data-live-color-source={fixture.liveColorValueSource ?? "none"}
-                data-live-segment-count={fixture.liveSegments?.length ?? 1}
-                data-live-segment-columns={fixture.segmentColumns}
-                data-live-segment-rows={fixture.segmentRows}
-                data-live-segment-order={fixture.segmentOrder}
+                data-stage-fixture-id={fixture().id}
+                data-stage-fixture-hovered={hoveredFixtureId() === fixture().id ? "true" : "false"}
+                data-live-color-applied={fixture().liveColorApplied ? "true" : "false"}
+                data-live-color-source={fixture().liveColorValueSource ?? "none"}
+                data-live-segment-count={fixture().liveSegments?.length ?? 1}
+                data-live-segment-columns={fixture().segmentColumns}
+                data-live-segment-rows={fixture().segmentRows}
+                data-live-segment-order={fixture().segmentOrder}
                 data-stage-fixture-drag-threshold={MAPPING_FIXTURE_DRAG_THRESHOLD_PX}
-                transform={`translate(${fixture.x} ${fixture.z}) rotate(${fixture.yaw})`}
-                onPointerDown={(event) => props.onFixturePointerDown(event, fixture.id)}
-                onPointerEnter={() => setHoveredFixtureId(fixture.id)}
+                transform={`translate(${fixture().x} ${fixture().z}) rotate(${fixture().yaw})`}
+                onPointerDown={(event) => props.onFixturePointerDown(event, fixture().id)}
+                onPointerEnter={() => setHoveredFixtureId(fixture().id)}
                 onPointerLeave={() =>
-                  setHoveredFixtureId((current) => current === fixture.id ? null : current)
+                  setHoveredFixtureId((current) => current === fixture().id ? null : current)
                 }
-                onMouseOver={() => setHoveredFixtureId(fixture.id)}
+                onMouseOver={() => setHoveredFixtureId(fixture().id)}
                 onMouseOut={(event) => {
                   const nextTarget = event.relatedTarget;
                   if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
                     return;
                   }
-                  setHoveredFixtureId((current) => current === fixture.id ? null : current);
+                  setHoveredFixtureId((current) => current === fixture().id ? null : current);
                 }}
               >
                 <StageFixtureGlyph
-                  visualKind={fixture.visualKind}
-                  width={fixture.width}
-                  height={fixture.height}
-                  color={fixture.color}
-                  segments={fixture.liveSegments}
-                  physicalCells={fixture.physicalCells}
-                  segmentColumns={fixture.segmentColumns}
-                  segmentRows={fixture.segmentRows}
-                  segmentOrder={fixture.segmentOrder}
+                  visualKind={fixture().visualKind}
+                  width={fixture().width}
+                  height={fixture().height}
+                  color={fixture().color}
+                  segments={fixture().liveSegments}
+                  physicalCells={fixture().physicalCells}
+                  segmentColumns={fixture().segmentColumns}
+                  segmentRows={fixture().segmentRows}
+                  segmentOrder={fixture().segmentOrder}
                   hitTargetRadius={6}
-                  title={`${fixture.label} / ${fixture.dmxLabel} / ${fixture.groupLabel}`}
+                  title={`${fixture().label} / ${fixture().dmxLabel} / ${fixture().groupLabel}`}
                 />
               </g>
               <Show when={props.showLevels}>
-                <text class={fixture.inGroupFilter ? "stageLevelLabel" : "stageLevelLabel muted"} x={fixture.x + 3.5} y={fixture.z + 5}>
-                  {Math.round(fixture.intensity * 100)}%
+                <text class={fixture().inGroupFilter ? "stageLevelLabel" : "stageLevelLabel muted"} x={fixture().x + 3.5} y={fixture().z + 5}>
+                  {Math.round(fixture().intensity * 100)}%
                 </text>
               </Show>
             </>
           );
         }}
-      </For>
-      <For each={props.fixtures}>
+      </Index>
+      <Index each={props.fixtures}>
         {(fixture) => {
-          const yawDragging = () => props.isYawDragging(fixture.id);
+          const yawDragging = () => props.isYawDragging(fixture().id);
           const controlSelectCanRotate = () =>
             props.fixtureTransformsEditable === true && props.stageTool === "select";
           const showYawHandle = () =>
             (props.fixtureTransformsEditable ?? !props.readOnly) &&
             (yawDragging() || (
-              props.selectedFixtureId === fixture.id &&
+              props.selectedFixtureId === fixture().id &&
               (props.stageTool === "rotate" || controlSelectCanRotate())
             ));
-          const yawHandlePoint = () => stageFixtureYawHandlePoint(fixture, props.worldPerCssPixel);
+          const yawHandlePoint = () => stageFixtureYawHandlePoint(fixture(), props.worldPerCssPixel);
           const yawHandleRadius = () => stageFixtureYawHandleWorldRadius(props.worldPerCssPixel);
           return (
             <Show when={showYawHandle()}>
               <line
                 class={yawDragging() ? "stageYawLine dragging" : "stageYawLine"}
-                x1={fixture.x}
-                y1={fixture.z}
+                x1={fixture().x}
+                y1={fixture().z}
                 x2={yawHandlePoint().x}
                 y2={yawHandlePoint().z}
               />
@@ -203,14 +203,14 @@ export function MappingFixturesLayer(props: MappingFixturesLayerProps) {
                 cx={yawHandlePoint().x}
                 cy={yawHandlePoint().z}
                 r={yawHandleRadius()}
-                onPointerDown={(event) => props.onBeginYawDrag(event, fixture.id)}
+                onPointerDown={(event) => props.onBeginYawDrag(event, fixture().id)}
               >
-                <title data-no-localize>{fixture.label} yaw {fixture.yaw} deg</title>
+                <title data-no-localize>{fixture().label} yaw {fixture().yaw} deg</title>
               </circle>
             </Show>
           );
         }}
-      </For>
+      </Index>
       <For each={labelLayout().labels}>
         {(layout) => (
           <StageFixtureLabel

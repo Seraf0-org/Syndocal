@@ -3386,8 +3386,13 @@ function createAppView() {
   createEffect(() => {
     if (!sceneFxStagePreview()) return;
     setSceneFxPreviewTick(performance.now());
-    const timer = window.setInterval(() => setSceneFxPreviewTick(performance.now()), 100);
-    onCleanup(() => window.clearInterval(timer));
+    let frameId = 0;
+    const step = () => {
+      setSceneFxPreviewTick(performance.now());
+      frameId = window.requestAnimationFrame(step);
+    };
+    frameId = window.requestAnimationFrame(step);
+    onCleanup(() => window.cancelAnimationFrame(frameId));
   });
   const stagePreviewFixtures = createMemo(() => {
     const preview = sceneFxStagePreview();
@@ -3491,6 +3496,98 @@ function createAppView() {
       position_ms: Math.min(transport?.position_ms ?? 0, normalized.duration_ms ?? 0),
       duration_ms: normalized.duration_ms ?? 0,
     };
+  });
+  interface LiveTimelineTransportAnchor {
+    childCueId: number | null;
+    timelineId: number | null;
+    positionMs: number;
+    durationMs: number;
+    playing: boolean;
+    countInRemainingMs: number;
+    loopRegion: TimelineLoopRegionSummary | null;
+    sampledAt: number;
+  }
+  const [liveTimelineAnchor, setLiveTimelineAnchor] = createSignal<LiveTimelineTransportAnchor | null>(null);
+  const [liveTimelinePlayheadMs, setLiveTimelinePlayheadMs] = createSignal<number | null>(null);
+  const updateLiveTimelineAnchorFromSnapshot = (next: EngineSnapshot) => {
+    const childCueId = timelineChildCueId();
+    if (childCueId !== null) {
+      const childCue = next.cues.find((cue) => cue.id === childCueId);
+      const transport = (next.direct_child_timeline_transports ?? []).find(
+        (candidate) => candidate.cue_id === childCueId,
+      );
+      const durationMs = Math.max(0, childCue?.child_timeline?.duration_ms ?? 0);
+      setLiveTimelineAnchor({
+        childCueId,
+        timelineId: null,
+        positionMs: Math.min(transport?.position_ms ?? 0, durationMs),
+        durationMs,
+        playing: transport?.playing ?? false,
+        countInRemainingMs: transport?.count_in_remaining_ms ?? 0,
+        loopRegion: null,
+        sampledAt: performance.now(),
+      });
+      return;
+    }
+    setLiveTimelineAnchor({
+      childCueId: null,
+      timelineId: next.timeline.id ?? 1,
+      positionMs: next.timeline.position_ms,
+      durationMs: next.timeline.duration_ms,
+      playing: next.timeline.playing,
+      countInRemainingMs: next.timeline.count_in_remaining_ms ?? 0,
+      loopRegion: next.timeline.loop_region ?? null,
+      sampledAt: performance.now(),
+    });
+  };
+  const interpolatedTimelinePositionMs = (
+    anchor: LiveTimelineTransportAnchor,
+    now: number,
+  ): number => {
+    if (!anchor.playing || anchor.countInRemainingMs > 0 || anchor.durationMs <= 0) {
+      return anchor.positionMs;
+    }
+    const elapsedMs = Math.max(0, Math.min(250, now - anchor.sampledAt));
+    const loop = anchor.loopRegion;
+    if (
+      loop?.enabled
+      && loop.b_ms > loop.a_ms
+      && anchor.positionMs >= loop.a_ms
+      && anchor.positionMs < loop.b_ms
+    ) {
+      const span = loop.b_ms - loop.a_ms;
+      return loop.a_ms + ((anchor.positionMs - loop.a_ms + elapsedMs) % span);
+    }
+    return Math.min(anchor.durationMs, anchor.positionMs + elapsedMs);
+  };
+  createEffect(() => {
+    const anchor = liveTimelineAnchor();
+    if (!anchor) {
+      setLiveTimelinePlayheadMs(null);
+      return;
+    }
+    if (!anchor.playing || anchor.countInRemainingMs > 0 || anchor.durationMs <= 0) {
+      setLiveTimelinePlayheadMs(anchor.positionMs);
+      return;
+    }
+    setLiveTimelinePlayheadMs(interpolatedTimelinePositionMs(anchor, performance.now()));
+    let frameId = 0;
+    const step = () => {
+      setLiveTimelinePlayheadMs(interpolatedTimelinePositionMs(anchor, performance.now()));
+      frameId = window.requestAnimationFrame(step);
+    };
+    frameId = window.requestAnimationFrame(step);
+    onCleanup(() => window.cancelAnimationFrame(frameId));
+  });
+  const liveActiveTimelinePositionMs = createMemo(() => {
+    const anchor = liveTimelineAnchor();
+    const current = activeTimeline();
+    const childCueId = timelineChildCueId();
+    const anchorMatches = anchor !== null
+      && anchor.childCueId === childCueId
+      && (childCueId !== null || anchor.timelineId === (current.id ?? 1));
+    if (!anchorMatches) return current.position_ms;
+    return liveTimelinePlayheadMs() ?? current.position_ms;
   });
   const timelineBank = createMemo<TimelineSnapshot[]>(() => {
     const bank = snapshot().timeline_bank ?? [];
@@ -8440,7 +8537,7 @@ function createAppView() {
     setTimelineViewportState((current) => reconcileTimelineViewportState(current, showDurationMs));
   });
   const timelineOverviewPlayheadX = createMemo(() =>
-    timelineTimeToVisibleRawRatio(activeTimeline().position_ms, timelineVisibleWindow()) * 100,
+    timelineTimeToVisibleRawRatio(liveActiveTimelinePositionMs(), timelineVisibleWindow()) * 100,
   );
   const fitTimelineOverview = () => {
     setTimelineViewportState((current) => ({
@@ -9940,6 +10037,7 @@ function createAppView() {
     const cueId = selectedSceneCueId();
     if (cueId === null) return false;
     return snapshot().active_cue_id === cueId
+      || snapshot().cue_lists.some((list) => list.active_cue_id === cueId)
       || Object.values(snapshot().active_group_cue_ids ?? {}).includes(cueId);
   });
   // Components that only carry cue ids receive enough identity context to
@@ -12014,6 +12112,7 @@ function createAppView() {
     latestEngineSnapshot = next;
     setLiveDmxPreviews(engineDmxPreviews(next));
     setLiveFixtures(snapshotLiveFixtures(next));
+    updateLiveTimelineAnchorFromSnapshot(next);
     if (resetEditorDrafts) {
       continuousFixtureFader.cancel();
       faderValueController.clearAll();
@@ -12183,7 +12282,8 @@ function createAppView() {
       latestEngineSnapshot = next;
       setLiveDmxPreviews(engineDmxPreviews(next));
       setLiveFixtures(snapshotLiveFixtures(next));
-      if (response.delta?.fixtures) {
+      updateLiveTimelineAnchorFromSnapshot(next);
+      if (response.delta?.fixtures || response.delta?.fixture_attribute_values) {
         setFaderValues((current) => faderValueController.mergeSnapshotValues(current, snapshotFaderValues(next)));
       }
       setSnapshotRevision(response.revision);
@@ -12299,21 +12399,32 @@ function createAppView() {
   };
 
   let snapshotPollTimer: number | null = null;
-  const scheduleSnapshotPoll = () => {
+  const scheduleSnapshotPoll = (delayOverrideMs?: number) => {
     if (!isTauriRuntime()) {
       return;
     }
     const uiIntervalMs = workspaceTab() === "setup" ? 1_000 : 250;
+    const timelinePlaying = activeTimeline().playing || Boolean(liveTimelineAnchor()?.playing);
     const intervalMs = document.hidden
       ? 2_000
-      : liveMappingStageVisible()
+      : liveMappingStageVisible() || timelinePlaying
         ? liveDmxPollIntervalMs
         : uiIntervalMs;
+    const delayMs = delayOverrideMs ?? intervalMs;
     snapshotPollTimer = window.setTimeout(async () => {
-      const syncUiState = performance.now() - lastSnapshotUiApplyAt >= uiIntervalMs;
+      const startedAt = performance.now();
+      const syncUiState = startedAt - lastSnapshotUiApplyAt >= uiIntervalMs;
       await refreshSnapshotDelta(syncUiState);
-      scheduleSnapshotPoll();
-    }, intervalMs);
+      const nextUiIntervalMs = workspaceTab() === "setup" ? 1_000 : 250;
+      const nextTimelinePlaying = activeTimeline().playing || Boolean(liveTimelineAnchor()?.playing);
+      const nextIntervalMs = document.hidden
+        ? 2_000
+        : liveMappingStageVisible() || nextTimelinePlaying
+          ? liveDmxPollIntervalMs
+          : nextUiIntervalMs;
+      const elapsedMs = performance.now() - startedAt;
+      scheduleSnapshotPoll(Math.max(4, nextIntervalMs - elapsedMs));
+    }, delayMs);
   };
   scheduleSnapshotPoll();
   let projectAuthorityPollTimer: number | null = null;
@@ -19782,6 +19893,9 @@ function createAppView() {
         return {
           ...current,
           active_cue_id: cue.id,
+          cue_lists: current.cue_lists.map((list) =>
+            list.id === cue.cue_list_id ? { ...list, active_cue_id: cue.id } : list,
+          ),
           active_group_cue_ids: activeGroupCueIds,
           // T17 reset rule: a fresh trigger drops the latched live modifier.
           cue_live_modifiers: (current.cue_live_modifiers ?? []).filter(
@@ -19820,6 +19934,9 @@ function createAppView() {
         return {
           ...current,
           active_cue_id: current.active_cue_id === cueId ? null : current.active_cue_id,
+          cue_lists: current.cue_lists.map((list) =>
+            list.active_cue_id === cueId ? { ...list, active_cue_id: null } : list,
+          ),
           active_group_cue_ids: activeGroupCueIds,
           // T17 reset rule: release drops the latched live modifier.
           cue_live_modifiers: (current.cue_live_modifiers ?? []).filter(
@@ -25184,6 +25301,7 @@ function createAppView() {
 
   const sceneIsPlaying = (cueId: number) =>
     snapshot().active_cue_id === cueId
+    || snapshot().cue_lists.some((list) => list.active_cue_id === cueId)
     || Object.values(snapshot().active_group_cue_ids ?? {}).includes(cueId);
   const previewAndRunSceneEffect = async (
     cueId: number,
@@ -26505,7 +26623,7 @@ function createAppView() {
       <Show when={timelineDeskSurface() === "show"}>
         <TimelineOperatorBar
           childTimelineLabel={timelineChildCue()?.label ?? null}
-          positionMs={activeTimeline().position_ms}
+          positionMs={liveActiveTimelinePositionMs()}
           durationMs={activeTimeline().duration_ms}
           playing={activeTimeline().playing}
           bpm={snapshot().clock.bpm}
@@ -26815,7 +26933,7 @@ function createAppView() {
         </div>
         <div class="liveStatusItem">
           <span>Timecode</span>
-          <strong class="tabularNums" data-no-localize>{formatShowTimecode(snapshot().timeline.position_ms)}</strong>
+          <strong class="tabularNums" data-no-localize>{formatShowTimecode(liveActiveTimelinePositionMs())}</strong>
         </div>
       </>}>
         {(cue) => renderSceneSettingsPane(cue)}
@@ -26868,7 +26986,18 @@ function createAppView() {
         <For each={liveCuePads()}>
           {(pad) => (
             <button
-              class={`liveCuePad ${pad.cue?.id === snapshot().active_cue_id ? "active" : ""} ${
+              class={`liveCuePad ${
+                pad.cue && (
+                  pad.cue.id === snapshot().active_cue_id
+                  || snapshot().cue_lists.some(
+                    (list) => list.id === pad.cue!.cue_list_id && list.active_cue_id === pad.cue!.id,
+                  )
+                  || (pad.cue.group_id
+                    && snapshot().active_group_cue_ids?.[pad.cue.group_id] === pad.cue.id)
+                )
+                  ? "active"
+                  : ""
+              } ${
                 pad.cue?.id === nextCue()?.id ? "next" : ""
               }`}
               style={pad.cue ? {
@@ -28585,6 +28714,7 @@ function createAppView() {
     setTimelinePaneExpanded,
     setTimelineUpperHost,
     activeTimeline,
+    liveActiveTimelinePositionMs,
     timelineChildCue,
     seekTimeline,
     registerVideoLiveControlsDialog,

@@ -342,6 +342,7 @@ interface TimelineVideoClipDrag {
 }
 
 const timelineSectionKinds: TimelineLayerKind[] = ["Audio", "Lighting", "Video"];
+const timelineRulerHeaderHeightPx = 18;
 const timelineSectionHeaderHeightPx = 14;
 const timelineUserLaneHeightPx = 30;
 const timelineExpandedLaneHeightPx = 54;
@@ -707,13 +708,18 @@ export function TimelineOverview(props: TimelineOverviewProps) {
     const sections: TimelineSectionRowLayout[] = [];
     const laneRows: TimelineLayerRowLayout[] = [];
     const childRows: (InlineChildRow & { top: number; height: number; section: TimelineLayerKind })[] = [];
-    let top = 0;
+    let emptyAudioLane: { top: number; height: number } | null = null;
+    let top = timelineRulerHeaderHeightPx;
     for (const kind of timelineSectionKinds) {
       const layers = orderedLayers().filter((layer) => layer.kind === kind);
       const isCollapsed = collapsed.has(kind);
       const sectionTop = top;
       top += timelineSectionHeaderHeightPx;
       if (!isCollapsed) {
+        if (kind === "Audio" && layers.length === 0) {
+          emptyAudioLane = { top, height: timelineUserLaneHeightPx };
+          top += timelineUserLaneHeightPx;
+        }
         for (const layer of layers) {
           const height = timelineLayerHeightPx(layer);
           laneRows.push({ layer, top, height });
@@ -734,7 +740,13 @@ export function TimelineOverview(props: TimelineOverviewProps) {
         layers,
       });
     }
-    return { sections, laneRows, childRows, contentHeight: Math.max(timelineSectionHeaderHeightPx * 3, top) };
+    return {
+      sections,
+      laneRows,
+      childRows,
+      emptyAudioLane,
+      contentHeight: Math.max(timelineRulerHeaderHeightPx + timelineSectionHeaderHeightPx * 3, top),
+    };
   });
   const layerRowById = createMemo(() => new Map(
     sectionLayout().laneRows.map((row) => [row.layer.id, row]),
@@ -2422,8 +2434,10 @@ export function TimelineOverview(props: TimelineOverviewProps) {
   };
   const rulerLabelBaselineY = () => props.legacyMode
     ? Math.max(9, Math.min(14, overviewH() * 0.12))
-    : 14;
-  const rulerLineTopPx = () => rulerLabelBaselineY() + 2;
+    : 13;
+  const rulerLineTopPx = () => props.legacyMode
+    ? rulerLabelBaselineY() + 2
+    : timelineRulerHeaderHeightPx;
   const rulerLineBottomPx = () => canvasH() - 1;
   const clusterBadgeWidthPx = TIMELINE_OVERLAP_BADGE_WIDTH_PX;
   // Overlap lanes reserve a compact rail below the 28px block. Keeping the
@@ -2810,6 +2824,11 @@ export function TimelineOverview(props: TimelineOverviewProps) {
       aria-label="Timeline layer gutters"
       style={{ height: `${sectionLayout().contentHeight}px` }}
     >
+      <div
+        class="timelineRulerGutterCorner"
+        aria-hidden="true"
+        style={{ height: `${timelineRulerHeaderHeightPx}px` }}
+      />
       <For each={sectionLayout().sections}>
         {(section) => (
           <section
@@ -2878,6 +2897,26 @@ export function TimelineOverview(props: TimelineOverviewProps) {
               </Show>
             </div>
             <Show when={!section.collapsed}>
+              <Show when={section.kind === "Audio" && section.layers.length === 0}>
+                <div
+                  class="timelineLaneGutter timelineEmptyAudioLaneGutter"
+                  data-timeline-audio-drop=""
+                  style={{
+                    top: `${timelineSectionHeaderHeightPx}px`,
+                    height: `${timelineUserLaneHeightPx}px`,
+                  }}
+                >
+                  <button
+                    type="button"
+                    class="timelineEmptyAudioLaneTrigger"
+                    aria-label="Add Audio Clip"
+                    title="Add Audio Clip"
+                    onClick={() => void props.onAddAudioClip(null)}
+                  >
+                    <span aria-hidden="true" data-no-localize>+ Audio</span>
+                  </button>
+                </div>
+              </Show>
               <For each={section.layers}>
                 {(layer) => {
                   const cueDropState = () => cueDropStateForLayer(layer.id);
@@ -3061,6 +3100,20 @@ export function TimelineOverview(props: TimelineOverviewProps) {
           </>
         }
       >
+        <rect
+          class="timelineRulerBackground"
+          x="0"
+          y="0"
+          width={overviewW()}
+          height={timelineRulerHeaderHeightPx}
+        />
+        <line
+          class="timelineRulerBottomLine"
+          x1="0"
+          y1={timelineRulerHeaderHeightPx}
+          x2={overviewW()}
+          y2={timelineRulerHeaderHeightPx}
+        />
         <For each={sectionLayout().sections}>
           {(section) => (
             <rect
@@ -3073,6 +3126,27 @@ export function TimelineOverview(props: TimelineOverviewProps) {
             />
           )}
         </For>
+        <Show when={sectionLayout().emptyAudioLane}>
+          {(emptyLane) => (
+            <>
+              <rect
+                class="timelineEmptyAudioLaneBackground"
+                data-timeline-audio-drop=""
+                x="0"
+                y={emptyLane().top}
+                width={overviewW()}
+                height={emptyLane().height}
+              />
+              <line
+                class="timelineLaneDivider"
+                x1="0"
+                y1={emptyLane().top + emptyLane().height}
+                x2={overviewW()}
+                y2={emptyLane().top + emptyLane().height}
+              />
+            </>
+          )}
+        </Show>
         <For each={sectionLayout().laneRows}>
           {(row) => {
             const cueDropState = () => cueDropStateForLayer(row.layer.id);

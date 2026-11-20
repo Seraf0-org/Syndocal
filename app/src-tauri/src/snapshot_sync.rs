@@ -2,9 +2,9 @@
 //! Revisions identify captured snapshots globally. Keep a small recent history so
 //! independent windows can diff against their own last response without forcing full payloads.
 use protocol::{
-    ClockSnapshot, CueId, DmxOutputConfig, EffectSummary, EngineSnapshot, EngineTelemetry,
-    NodeGraphSummary, PatchedFixtureSummary, StageMapConfig, StageMapPresetSummary,
-    StageObjectSummary,
+    AttributeValueSummary, ClockSnapshot, CueId, DmxOutputConfig, EffectSummary, EngineSnapshot,
+    EngineTelemetry, FixtureId, NodeGraphSummary, PatchedFixtureSummary, StageMapConfig,
+    StageMapPresetSummary, StageObjectSummary, TimelineSnapshot,
 };
 use serde::Serialize;
 use std::{
@@ -75,6 +75,8 @@ pub(crate) struct EngineSnapshotDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) fixtures: Option<Vec<PatchedFixtureSummary>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fixture_attribute_values: Option<Vec<(FixtureId, Vec<AttributeValueSummary>)>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) cues: Option<Vec<protocol::CueSummary>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) cue_lists: Option<Vec<protocol::CueListSummary>>,
@@ -101,6 +103,8 @@ pub(crate) struct EngineSnapshotDelta {
     pub(crate) programmer: Option<protocol::ProgrammerSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) timeline: Option<protocol::TimelineSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) timeline_position_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) video: Option<protocol::VideoSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -137,6 +141,211 @@ pub(crate) struct EngineSnapshotDelta {
     pub(crate) telemetry: Option<EngineTelemetry>,
 }
 
+fn fixture_structure_equal(before: &PatchedFixtureSummary, after: &PatchedFixtureSummary) -> bool {
+    let PatchedFixtureSummary {
+        id: b_id,
+        label: b_label,
+        profile_source_path: b_profile_source_path,
+        profile_name: b_profile_name,
+        manufacturer: b_manufacturer,
+        mode_name: b_mode_name,
+        universe: b_universe,
+        address: b_address,
+        group_ids: b_group_ids,
+        position: b_position,
+        rotation: b_rotation,
+        geometries: b_geometries,
+        controls: b_controls,
+        stage_layout: b_stage_layout,
+        attribute_values: _,
+        limits: b_limits,
+        highlighted: b_highlighted,
+        soloed: b_soloed,
+        parked: b_parked,
+    } = before;
+    let PatchedFixtureSummary {
+        id: a_id,
+        label: a_label,
+        profile_source_path: a_profile_source_path,
+        profile_name: a_profile_name,
+        manufacturer: a_manufacturer,
+        mode_name: a_mode_name,
+        universe: a_universe,
+        address: a_address,
+        group_ids: a_group_ids,
+        position: a_position,
+        rotation: a_rotation,
+        geometries: a_geometries,
+        controls: a_controls,
+        stage_layout: a_stage_layout,
+        attribute_values: _,
+        limits: a_limits,
+        highlighted: a_highlighted,
+        soloed: a_soloed,
+        parked: a_parked,
+    } = after;
+    b_id == a_id
+        && b_label == a_label
+        && b_profile_source_path == a_profile_source_path
+        && b_profile_name == a_profile_name
+        && b_manufacturer == a_manufacturer
+        && b_mode_name == a_mode_name
+        && b_universe == a_universe
+        && b_address == a_address
+        && b_group_ids == a_group_ids
+        && b_position == a_position
+        && b_rotation == a_rotation
+        && b_geometries == a_geometries
+        && b_controls == a_controls
+        && b_stage_layout == a_stage_layout
+        && b_limits == a_limits
+        && b_highlighted == a_highlighted
+        && b_soloed == a_soloed
+        && b_parked == a_parked
+}
+
+fn diff_fixtures(
+    before: &[PatchedFixtureSummary],
+    after: &[PatchedFixtureSummary],
+) -> (
+    Option<Vec<PatchedFixtureSummary>>,
+    Option<Vec<(FixtureId, Vec<AttributeValueSummary>)>>,
+) {
+    if before.len() != after.len() {
+        return (Some(after.to_vec()), None);
+    }
+    let mut changed_values = Vec::new();
+    for (left, right) in before.iter().zip(after.iter()) {
+        if !fixture_structure_equal(left, right) {
+            return (Some(after.to_vec()), None);
+        }
+        if left.attribute_values != right.attribute_values {
+            changed_values.push((right.id, right.attribute_values.clone()));
+        }
+    }
+    if changed_values.is_empty() {
+        (None, None)
+    } else {
+        (None, Some(changed_values))
+    }
+}
+
+fn timeline_serialized_structure_equal(
+    before: &TimelineSnapshot,
+    after: &TimelineSnapshot,
+) -> bool {
+    let TimelineSnapshot {
+        id: b_id,
+        label: b_label,
+        layers: b_layers,
+        events: b_events,
+        automations: b_automations,
+        video_automations: b_video_automations,
+        audio: b_audio,
+        audio_clips: b_audio_clips,
+        audio_policy: b_audio_policy,
+        video_clips: b_video_clips,
+        phases: b_phases,
+        item_groups: b_item_groups,
+        loop_region: b_loop_region,
+        follow: b_follow,
+        guide_enabled: b_guide_enabled,
+        audio_offset_ms: b_audio_offset_ms,
+        audio_muted: b_audio_muted,
+        metronome_enabled: b_metronome_enabled,
+        count_in_beats: b_count_in_beats,
+        tempo_meter_map: b_tempo_meter_map,
+        tempo_meter_map_version: b_tempo_meter_map_version,
+        count_in_remaining_ms: _,
+        audio_transport_revision: _,
+        transport_epoch: _,
+        transport_generation: _,
+        active_child_transports: _,
+        loop_runtime: _,
+        follow_runtime: _,
+        guide_cues: _,
+        click_events: _,
+        click_schedule_generation: _,
+        click_queue_overflow: _,
+        playing: b_playing,
+        position_ms: _,
+        duration_ms: b_duration_ms,
+    } = before;
+    let TimelineSnapshot {
+        id: a_id,
+        label: a_label,
+        layers: a_layers,
+        events: a_events,
+        automations: a_automations,
+        video_automations: a_video_automations,
+        audio: a_audio,
+        audio_clips: a_audio_clips,
+        audio_policy: a_audio_policy,
+        video_clips: a_video_clips,
+        phases: a_phases,
+        item_groups: a_item_groups,
+        loop_region: a_loop_region,
+        follow: a_follow,
+        guide_enabled: a_guide_enabled,
+        audio_offset_ms: a_audio_offset_ms,
+        audio_muted: a_audio_muted,
+        metronome_enabled: a_metronome_enabled,
+        count_in_beats: a_count_in_beats,
+        tempo_meter_map: a_tempo_meter_map,
+        tempo_meter_map_version: a_tempo_meter_map_version,
+        count_in_remaining_ms: _,
+        audio_transport_revision: _,
+        transport_epoch: _,
+        transport_generation: _,
+        active_child_transports: _,
+        loop_runtime: _,
+        follow_runtime: _,
+        guide_cues: _,
+        click_events: _,
+        click_schedule_generation: _,
+        click_queue_overflow: _,
+        playing: a_playing,
+        position_ms: _,
+        duration_ms: a_duration_ms,
+    } = after;
+    b_id == a_id
+        && b_label == a_label
+        && b_layers == a_layers
+        && b_events == a_events
+        && b_automations == a_automations
+        && b_video_automations == a_video_automations
+        && b_audio == a_audio
+        && b_audio_clips == a_audio_clips
+        && b_audio_policy == a_audio_policy
+        && b_video_clips == a_video_clips
+        && b_phases == a_phases
+        && b_item_groups == a_item_groups
+        && b_loop_region == a_loop_region
+        && b_follow == a_follow
+        && b_guide_enabled == a_guide_enabled
+        && b_audio_offset_ms == a_audio_offset_ms
+        && b_audio_muted == a_audio_muted
+        && b_metronome_enabled == a_metronome_enabled
+        && b_count_in_beats == a_count_in_beats
+        && b_tempo_meter_map == a_tempo_meter_map
+        && b_tempo_meter_map_version == a_tempo_meter_map_version
+        && b_playing == a_playing
+        && b_duration_ms == a_duration_ms
+}
+
+fn diff_timeline(
+    before: &TimelineSnapshot,
+    after: &TimelineSnapshot,
+) -> (Option<TimelineSnapshot>, Option<u64>) {
+    if !timeline_serialized_structure_equal(before, after) {
+        (Some(after.clone()), None)
+    } else if before.position_ms != after.position_ms {
+        (None, Some(after.position_ms))
+    } else {
+        (None, None)
+    }
+}
+
 pub(crate) fn engine_snapshot_delta(
     before: &EngineSnapshot,
     after: &EngineSnapshot,
@@ -146,8 +355,11 @@ pub(crate) fn engine_snapshot_delta(
             (before.$field != after.$field).then(|| after.$field.clone())
         };
     }
+    let (fixtures, fixture_attribute_values) = diff_fixtures(&before.fixtures, &after.fixtures);
+    let (timeline, timeline_position_ms) = diff_timeline(&before.timeline, &after.timeline);
     EngineSnapshotDelta {
-        fixtures: changed!(fixtures),
+        fixtures,
+        fixture_attribute_values,
         cues: changed!(cues),
         cue_lists: changed!(cue_lists),
         palettes: changed!(palettes),
@@ -161,7 +373,8 @@ pub(crate) fn engine_snapshot_delta(
         group_colors: changed!(group_colors),
         active_fade: (before.active_fade != after.active_fade).then(|| after.active_fade.clone()),
         programmer: changed!(programmer),
-        timeline: changed!(timeline),
+        timeline,
+        timeline_position_ms,
         video: changed!(video),
         effects: changed!(effects),
         node_graphs: changed!(node_graphs),

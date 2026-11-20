@@ -1,4 +1,4 @@
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createMemo, createSignal, For, Index, onCleanup, onMount, Show } from "solid-js";
 import type { FixtureLiveColorSegment } from "../fixtureLiveColor";
 import type {
   MappingFixtureSegmentOrder,
@@ -278,78 +278,79 @@ export function StagePreview2D(props: StagePreview2DProps) {
         )}
       </For>
       <Show when={props.showBeams !== false}>
-        <For each={props.fixtures.filter((fixture) =>
-          fixture.liveColorApplied !== false && fixture.intensity > 0)}>
+        <Index each={props.fixtures}>
           {(fixture) => (
-            <For each={fixture.beams ?? [{
-              cellIndex: 1,
-              points: fixture.beamPoints,
-              intensity: fixture.intensity,
-              color: fixture.color,
-            }]}>
-              {(beam) => (
-                <polygon
-                  class="stageBeam"
-                  data-stage-beam-fixture-id={fixture.id}
-                  data-stage-beam-cell={beam.cellIndex}
-                  points={beam.points}
-                  fill={beam.color}
-                  opacity={Math.max(props.beamMinOpacity, beam.intensity * props.beamIntensityScale)}
-                ><title>{fixture.beamDescription}</title></polygon>
-              )}
-            </For>
+            <Show when={fixture().liveColorApplied !== false && fixture().intensity > 0}>
+              <Index each={fixture().beams ?? [{
+                cellIndex: 1,
+                points: fixture().beamPoints,
+                intensity: fixture().intensity,
+                color: fixture().color,
+              }]}>
+                {(beam) => (
+                  <polygon
+                    class="stageBeam"
+                    data-stage-beam-fixture-id={fixture().id}
+                    data-stage-beam-cell={beam().cellIndex}
+                    points={beam().points}
+                    fill={beam().color}
+                    opacity={Math.max(props.beamMinOpacity, beam().intensity * props.beamIntensityScale)}
+                  ><title>{fixture().beamDescription}</title></polygon>
+                )}
+              </Index>
+            </Show>
           )}
-        </For>
+        </Index>
       </Show>
-      <For each={props.fixtures}>
+      <Index each={props.fixtures}>
         {(fixture) => {
           const className = () => [
             "stageFixture",
             "stageFixtureBlock",
-            `kind-${fixture.visualKind}`,
-            props.selectedFixtureId === fixture.id ? "selected picked" : "",
-            props.selectedFixtureGroupFilter && fixture.inGroupFilter ? "groupMatch" : "",
-            props.selectedFixtureTypeFilter && fixture.typeKey === props.selectedFixtureTypeFilter ? "typeMatch" : "",
-            fixture.highlighted ? "highlighted" : "",
-            fixture.soloed ? "soloed" : "",
-            fixture.parked ? "parked" : "",
+            `kind-${fixture().visualKind}`,
+            props.selectedFixtureId === fixture().id ? "selected picked" : "",
+            props.selectedFixtureGroupFilter && fixture().inGroupFilter ? "groupMatch" : "",
+            props.selectedFixtureTypeFilter && fixture().typeKey === props.selectedFixtureTypeFilter ? "typeMatch" : "",
+            fixture().highlighted ? "highlighted" : "",
+            fixture().soloed ? "soloed" : "",
+            fixture().parked ? "parked" : "",
           ].filter(Boolean).join(" ");
           return (
             <g
               class={className()}
-              data-stage-fixture-id={fixture.id}
-              data-live-color-applied={fixture.liveColorApplied ? "true" : "false"}
-              data-live-color-source={fixture.liveColorValueSource ?? "none"}
-              data-live-segment-count={fixture.liveSegments?.length ?? 1}
-              data-live-segment-columns={fixture.segmentColumns}
-              data-live-segment-rows={fixture.segmentRows}
-              data-live-segment-order={fixture.segmentOrder}
-              transform={`translate(${fixture.x} ${fixture.z}) rotate(${fixture.yaw})`}
+              data-stage-fixture-id={fixture().id}
+              data-live-color-applied={fixture().liveColorApplied ? "true" : "false"}
+              data-live-color-source={fixture().liveColorValueSource ?? "none"}
+              data-live-segment-count={fixture().liveSegments?.length ?? 1}
+              data-live-segment-columns={fixture().segmentColumns}
+              data-live-segment-rows={fixture().segmentRows}
+              data-live-segment-order={fixture().segmentOrder}
+              transform={`translate(${fixture().x} ${fixture().z}) rotate(${fixture().yaw})`}
               onPointerDown={(event) => {
                 event.stopPropagation();
-                props.onSelectFixture(fixture.id);
+                props.onSelectFixture(fixture().id);
               }}
-              onPointerEnter={() => setHoveredFixtureId(fixture.id)}
+              onPointerEnter={() => setHoveredFixtureId(fixture().id)}
               onPointerLeave={() =>
-                setHoveredFixtureId((current) => current === fixture.id ? null : current)
+                setHoveredFixtureId((current) => current === fixture().id ? null : current)
               }
             >
               <StageFixtureGlyph
-                visualKind={fixture.visualKind}
-                width={fixture.width}
-                height={fixture.height}
-                color={fixture.color}
-                segments={fixture.liveSegments}
-                segmentColumns={fixture.segmentColumns}
-                segmentRows={fixture.segmentRows}
-                segmentOrder={fixture.segmentOrder}
+                visualKind={fixture().visualKind}
+                width={fixture().width}
+                height={fixture().height}
+                color={fixture().color}
+                segments={fixture().liveSegments}
+                segmentColumns={fixture().segmentColumns}
+                segmentRows={fixture().segmentRows}
+                segmentOrder={fixture().segmentOrder}
                 hitTargetRadius={6}
-                title={`${fixture.label} / ${fixture.dmxLabel} / ${fixture.groupLabel}`}
+                title={`${fixture().label} / ${fixture().dmxLabel} / ${fixture().groupLabel}`}
               />
             </g>
           );
         }}
-      </For>
+      </Index>
       <For each={labelLayout().labels}>
         {(layout) => (
           <StageFixtureLabel

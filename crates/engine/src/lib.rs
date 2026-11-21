@@ -19967,6 +19967,26 @@ struct PendingCueTrigger {
     dispatch: Option<CueDispatchEntry>,
     child_transport_id: Option<RuntimeChildTransportId>,
     direct_child_anchor_at: Option<Instant>,
+    /// Main-Timeline Scene Block that issued this trigger (static layering).
+    timeline_event_id: Option<TimelineEventId>,
+}
+
+/// A main-Timeline Scene Block whose static values were written, captured at
+/// its trigger so layer resolution never searches the whole Timeline.
+#[derive(Debug, Clone)]
+struct TimelineStaticHolder {
+    event_id: TimelineEventId,
+    cue_id: CueId,
+    layer_order: u32,
+    start_ms: u64,
+    end_ms: u64,
+    values: HashMap<(FixtureId, String), u16>,
+}
+
+impl TimelineStaticHolder {
+    fn covers(&self, position_ms: u64) -> bool {
+        self.start_ms <= position_ms && position_ms < self.end_ms
+    }
 }
 
 struct CueStartContext {
@@ -19978,6 +19998,7 @@ struct CueStartContext {
     timeline_effect_activation: Option<PendingTimelineEffectActivation>,
     child_transport_id: Option<RuntimeChildTransportId>,
     direct_child_anchor_at: Option<Instant>,
+    timeline_event_id: Option<TimelineEventId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21473,6 +21494,10 @@ struct EngineRuntime {
     parked_fixture_values: HashMap<FixtureId, HashMap<String, u16>>,
     values: FixtureValueLayers,
     cue_value_origins: HashMap<(FixtureId, String), CueListId>,
+    /// Main-Timeline Scene Blocks whose static values were actually written,
+    /// in trigger order. Only a holder whose span still contains the playhead
+    /// takes part in layer resolution, so stale entries are inert.
+    timeline_static_holders: Vec<TimelineStaticHolder>,
     /// Authored effect enable flags under Cue playback overrides
     /// (DEC-PLAYBACK-LAYER-001). Fixture levels keep theirs inside `values`,
     /// node graphs and video outputs on their runtime entries.
@@ -21928,6 +21953,7 @@ impl EngineRuntime {
             parked_fixture_values: HashMap::new(),
             values: FixtureValueLayers::default(),
             cue_value_origins: HashMap::new(),
+            timeline_static_holders: Vec::new(),
             effect_enabled_under_playback: HashMap::new(),
             programmer_enabled: false,
             programmer_blind: false,
@@ -35701,10 +35727,12 @@ impl EngineRuntime {
                 );
             }
         }
+        // Top row first, bottom row last: the bottom layer is the final
+        // writer at a shared timestamp, so the lower Timeline layer wins.
         events.sort_by(|left, right| {
             left.time_ms
                 .cmp(&right.time_ms)
-                .then_with(|| right.layer_order.cmp(&left.layer_order))
+                .then_with(|| left.layer_order.cmp(&right.layer_order))
                 .then_with(|| left.id.cmp(&right.id))
         });
         let required_due_capacity = events.iter().fold(0_usize, |total, event| {
@@ -36875,6 +36903,7 @@ impl EngineRuntime {
         source_loop_fill: Option<bool>,
     ) {
         let end = range.end().min(self.step_activations.len());
+        let pushed = range.start.min(end) < end;
         for index in range.start.min(end)..end {
             let activation = &mut self.step_activations[index];
             let was_inactive = activation.key.is_none();
@@ -36889,6 +36918,14 @@ impl EngineRuntime {
                     .retain(|candidate| *candidate != index);
                 self.active_step_activation_indices.push(index);
             }
+        }
+        if pushed && matches!(key, RuntimeEffectActivationKey::Timeline { .. }) {
+            let mut indices = std::mem::take(&mut self.active_step_activation_indices);
+            let activations = &self.step_activations;
+            order_timeline_activations_by_layer(&mut indices, &self.timeline_events, |index| {
+                activations.get(index).and_then(|activation| activation.key)
+            });
+            self.active_step_activation_indices = indices;
         }
     }
 
@@ -36993,6 +37030,7 @@ impl EngineRuntime {
         source_loop_fill: Option<bool>,
     ) {
         let end = range.end().min(self.effect_activations.len());
+        let mut pushed = false;
         for index in range.start.min(end)..end {
             let activation = &mut self.effect_activations[index];
             let was_inactive = activation.key.is_none();
@@ -37004,7 +37042,16 @@ impl EngineRuntime {
             clear_runtime_effect_caches(&activation.effect.kind);
             if was_inactive {
                 self.active_effect_activation_indices.push(index);
+                pushed = true;
             }
+        }
+        if pushed && matches!(key, RuntimeEffectActivationKey::Timeline { .. }) {
+            let mut indices = std::mem::take(&mut self.active_effect_activation_indices);
+            let activations = &self.effect_activations;
+            order_timeline_activations_by_layer(&mut indices, &self.timeline_events, |index| {
+                activations.get(index).and_then(|activation| activation.key)
+            });
+            self.active_effect_activation_indices = indices;
         }
     }
 
@@ -37093,6 +37140,223 @@ impl EngineRuntime {
             .retain(|index| *index < range.start || *index >= end);
     }
 
+    /// Every attribute a Scene recall writes: palette and fixture targets, and
+    /// for a non-tracking Scene every patched control at its default.
+    fn cue_static_target_values(&self, cue: &RuntimeCue) -> HashMap<(FixtureId, String), u16> {
+        let mut values = if cue.tracking {
+            HashMap::new()
+        } else {
+            self.fixtures
+                .iter()
+                .flat_map(|fixture| {
+                    fixture.profile.dmx_modes[fixture.mode_index]
+                        .controls
+                        .iter()
+                        .map(|control| {
+                            (
+                                (fixture.id, control.attribute.clone()),
+                                control.default_value,
+                            )
+                        })
+                })
+                .collect::<HashMap<_, _>>()
+        };
+        values.extend(self.cue_palette_target_values(&cue.palette_targets));
+        values.extend(cue_target_values(&cue.targets));
+        values
+    }
+
+    fn timeline_event_layer_order(&self, event_id: TimelineEventId) -> Option<u32> {
+        self.timeline_events
+            .iter()
+            .find(|event| event.id == event_id)
+            .map(|event| event.layer_order)
+    }
+
+    /// Attributes held by active Scene Blocks on layers below `order`.
+    fn timeline_static_keys_held_below(
+        &self,
+        event_id: TimelineEventId,
+        order: u32,
+    ) -> HashSet<(FixtureId, String)> {
+        self.current_timeline_static_holders(event_id, move |stored| stored > order)
+            .filter(|(_, layer_order)| *layer_order > order)
+            .flat_map(|(holder, _)| holder.values.keys().cloned())
+            .collect()
+    }
+
+    /// Holders other than `event_id` that are valid against the current
+    /// Timeline right now: the block still exists for the same Scene, is not
+    /// muted, has a length and contains the playhead. Yields the current layer
+    /// order, so edits, mutes and wholesale Timeline replacement (bank switch,
+    /// project load, rollback) can never leave a stale block shadowing others.
+    /// `stored_order` pre-filters on the recorded layer order (kept current by
+    /// `reconcile_timeline_static_holders`) before the per-holder lookup.
+    fn current_timeline_static_holders(
+        &self,
+        event_id: TimelineEventId,
+        stored_order: impl Fn(u32) -> bool + 'static,
+    ) -> impl Iterator<Item = (&TimelineStaticHolder, u32)> + '_ {
+        let position = self.timeline_position_ms;
+        self.timeline_static_holders
+            .iter()
+            .filter(move |holder| {
+                holder.event_id != event_id
+                    && stored_order(holder.layer_order)
+                    && holder.covers(position)
+            })
+            .filter_map(move |holder| {
+                let event = self
+                    .timeline_events
+                    .iter()
+                    .find(|event| event.id == holder.event_id)?;
+                (event.cue_id == holder.cue_id
+                    && event.duration_ms > 0
+                    && !event.layer_muted_effective
+                    && event.time_ms <= position
+                    && position < timeline_event_end_ms(event))
+                .then_some((holder, event.layer_order))
+            })
+    }
+
+    /// Re-anchor holders after the Timeline's events or lanes changed: drop
+    /// blocks that vanished, changed Scene, lost their length or were muted,
+    /// and pick up new span bounds and layer order. Runs on edits only.
+    fn reconcile_timeline_static_holders(&mut self) {
+        if self.timeline_static_holders.is_empty() {
+            return;
+        }
+        let wanted = self
+            .timeline_static_holders
+            .iter()
+            .map(|holder| holder.event_id)
+            .collect::<HashSet<_>>();
+        let current = self
+            .timeline_events
+            .iter()
+            .filter(|event| wanted.contains(&event.id))
+            .map(|event| {
+                (
+                    event.id,
+                    (
+                        event.cue_id,
+                        event.layer_order,
+                        event.time_ms,
+                        timeline_event_end_ms(event),
+                        event.duration_ms > 0 && !event.layer_muted_effective,
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        self.timeline_static_holders.retain_mut(|holder| {
+            let Some((cue_id, layer_order, start_ms, end_ms, live)) =
+                current.get(&holder.event_id).copied()
+            else {
+                return false;
+            };
+            if cue_id != holder.cue_id || !live {
+                return false;
+            }
+            holder.layer_order = layer_order;
+            holder.start_ms = start_ms;
+            holder.end_ms = end_ms;
+            true
+        });
+    }
+
+    /// What each attribute shows once the block at `order` stops holding it:
+    /// the value of the lowest remaining active block at or above that layer
+    /// (the later trigger wins within one layer).
+    fn timeline_static_values_revealed_by(
+        &self,
+        event_id: TimelineEventId,
+        order: u32,
+    ) -> HashMap<(FixtureId, String), u16> {
+        let mut revealed: HashMap<(FixtureId, String), (u32, u16)> = HashMap::new();
+        for (holder, layer_order) in
+            self.current_timeline_static_holders(event_id, move |stored| stored <= order)
+        {
+            if layer_order > order {
+                continue;
+            }
+            for (key, value) in &holder.values {
+                match revealed.get(key) {
+                    Some((best, _)) if *best > layer_order => {}
+                    _ => {
+                        revealed.insert(key.clone(), (layer_order, *value));
+                    }
+                }
+            }
+        }
+        revealed
+            .into_iter()
+            .map(|(key, (_, value))| (key, value))
+            .collect()
+    }
+
+    fn note_timeline_static_holder(
+        &mut self,
+        event_id: TimelineEventId,
+        values: HashMap<(FixtureId, String), u16>,
+    ) {
+        let position = self.timeline_position_ms;
+        // Drop holders that left the playhead (seek, loop, stop) so the list
+        // stays bounded by the blocks actually under it.
+        self.timeline_static_holders
+            .retain(|holder| holder.event_id != event_id && holder.covers(position));
+        let Some(event) = self
+            .timeline_events
+            .iter()
+            .find(|event| event.id == event_id)
+        else {
+            return;
+        };
+        if event.duration_ms == 0 || values.is_empty() {
+            return;
+        }
+        self.timeline_static_holders.push(TimelineStaticHolder {
+            event_id,
+            cue_id: event.cue_id,
+            layer_order: event.layer_order,
+            start_ms: event.time_ms,
+            end_ms: timeline_event_end_ms(event),
+            values,
+        });
+    }
+
+    /// End of a main-Timeline Scene Block: attributes it was winning return to
+    /// the lowest remaining active block above it, at once.
+    fn release_timeline_static_holder(&mut self, event_id: TimelineEventId) {
+        let Some(index) = self
+            .timeline_static_holders
+            .iter()
+            .position(|holder| holder.event_id == event_id)
+        else {
+            return;
+        };
+        let ended = self.timeline_static_holders.remove(index);
+        if self.timeline_static_holders.is_empty() {
+            return;
+        }
+        let revealed = self.timeline_static_values_revealed_by(event_id, ended.layer_order);
+        let held_below = self.timeline_static_keys_held_below(event_id, ended.layer_order);
+        for key in ended.values.keys() {
+            if held_below.contains(key) {
+                continue;
+            }
+            let Some(value) = revealed.get(key).copied() else {
+                continue;
+            };
+            if let Some(fade) = self.active_fade.as_mut() {
+                fade.lighting_owners.remove(key);
+                fade.start_values.remove(key);
+                fade.target_values.remove(key);
+                fade.attribute_timings.remove(key);
+            }
+            self.values.set_playback(key, value);
+        }
+    }
+
     fn start_timeline_block_fade_out(&mut self, event_index: usize, now: Instant) {
         let Some(event) = self.timeline_events.get(event_index).cloned() else {
             return;
@@ -37113,6 +37377,7 @@ impl EngineRuntime {
             .into_iter()
             .chain(cue_target_values(&cue.targets))
             .collect::<HashMap<_, _>>();
+        let held_below = self.timeline_static_keys_held_below(event.id, event.layer_order);
         let mut start_values = HashMap::new();
         for fixture in &self.fixtures {
             let Some(mode) = fixture.profile.dmx_modes.get(fixture.mode_index) else {
@@ -37133,6 +37398,9 @@ impl EngineRuntime {
                 );
                 let effective_value =
                     self.apply_effects(fixture, &control.attribute, step_value, now);
+                if held_below.contains(&key) {
+                    continue;
+                }
                 if cue_values.contains_key(&key) || effective_value != base_value {
                     start_values.insert(key, effective_value);
                 }
@@ -37146,9 +37414,12 @@ impl EngineRuntime {
             self.values.set_playback(key, *value);
         }
         let duration = Duration::from_millis(event.fade_out_ms);
+        // A block above that is still holding an attribute is revealed rather
+        // than faded to black.
+        let revealed = self.timeline_static_values_revealed_by(event.id, event.layer_order);
         let target_values = start_values
             .keys()
-            .map(|key| (key.clone(), 0))
+            .map(|key| (key.clone(), revealed.get(key).copied().unwrap_or(0)))
             .collect::<HashMap<_, _>>();
         let attribute_timings = start_values
             .keys()
@@ -40359,12 +40630,14 @@ impl EngineRuntime {
     }
 
     fn sort_timeline_events(&mut self) {
+        // Top row first, bottom row last: the lower Timeline layer wins.
         self.timeline_events.sort_by(|left, right| {
             left.time_ms
                 .cmp(&right.time_ms)
-                .then_with(|| right.layer_order.cmp(&left.layer_order))
+                .then_with(|| left.layer_order.cmp(&right.layer_order))
                 .then_with(|| left.id.cmp(&right.id))
         });
+        self.reconcile_timeline_static_holders();
         self.timeline_due_cues.clear();
         let required_due_capacity = self.timeline_events.iter().fold(0_usize, |total, event| {
             total.saturating_add(
@@ -40741,6 +41014,7 @@ impl EngineRuntime {
             dispatch: Some(dispatch),
             child_transport_id: None,
             direct_child_anchor_at: None,
+            timeline_event_id: Some(event_id),
         });
         if dispatch.pre_wait_ms == 0 {
             self.advance_pending_cue(now);
@@ -40776,6 +41050,7 @@ impl EngineRuntime {
                 dispatch: None,
                 child_transport_id: None,
                 direct_child_anchor_at: Some(now),
+                timeline_event_id: None,
             });
             self.last_error = None;
         }
@@ -40864,6 +41139,7 @@ impl EngineRuntime {
                     timeline_effect_activation: pending.timeline_effect_activation,
                     child_transport_id: pending.child_transport_id,
                     direct_child_anchor_at: pending.direct_child_anchor_at,
+                    timeline_event_id: pending.timeline_event_id,
                 },
             );
         }
@@ -40888,6 +41164,7 @@ impl EngineRuntime {
                 timeline_effect_activation: None,
                 child_transport_id: None,
                 direct_child_anchor_at: (source == PendingCueTriggerSource::Manual).then_some(now),
+                timeline_event_id: None,
             },
         );
     }
@@ -40907,7 +41184,12 @@ impl EngineRuntime {
             timeline_effect_activation,
             child_transport_id,
             direct_child_anchor_at,
+            timeline_event_id,
         } = context;
+        // Static layering applies to main-Timeline Scene Blocks only.
+        let timeline_event_id = timeline_event_id.filter(|_| {
+            source == PendingCueTriggerSource::Timeline && child_transport_id.is_none()
+        });
         if repeat_count == 0 {
             return;
         }
@@ -41008,6 +41290,7 @@ impl EngineRuntime {
                 child_transport_id: None,
                 direct_child_anchor_at: (source == PendingCueTriggerSource::Manual)
                     .then_some(now + Duration::from_millis(follow_ms)),
+                timeline_event_id: None,
             })
         });
         if let Some(follow) = follow {
@@ -41088,32 +41371,27 @@ impl EngineRuntime {
             let step_clock = self.cue_live_realtime_step_clock(cue_index, now);
             self.activate_step_range(cue.step_activation_range, key, step_clock, 1.0, None);
         }
-        let mut target_values = if cue.tracking {
-            HashMap::new()
-        } else {
-            self.fixtures
-                .iter()
-                .flat_map(|fixture| {
-                    fixture.profile.dmx_modes[fixture.mode_index]
-                        .controls
-                        .iter()
-                        .map(|control| {
-                            (
-                                (fixture.id, control.attribute.clone()),
-                                control.default_value,
-                            )
-                        })
-                })
-                .collect::<HashMap<_, _>>()
-        };
-        target_values.extend(self.cue_palette_target_values(&cue.palette_targets));
-        target_values.extend(cue_target_values(&cue.targets));
+        let mut target_values = self.cue_static_target_values(&cue);
+        // Lower Timeline layers win: a main-Timeline Scene Block never writes
+        // an attribute that an active block on a lower layer is holding.
+        let held_below = timeline_event_id.and_then(|event_id| {
+            let order = self.timeline_event_layer_order(event_id)?;
+            let held = self.timeline_static_keys_held_below(event_id, order);
+            self.note_timeline_static_holder(event_id, target_values.clone());
+            Some(held)
+        });
+        if let Some(held) = &held_below {
+            target_values.retain(|key, _| !held.contains(key));
+        }
         let cue_target_keys = target_values.keys().cloned().collect::<HashSet<_>>();
         if !self.cue_release_values.contains_key(&cue_id) {
             let cue_release_values = self.cue_default_release_values(&cue);
             self.cue_release_values.insert(cue_id, cue_release_values);
         }
         for (key, value) in &release_plan.target_values {
+            if held_below.as_ref().is_some_and(|held| held.contains(key)) {
+                continue;
+            }
             target_values.entry(key.clone()).or_insert(*value);
         }
         for key in target_values.keys() {
@@ -43193,6 +43471,7 @@ impl EngineRuntime {
                 dispatch: Some(dispatch),
                 child_transport_id: Some(transport_id),
                 direct_child_anchor_at: None,
+                timeline_event_id: None,
             });
         }
         has_immediate_trigger
@@ -47662,6 +47941,7 @@ impl EngineRuntime {
                 .unwrap_or_default();
             if matches!(occurrence.kind, TimelineCueOccurrenceKind::End) {
                 self.finish_timeline_block_fade_out(occurrence.event_id);
+                self.release_timeline_static_holder(occurrence.event_id);
                 self.deactivate_effect_range(range);
                 self.deactivate_step_range(step_range);
                 self.pending_cues.retain(|pending| {
@@ -47755,6 +48035,7 @@ impl EngineRuntime {
                 dispatch: Some(dispatch),
                 child_transport_id: None,
                 direct_child_anchor_at: None,
+                timeline_event_id: Some(occurrence.event_id),
             });
         }
         // Preserve the legacy zero-pre-wait recall boundary, including command-path timecode
@@ -47794,17 +48075,17 @@ impl EngineRuntime {
                 }
                 Some((
                     end_ms,
-                    event.layer_order,
+                    std::cmp::Reverse(event.layer_order),
                     std::cmp::Reverse(event.id),
                     event_index,
                     target_id,
                 ))
             })
-            // Cue dispatch at one timestamp runs bottom-to-top, then low-to-high event id.
-            // A jump is singular, so select that sequence's final writer: the topmost layer,
-            // then the highest event id within that layer.
-            .min_by_key(|(end_ms, layer_order, reverse_event_id, _, _)| {
-                (*end_ms, *layer_order, *reverse_event_id)
+            // Cue dispatch at one timestamp runs top-to-bottom, then low-to-high event id.
+            // A jump is singular, so select that sequence's final writer: the bottommost
+            // layer, then the highest event id within that layer.
+            .min_by_key(|(end_ms, reverse_layer_order, reverse_event_id, _, _)| {
+                (*end_ms, *reverse_layer_order, *reverse_event_id)
             })?;
         let target_event_index = self
             .timeline_events
@@ -56506,6 +56787,50 @@ fn sanitize_timeline_layer_label(layer: &mut TimelineLayerSummary) -> Result<(),
     Ok(())
 }
 
+/// Overlapping Timeline Scene Blocks resolve by layer, not by start time: the
+/// lower Timeline layer (higher `layer_order`) is applied last and wins.
+/// Only the slots holding main-Timeline activations are permuted; live (Bank)
+/// and child-Timeline activations keep their positions, and blocks on one
+/// layer keep their trigger order. Runs when an activation starts, never per
+/// output tick.
+fn order_timeline_activations_by_layer(
+    indices: &mut [usize],
+    events: &[RuntimeTimelineEvent],
+    key_of: impl Fn(usize) -> Option<RuntimeEffectActivationKey>,
+) {
+    let mut slots = Vec::new();
+    let mut keyed = Vec::new();
+    for (slot, index) in indices.iter().enumerate() {
+        if let Some(RuntimeEffectActivationKey::Timeline {
+            event_id, cue_id, ..
+        }) = key_of(*index)
+        {
+            slots.push(slot);
+            keyed.push(((event_id, cue_id), *index));
+        }
+    }
+    if keyed.len() < 2 {
+        return;
+    }
+    let wanted = keyed.iter().map(|(key, _)| *key).collect::<HashSet<_>>();
+    let orders = events
+        .iter()
+        .filter(|event| wanted.contains(&(event.id, event.cue_id)))
+        .map(|event| ((event.id, event.cue_id), event.layer_order))
+        .collect::<HashMap<_, _>>();
+    let mut entries = keyed
+        .into_iter()
+        .map(|(key, index)| (orders.get(&key).copied().unwrap_or(0), index))
+        .collect::<Vec<_>>();
+    if entries.windows(2).all(|pair| pair[0].0 <= pair[1].0) {
+        return;
+    }
+    entries.sort_by_key(|(order, _)| *order);
+    for (slot, (_, index)) in slots.into_iter().zip(entries) {
+        indices[slot] = index;
+    }
+}
+
 fn normalize_timeline_layer_orders(layers: &mut [TimelineLayerSummary]) -> Result<(), String> {
     let mut ids = HashSet::with_capacity(layers.len());
     for layer in layers.iter_mut() {
@@ -57487,7 +57812,7 @@ fn try_collect_aligned_timeline_block_occurrences(
             first_iteration,
             last_iteration,
         );
-        let dispatch_key = (std::cmp::Reverse(event.layer_order), event.id);
+        let dispatch_key = (event.layer_order, event.id);
         if grid.is_some_and(|grid| grid != event_grid)
             || last_dispatch_key.is_some_and(|last_key| dispatch_key <= last_key)
         {
@@ -57652,11 +57977,12 @@ fn collect_timeline_cue_occurrences_between(
             });
         }
     }
+    // Top row first, bottom row last: the lower Timeline layer is the final writer.
     due.sort_unstable_by(|left, right| {
         left.time_ms
             .cmp(&right.time_ms)
             .then_with(|| left.kind.cmp(&right.kind))
-            .then_with(|| right.layer_order.cmp(&left.layer_order))
+            .then_with(|| left.layer_order.cmp(&right.layer_order))
             .then_with(|| left.event_id.cmp(&right.event_id))
     });
 }
@@ -124507,6 +124833,7 @@ mod tests {
             dispatch: None,
             child_transport_id: Some(RuntimeChildTransportId::Nested(0)),
             direct_child_anchor_at: None,
+            timeline_event_id: None,
         });
         runtime.advance_timeline_follow(now + Duration::from_millis(50));
 
@@ -126873,6 +127200,7 @@ mod tests {
             dispatch: None,
             child_transport_id: None,
             direct_child_anchor_at: None,
+            timeline_event_id: None,
         });
         runtime.apply_command(EngineCommand::LoadProjectSnapshot(snapshot.clone()));
         assert_eq!(runtime.timeline_evaluated_boundary_position_ms, None);
@@ -127640,6 +127968,7 @@ mod tests {
                 dispatch: None,
                 child_transport_id: None,
                 direct_child_anchor_at: None,
+                timeline_event_id: None,
             });
         }
         assert_eq!(
@@ -130952,6 +131281,7 @@ mod tests {
             dispatch: None,
             child_transport_id: None,
             direct_child_anchor_at: None,
+            timeline_event_id: None,
         });
         runtime.timeline_playing = true;
         runtime.timeline_position_ms = 900;
@@ -131738,7 +132068,7 @@ mod tests {
     }
 
     #[test]
-    fn timeline_layer_dispatch_orders_time_then_layer_desc_then_event_id() {
+    fn timeline_layer_dispatch_orders_time_then_top_to_bottom_then_event_id() {
         let mut runtime = runtime_with_lfo_effects(&[]);
         for cue_id in 1..=3 {
             create_effect_only_cue(&mut runtime, cue_id, Vec::new());
@@ -131765,20 +132095,609 @@ mod tests {
             None,
             &mut due,
         );
+        // Top row (order 0) first and the bottom row last, so the lower
+        // Timeline layer is the final writer.
         assert_eq!(
             timeline_trigger_tuples(&due),
-            vec![(0, 30, 3, 1), (0, 10, 1, 0), (0, 20, 2, 0)]
+            vec![(0, 10, 1, 0), (0, 20, 2, 0), (0, 30, 3, 1)]
         );
 
         runtime.timeline_playing = true;
         runtime.timeline_playhead_boundary_armed = true;
         runtime.last_tick_interval = Duration::from_millis(1);
         runtime.advance_timeline(Instant::now());
-        assert_eq!(runtime.active_cue_id, Some(2));
+        assert_eq!(runtime.active_cue_id, Some(3));
+    }
+
+    /// Square LFO whose output at the recall instant is `high` for phase 0.25
+    /// and `low` for phase 0.75 (see the activation-scoped recall test).
+    fn bank_layer_test_cue(
+        runtime: &mut EngineRuntime,
+        cue_id: CueId,
+        effect_id: EffectId,
+        phase: f32,
+    ) {
+        create_effect_only_cue(
+            runtime,
+            cue_id,
+            vec![owned_lfo_target(
+                effect_id,
+                test_lfo_request(
+                    &format!("Scene {cue_id}"),
+                    LfoShape::Square,
+                    1_000,
+                    phase,
+                    EffectBlendMode::Override,
+                    0,
+                    u16::MAX,
+                ),
+            )],
+        );
+    }
+
+    fn move_test_cue_to_bank(runtime: &mut EngineRuntime, cue_id: CueId, cue_list_id: CueListId) {
+        if !runtime.cue_lists.iter().any(|list| list.id == cue_list_id) {
+            runtime.cue_lists.push(CueListSummary {
+                id: cue_list_id,
+                label: format!("Bank {cue_list_id}"),
+                active_cue_id: None,
+            });
+        }
+        runtime
+            .cues
+            .iter_mut()
+            .find(|cue| cue.id == cue_id)
+            .expect("test cue exists")
+            .cue_list_id = cue_list_id;
+    }
+
+    fn active_cue_list_scene_ids(runtime: &EngineRuntime) -> Vec<CueId> {
+        let mut ids = runtime
+            .active_effect_activation_indices
+            .iter()
+            .filter_map(|index| match runtime.effect_activations[*index].key {
+                Some(RuntimeEffectActivationKey::CueList { cue_id, .. }) => Some(cue_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids
     }
 
     #[test]
-    fn timeline_layer_jump_tiebreak_uses_top_layer_then_highest_event_id() {
+    fn live_scenes_layer_across_banks_and_replace_only_within_their_bank() {
+        let mut runtime = runtime_with_lfo_effects(&[]);
+        bank_layer_test_cue(&mut runtime, 1, 101, 0.25);
+        bank_layer_test_cue(&mut runtime, 2, 102, 0.75);
+        bank_layer_test_cue(&mut runtime, 3, 103, 0.25);
+        move_test_cue_to_bank(&mut runtime, 2, 2);
+        let now = Instant::now();
+
+        runtime.request_cue(1, now);
+        runtime.request_cue(2, now);
+        assert_eq!(
+            active_cue_list_scene_ids(&runtime),
+            vec![1, 2],
+            "Bank 2 must not stop Bank 1"
+        );
+        let active = |runtime: &EngineRuntime, bank: CueListId| {
+            runtime
+                .cue_lists
+                .iter()
+                .find(|list| list.id == bank)
+                .and_then(|list| list.active_cue_id)
+        };
+        assert_eq!(
+            (active(&runtime, 1), active(&runtime, 2)),
+            (Some(1), Some(2))
+        );
+
+        // A new scene in Bank 1 replaces Bank 1's scene and leaves Bank 2 running.
+        runtime.request_cue(3, now);
+        assert_eq!(active_cue_list_scene_ids(&runtime), vec![2, 3]);
+        assert_eq!(
+            (active(&runtime, 1), active(&runtime, 2)),
+            (Some(3), Some(2))
+        );
+    }
+
+    #[test]
+    fn timeline_scenes_of_one_bank_overlap_on_layers_without_bank_release() {
+        let mut runtime = runtime_with_lfo_effects(&[]);
+        bank_layer_test_cue(&mut runtime, 1, 101, 0.25);
+        bank_layer_test_cue(&mut runtime, 2, 102, 0.75);
+        runtime.timeline_layers = vec![
+            timeline_test_layer(10, 0, false, false, false, TimelineLayerKind::Lighting),
+            timeline_test_layer(11, 1, false, false, false, TimelineLayerKind::Lighting),
+        ];
+        // Same Bank, same instant, overlapping spans on two Lighting layers.
+        runtime.timeline_events = vec![
+            timeline_test_event(10, 1, 0, 10, 1_000, 1),
+            timeline_test_event(20, 2, 0, 11, 1_000, 1),
+        ];
+        runtime.recompute_timeline_event_layers().unwrap();
+        runtime.timeline_playing = true;
+        runtime.timeline_playhead_boundary_armed = true;
+        runtime.last_tick_interval = Duration::from_millis(1);
+        let now = Instant::now();
+        // Build the per-event activation ranges, as a project load does.
+        runtime.rebuild_effect_activations(now);
+        runtime.advance_timeline(now);
+
+        let mut timeline_scenes = runtime
+            .active_effect_activation_indices
+            .iter()
+            .filter_map(|index| match runtime.effect_activations[*index].key {
+                Some(RuntimeEffectActivationKey::Timeline { cue_id, .. }) => Some(cue_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        timeline_scenes.sort_unstable();
+        assert_eq!(
+            timeline_scenes,
+            vec![1, 2],
+            "a same-Bank Timeline scene must not release the other"
+        );
+        // Overlapping writes to the same attribute: the bottom row (layer
+        // order 1, cue 2 renders 0) is applied last and wins.
+        assert_eq!(runtime.render_dmx_frame_for_universe(0, now)[0], 0);
+    }
+
+    fn const_effect_cue(
+        runtime: &mut EngineRuntime,
+        cue_id: CueId,
+        effect_id: EffectId,
+        level: u16,
+    ) {
+        create_effect_only_cue(
+            runtime,
+            cue_id,
+            vec![owned_lfo_target(
+                effect_id,
+                test_lfo_request(
+                    &format!("Const {cue_id}"),
+                    LfoShape::Square,
+                    1_000,
+                    0.0,
+                    EffectBlendMode::Override,
+                    level,
+                    level,
+                ),
+            )],
+        );
+    }
+
+    fn static_cue(runtime: &mut EngineRuntime, cue_id: CueId, level: u16) {
+        runtime.apply_command(EngineCommand::CreateCue {
+            authored_beats: None,
+            cue_id,
+            label: format!("Static {cue_id}"),
+            fade_ms: 0,
+            targets: vec![CueFixtureTarget {
+                fixture_id: 1,
+                values: vec![AttributeValueSummary {
+                    attribute: "Dimmer".to_string(),
+                    value: level,
+                }],
+            }],
+            video_targets: Vec::new(),
+            video_output_targets: Vec::new(),
+            node_graph_targets: Vec::new(),
+            effect_targets: Vec::new(),
+        });
+        assert_eq!(runtime.last_error, None);
+    }
+
+    /// Plays from 0 in 50 ms ticks and samples the Dimmer at each probe time.
+    fn sample_layered_timeline(
+        mut runtime: EngineRuntime,
+        events: Vec<RuntimeTimelineEvent>,
+        probes: &[u64],
+    ) -> Vec<(u64, u8)> {
+        runtime.timeline_layers = vec![
+            timeline_test_layer(10, 0, false, false, false, TimelineLayerKind::Lighting),
+            timeline_test_layer(11, 1, false, false, false, TimelineLayerKind::Lighting),
+        ];
+        runtime.timeline_events = events;
+        runtime.recompute_timeline_event_layers().unwrap();
+        let start = Instant::now();
+        runtime.rebuild_effect_activations(start);
+        runtime.timeline_playing = true;
+        runtime.timeline_playhead_boundary_armed = true;
+        runtime.last_tick_interval = Duration::from_millis(50);
+        let mut samples = Vec::new();
+        let mut now = start;
+        runtime.advance_timeline(now);
+        for step in 0..=60_u64 {
+            let position = step * 50;
+            if probes.contains(&position) {
+                runtime.apply_active_fade(now);
+                samples.push((
+                    runtime.timeline_position_ms,
+                    runtime.render_dmx_frame_for_universe(0, now)[0],
+                ));
+            }
+            now += Duration::from_millis(50);
+            runtime.advance_timeline(now);
+        }
+        samples
+    }
+
+    fn layered_scene_samples(effects: bool, top_start: u64, bottom_start: u64) -> Vec<(u64, u8)> {
+        // Layer 10 = order 0 = top row (renders 255); layer 11 = bottom row (64).
+        let mut runtime = runtime_with_lfo_effects(&[]);
+        if effects {
+            const_effect_cue(&mut runtime, 1, 101, u16::MAX);
+            const_effect_cue(&mut runtime, 2, 102, 0x4000);
+        } else {
+            static_cue(&mut runtime, 1, u16::MAX);
+            static_cue(&mut runtime, 2, 0x4000);
+        }
+        sample_layered_timeline(
+            runtime,
+            vec![
+                timeline_test_event(10, 1, top_start, 10, 1_500, 1),
+                timeline_test_event(20, 2, bottom_start, 11, 1_500, 1),
+            ],
+            &[250, 750, 1_750],
+        )
+    }
+
+    #[test]
+    fn overlapping_timeline_effect_scenes_follow_the_lower_layer() {
+        // Same start: the bottom row wins outright.
+        let same = layered_scene_samples(true, 0, 0);
+        assert_eq!(same[0].1, 64, "{same:?}");
+        assert_eq!(same[1].1, 64, "{same:?}");
+        // The top row starting later does not take over from the bottom row;
+        // once the bottom block ends the top block shows again.
+        let top_later = layered_scene_samples(true, 500, 0);
+        assert_eq!(
+            top_later
+                .iter()
+                .map(|(_, level)| *level)
+                .collect::<Vec<_>>(),
+            vec![64, 64, 255],
+            "{top_later:?}"
+        );
+        // The bottom row starting later takes over and keeps priority.
+        let bottom_later = layered_scene_samples(true, 0, 500);
+        assert_eq!(
+            bottom_later
+                .iter()
+                .map(|(_, level)| *level)
+                .collect::<Vec<_>>(),
+            vec![255, 64, 64],
+            "{bottom_later:?}"
+        );
+    }
+
+    fn static_attr_cue(runtime: &mut EngineRuntime, cue_id: CueId, attribute: &str, level: u16) {
+        runtime.apply_command(EngineCommand::CreateCue {
+            authored_beats: None,
+            cue_id,
+            label: format!("Static {cue_id}"),
+            fade_ms: 0,
+            targets: vec![CueFixtureTarget {
+                fixture_id: 1,
+                values: vec![AttributeValueSummary {
+                    attribute: attribute.to_string(),
+                    value: level,
+                }],
+            }],
+            video_targets: Vec::new(),
+            video_output_targets: Vec::new(),
+            node_graph_targets: Vec::new(),
+            effect_targets: Vec::new(),
+        });
+        assert_eq!(runtime.last_error, None);
+    }
+
+    struct StaticLayerRun {
+        top_start: u64,
+        bottom_start: u64,
+        fade_in_ms: u64,
+        top_fade_out_ms: u64,
+        bottom_fade_out_ms: u64,
+        bottom_muted: bool,
+        play_from_ms: u64,
+        bottom_attribute: &'static str,
+        /// (position, cue) to recall live from the operator mid-play.
+        live_recall: Option<(u64, CueId)>,
+        /// (position, edit) applied to the runtime mid-play.
+        edit_at: Option<(u64, fn(&mut EngineRuntime))>,
+    }
+
+    impl Default for StaticLayerRun {
+        fn default() -> Self {
+            Self {
+                top_start: 0,
+                bottom_start: 0,
+                fade_in_ms: 0,
+                top_fade_out_ms: 0,
+                bottom_fade_out_ms: 0,
+                bottom_muted: false,
+                play_from_ms: 0,
+                bottom_attribute: "Dimmer",
+                live_recall: None,
+                edit_at: None,
+            }
+        }
+    }
+
+    /// Top row (layer 10) recalls Dimmer 255; bottom row (layer 11) recalls
+    /// `bottom_attribute` at 64. Blocks are 1.5 s. Samples (position, Dimmer).
+    fn run_static_layers(run: StaticLayerRun, probes: &[u64]) -> Vec<(u64, u8)> {
+        let mut runtime = runtime_with_lfo_effects(&[]);
+        static_attr_cue(&mut runtime, 1, "Dimmer", u16::MAX);
+        static_attr_cue(&mut runtime, 2, run.bottom_attribute, 0x4000);
+        static_attr_cue(&mut runtime, 3, "Dimmer", 0x2000);
+        runtime.timeline_layers = vec![
+            timeline_test_layer(10, 0, false, false, false, TimelineLayerKind::Lighting),
+            timeline_test_layer(
+                11,
+                1,
+                run.bottom_muted,
+                false,
+                false,
+                TimelineLayerKind::Lighting,
+            ),
+        ];
+        let mut top = timeline_test_event(10, 1, run.top_start, 10, 1_500, 1);
+        top.fade_in_ms = run.fade_in_ms;
+        top.fade_out_ms = run.top_fade_out_ms;
+        let mut bottom = timeline_test_event(20, 2, run.bottom_start, 11, 1_500, 1);
+        bottom.fade_in_ms = run.fade_in_ms;
+        bottom.fade_out_ms = run.bottom_fade_out_ms;
+        runtime.timeline_events = vec![top, bottom];
+        runtime.recompute_timeline_event_layers().unwrap();
+        let start = Instant::now();
+        runtime.rebuild_effect_activations(start);
+        runtime.timeline_position_ms = run.play_from_ms;
+        runtime.timeline_playing = true;
+        runtime.timeline_playhead_boundary_armed = run.play_from_ms == 0;
+        runtime.last_tick_interval = Duration::from_millis(50);
+        let mut samples = Vec::new();
+        let mut now = start;
+        runtime.advance_timeline(now);
+        for _ in 0..=60_u64 {
+            let position = runtime.timeline_position_ms;
+            if let Some((at, cue_id)) = run.live_recall {
+                if position == at {
+                    runtime.request_cue(cue_id, now);
+                }
+            }
+            if let Some((at, edit)) = run.edit_at {
+                if position == at {
+                    edit(&mut runtime);
+                }
+            }
+            if probes.contains(&position) {
+                runtime.apply_active_fade(now);
+                samples.push((position, runtime.render_dmx_frame_for_universe(0, now)[0]));
+            }
+            now += Duration::from_millis(50);
+            runtime.advance_timeline(now);
+        }
+        samples
+    }
+
+    fn levels(samples: &[(u64, u8)]) -> Vec<u8> {
+        samples.iter().map(|(_, level)| *level).collect()
+    }
+
+    #[test]
+    fn overlapping_timeline_static_scenes_follow_the_lower_layer() {
+        // Same start: bottom wins for the whole overlap.
+        let same = run_static_layers(StaticLayerRun::default(), &[250, 750, 1_250]);
+        assert_eq!(levels(&same), vec![64, 64, 64], "{same:?}");
+        // Top row starts later: it never overwrites the bottom row, and shows
+        // once the bottom block has ended.
+        let top_later = run_static_layers(
+            StaticLayerRun {
+                top_start: 500,
+                ..Default::default()
+            },
+            &[250, 750, 1_250, 1_750],
+        );
+        assert_eq!(levels(&top_later), vec![64, 64, 64, 255], "{top_later:?}");
+        // Bottom row starts later: it takes over and keeps priority; the
+        // ended top block does not disturb it.
+        let bottom_later = run_static_layers(
+            StaticLayerRun {
+                bottom_start: 500,
+                ..Default::default()
+            },
+            &[250, 750, 1_250, 1_750],
+        );
+        assert_eq!(
+            levels(&bottom_later),
+            vec![255, 64, 64, 64],
+            "{bottom_later:?}"
+        );
+    }
+
+    #[test]
+    fn timeline_static_layers_respect_fades() {
+        // A fading-in top block above a held bottom block still cannot write.
+        let fade_in = run_static_layers(
+            StaticLayerRun {
+                top_start: 500,
+                fade_in_ms: 200,
+                ..Default::default()
+            },
+            &[750, 1_000],
+        );
+        assert_eq!(levels(&fade_in), vec![64, 64], "{fade_in:?}");
+        // Bottom fades out under a still-running top block: it fades toward
+        // the top block's level instead of black, and ends there.
+        let bottom_fade = run_static_layers(
+            StaticLayerRun {
+                top_start: 500,
+                bottom_fade_out_ms: 400,
+                ..Default::default()
+            },
+            &[1_000, 1_300, 1_750],
+        );
+        assert_eq!(bottom_fade[0].1, 64, "{bottom_fade:?}");
+        assert!(
+            bottom_fade[1].1 > 64 && bottom_fade[1].1 < 255,
+            "{bottom_fade:?}"
+        );
+        assert_eq!(bottom_fade[2].1, 255, "{bottom_fade:?}");
+        // Top fades out while the bottom block holds the attribute: the
+        // bottom level is untouched.
+        let top_fade = run_static_layers(
+            StaticLayerRun {
+                bottom_start: 500,
+                top_fade_out_ms: 400,
+                ..Default::default()
+            },
+            &[1_250, 1_450, 1_750],
+        );
+        assert_eq!(levels(&top_fade), vec![64, 64, 64], "{top_fade:?}");
+    }
+
+    #[test]
+    fn timeline_static_layers_only_shadow_the_attributes_a_lower_block_holds() {
+        // Bottom holds Pan only, so the later top block's Dimmer still lands.
+        let disjoint = run_static_layers(
+            StaticLayerRun {
+                top_start: 500,
+                bottom_attribute: "Pan",
+                ..Default::default()
+            },
+            &[250, 750],
+        );
+        assert_eq!(levels(&disjoint), vec![0, 255], "{disjoint:?}");
+    }
+
+    #[test]
+    fn timeline_static_layers_ignore_blocks_that_never_fired_or_are_muted() {
+        // Playback starts inside the bottom block, so it never recalled and
+        // cannot shadow the top block that starts afterwards.
+        let mid_start = run_static_layers(
+            StaticLayerRun {
+                top_start: 500,
+                play_from_ms: 300,
+                ..Default::default()
+            },
+            &[750],
+        );
+        assert_eq!(levels(&mid_start), vec![255], "{mid_start:?}");
+        // A muted bottom layer does not dispatch and does not shadow.
+        let muted = run_static_layers(
+            StaticLayerRun {
+                top_start: 500,
+                bottom_muted: true,
+                ..Default::default()
+            },
+            &[750],
+        );
+        assert_eq!(levels(&muted), vec![255], "{muted:?}");
+    }
+
+    #[test]
+    fn live_recall_during_timeline_layers_keeps_last_writer_wins() {
+        // The operator still overrides the Timeline from the live surface.
+        let live = run_static_layers(
+            StaticLayerRun {
+                top_start: 500,
+                live_recall: Some((800, 3)),
+                ..Default::default()
+            },
+            &[750, 900],
+        );
+        assert_eq!(levels(&live), vec![64, 32], "{live:?}");
+    }
+
+    #[test]
+    fn timeline_static_holders_follow_mutes_edits_and_replacement() {
+        // Muting the bottom lane mid-block releases its hold: the top block
+        // that starts afterwards shows.
+        let muted_mid_block = run_static_layers(
+            StaticLayerRun {
+                top_start: 500,
+                edit_at: Some((300, |runtime| {
+                    runtime.timeline_layers[1].muted = true;
+                    runtime.recompute_timeline_event_layers().unwrap();
+                })),
+                ..Default::default()
+            },
+            &[250, 750],
+        );
+        assert_eq!(
+            levels(&muted_mid_block),
+            vec![64, 255],
+            "{muted_mid_block:?}"
+        );
+        // Swapping the lanes makes the former bottom block the top one, so the
+        // later block (now on the lower lane) takes over.
+        let swapped = run_static_layers(
+            StaticLayerRun {
+                top_start: 500,
+                edit_at: Some((300, |runtime| {
+                    runtime.timeline_layers[0].order = 1;
+                    runtime.timeline_layers[1].order = 0;
+                    runtime.recompute_timeline_event_layers().unwrap();
+                })),
+                ..Default::default()
+            },
+            &[250, 750],
+        );
+        assert_eq!(levels(&swapped), vec![64, 255], "{swapped:?}");
+        // Replacing the whole Timeline (bank switch, project load) leaves no
+        // stale block behind, even when an event id is reused.
+        let replaced = run_static_layers(
+            StaticLayerRun {
+                top_start: 500,
+                edit_at: Some((300, |runtime| {
+                    runtime.timeline_events = vec![
+                        timeline_test_event(10, 1, 500, 10, 1_500, 1),
+                        timeline_test_event(20, 3, 2_500, 11, 1_500, 1),
+                    ];
+                    runtime.recompute_timeline_event_layers().unwrap();
+                })),
+                ..Default::default()
+            },
+            &[250, 750],
+        );
+        assert_eq!(levels(&replaced), vec![64, 255], "{replaced:?}");
+    }
+
+    #[test]
+    fn replace_group_on_the_timeline_never_overwrites_a_lower_layer() {
+        // ReplaceGroup still releases the column's previous Scene (as a manual
+        // recall does), but the release cannot write an attribute that the
+        // lower layer is holding, so the bottom block keeps priority.
+        let mut runtime = runtime_with_lfo_effects(&[]);
+        for (cue_id, level) in [(1, u16::MAX), (2, 0x4000)] {
+            create_group_recall_cue(
+                &mut runtime,
+                cue_id,
+                "Column",
+                RecallMode::ReplaceGroup,
+                GroupRecallTarget {
+                    fade_ms: 0,
+                    attribute: "Dimmer",
+                    value: level,
+                },
+                Vec::new(),
+            );
+        }
+        let samples = sample_layered_timeline(
+            runtime,
+            vec![
+                timeline_test_event(10, 1, 500, 10, 1_500, 1),
+                timeline_test_event(20, 2, 0, 11, 1_500, 1),
+            ],
+            &[250, 750, 1_750],
+        );
+        assert_eq!(levels(&samples), vec![64, 64, 255], "{samples:?}");
+    }
+
+    #[test]
+    fn timeline_layer_jump_tiebreak_uses_bottom_layer_then_highest_event_id() {
         let mut runtime = runtime_with_lfo_effects(&[]);
         for cue_id in 1..=6 {
             create_effect_only_cue(&mut runtime, cue_id, Vec::new());
@@ -131808,7 +132727,8 @@ mod tests {
             .expect("simultaneous jump sources should select one target");
 
         assert_eq!(jump_at_ms, 100);
-        assert_eq!(target.id, 3_000);
+        // The bottom layer (order 1) is the final writer at a shared time.
+        assert_eq!(target.id, 1_000);
     }
 
     #[test]

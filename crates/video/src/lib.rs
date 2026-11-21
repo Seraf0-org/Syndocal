@@ -50,6 +50,8 @@ mod layer_group_composition;
 mod layer_group_composition_tests;
 mod layer_thumbnail_render;
 mod libav_decoder;
+#[cfg(feature = "libav")]
+mod libav_probe;
 #[cfg(feature = "qa-native-frame-timing")]
 pub mod native_frame_timing;
 #[cfg(feature = "qa-native-frame-timing")]
@@ -3567,10 +3569,36 @@ impl FfmpegCliFrameDecoder {
     }
 }
 
+/// Probes in-process with libav first (release builds ship the libraries but
+/// no `ffprobe` executable, notably on macOS), and only then falls back to an
+/// `ffprobe` binary, e.g. for builds without the `libav` feature.
 pub fn probe_video_file_metadata(
     path: impl AsRef<Path>,
 ) -> Result<VideoProbeSummary, VideoProbeError> {
-    probe_video_file_metadata_with_binary(path, ffprobe_binary_from_env())
+    probe_video_file_metadata_with_fallback_binary(path.as_ref(), ffprobe_binary_from_env())
+}
+
+fn probe_video_file_metadata_with_fallback_binary(
+    path: &Path,
+    ffprobe_binary: PathBuf,
+) -> Result<VideoProbeSummary, VideoProbeError> {
+    #[cfg(feature = "libav")]
+    let libav_error = match libav_probe::probe_with_libav(path) {
+        Ok(summary) => return Ok(summary),
+        Err(error) => error,
+    };
+    match probe_video_file_metadata_with_binary(path, ffprobe_binary) {
+        Ok(summary) => Ok(summary),
+        // A missing ffprobe is only the optional last resort; report why the
+        // built-in demuxer rejected the file instead of "program not found".
+        #[cfg(feature = "libav")]
+        Err(_) => Err(VideoProbeError::Probe {
+            path: path.to_path_buf(),
+            message: libav_error,
+        }),
+        #[cfg(not(feature = "libav"))]
+        Err(error) => Err(error),
+    }
 }
 
 pub fn video_runtime_status() -> VideoRuntimeStatus {

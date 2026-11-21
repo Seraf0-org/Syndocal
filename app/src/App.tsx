@@ -741,7 +741,8 @@ import { buildFxCatalog, normalizeFxSource, type FxCatalogEntry, type FxImportRe
 import { VideoEffectBrowser } from "./components/VideoEffectBrowser";
 import { videoClipSlotReorderedIds } from "./videoClipSlotBankModel";
 import { installNativeFileDrop, type FileDropWebView } from "./nativeFileDrop";
-import { routeFileDrop, isVisualMediaFilePath, isTimelineAudioFilePath, isSyndocalProjectPath } from "./fileDropRouting";
+import { routeFileDrop, isVisualMediaFilePath, isTimelineAudioFilePath, isSyndocalProjectPath, type TimelineFileDropLane } from "./fileDropRouting";
+import { mediaFileName, mediaFileType } from "./mediaFileTypes";
 import {
   inspectMediaAssetAvailability,
   mediaAssetImportReportMessage,
@@ -12815,7 +12816,7 @@ function createAppView() {
       importMedia: importMediaFilesFromPaths,
       assignSlots: importAndAssignVideoClipSlots,
       openProject: loadProjectPath,
-      addAudio: addTimelineAudioClipPath,
+      placeOnTimeline: placeMediaFilesOnTimeline,
       message: setMessage,
     });
     // Keep Windows DOM dragging intact. Only OS-backed file drops enter the
@@ -18324,10 +18325,10 @@ function createAppView() {
     layerId: number | null,
     loadAudio: () => Promise<AudioAnalysisSummary | null>,
     timeMs = activeTimeline().position_ms,
-  ) => {
+  ): Promise<AudioAnalysisSummary | null> => {
     if (timelineAudioImportInFlight) {
       setMessage("An audio import is already in progress.");
-      return;
+      return null;
     }
     timelineAudioImportInFlight = true;
     const authority = captureProjectAuthorityIdentity();
@@ -18348,42 +18349,44 @@ function createAppView() {
         layerId = audioLanes.find((layer) => !layer.locked)?.id ?? null;
         if (layerId === null && audioLanes.length > 0) {
           setMessage("The Audio section has no unlocked lane for a new clip.");
-          return;
+          return null;
         }
       }
       if (layerId !== null) {
         const target = audioLanes.find((layer) => layer.id === layerId);
         if (!target || target.locked) {
           setMessage("Choose an unlocked Audio lane before importing.");
-          return;
+          return null;
         }
       }
       const analysis = await loadAudio();
-      if (!sameTimeline()) return;
+      if (!sameTimeline()) return null;
       if (!isProjectAuthorityIdentityCurrent(authority)) {
         setMessage("The project changed during audio import. Choose the audio file again.");
-        return;
+        return null;
       }
       if (!analysis) {
         setMessage("Add Audio Clip canceled.");
-        return;
+        return null;
       }
       let fence = mutationFence(authority);
       if (layerId === null) {
         layerId = await invokeTimelineLayerCommand<number>("add_timeline_layer", { label: "Audio", kind: "Audio" }, fence);
         if (childCueId === null && viewportFixture !== "timeline-layered") await refreshSnapshot();
-        if (!sameTimeline()) return;
+        if (!sameTimeline()) return null;
         fence = mutationFence(captureProjectAuthorityIdentity());
       }
       await commitTimelineAudioClip(layerId, analysis, startMs, fence);
+      return analysis;
     } catch (error) {
       if (sameTimeline()) setMessage(String(error));
+      return null;
     } finally {
       timelineAudioImportInFlight = false;
     }
   };
 
-  const addTimelineAudioClip = (layerId: number | null) => importTimelineAudioClip(layerId, async () =>
+  const addTimelineAudioClip = async (layerId: number | null) => { await importTimelineAudioClip(layerId, async () =>
     viewportFixture === "timeline-layered"
       ? audioAnalysis() ?? {
           path: "C:/fixture/audio/added-loop.wav",
@@ -18396,10 +18399,134 @@ function createAppView() {
           beats: [],
       }
       : invoke<AudioAnalysisSummary | null>("select_timeline_audio_clip_file"),
-  );
+  ); };
 
-  const addTimelineAudioClipPath = (layerId: number | null, path: string, timeMs?: number) =>
-    importTimelineAudioClip(layerId, () => invoke<AudioAnalysisSummary>("analyze_timeline_audio_clip_path", { path }), timeMs);
+  /**
+   * OS file drop on the Timeline. Every file first enters the Media Library
+   * (one import batch), then each is placed in drop order, end to end from
+   * the drop point: audio on an Audio lane through the analysis path (which
+   * also drives the waveform and BPM), video through `insert_media` with its
+   * audio as a linked clip. The lane under the pointer is used when its kind
+   * fits; otherwise the first unlocked lane of that kind, created if none.
+   */
+  let timelineFileDropInFlight = false;
+  const placeMediaFilesOnTimeline = async (
+    paths: string[],
+    lane: TimelineFileDropLane | null,
+    timeMs?: number,
+  ) => {
+    if (timelineFileDropInFlight) {
+      setMessage("A Timeline media drop is already in progress.");
+      return;
+    }
+    if (!timelineAuthorityReady("Timeline media drop")) return;
+    timelineFileDropInFlight = true;
+    const childCueId = timelineChildCueId();
+    const timelineId = activeTimeline().id;
+    const sameTimeline = () => timelineChildCueId() === childCueId && activeTimeline().id === timelineId;
+    try {
+      const report = await importMediaFilesFromPaths(paths);
+      if (!report || !sameTimeline()) return;
+      const assetIdByPath = new Map<string, number>();
+      for (const entry of report.entries) {
+        if ((entry.status === "imported" || entry.status === "reused") && entry.asset_id != null) {
+          assetIdByPath.set(entry.path.trim(), entry.asset_id);
+        }
+      }
+      const laneOf = (kind: "Video" | "Audio") => {
+        const unlocked = sortedTimelineLayers(timelineLayers()).filter((layer) => layer.kind === kind && !layer.locked);
+        if (lane?.kind === kind) {
+          const exact = unlocked.find((layer) => layer.id === lane.id);
+          if (exact) return exact.id;
+        }
+        return unlocked[0]?.id ?? null;
+      };
+      const ensureLane = async (kind: "Video" | "Audio") => {
+        const existing = laneOf(kind);
+        if (existing !== null) return existing;
+        if (timelineLayers().some((layer) => layer.kind === kind)) {
+          setMessage(`Every ${kind} lane is locked. Unlock one to place this media.`);
+          return null;
+        }
+        const token = captureProjectAuthorityIdentity();
+        const id = await invokeTimelineLayerCommand<number>("add_timeline_layer", { label: kind, kind }, {
+          __expectedProjectEpoch: token.project_epoch,
+          __expectedProjectRevision: token.project_revision,
+          __expectedCheckpointHash: token.checkpoint_hash,
+          __shouldAbortProjectMutation: () => !sameTimeline(),
+        });
+        await refreshSnapshot();
+        return id;
+      };
+      let cursorMs = snapTimeMs(timeMs ?? activeTimeline().position_ms);
+      let placed = 0;
+      // Not placed but in the Media Library, vs. not even imported.
+      const libraryOnly: string[] = [];
+      const failed: string[] = [];
+      const notPlaced = { push: (path: string) => {
+        (assetIdByPath.has(path.trim()) ? libraryOnly : failed).push(mediaFileName(path));
+      } };
+      for (const path of paths) {
+        if (!sameTimeline()) return;
+        const type = mediaFileType(path);
+        if (type === "audio") {
+          const audioLane = laneOf("Audio");
+          const analysis = await importTimelineAudioClip(audioLane, () =>
+            invoke<AudioAnalysisSummary>("analyze_timeline_audio_clip_path", { path }), cursorMs);
+          if (analysis) {
+            placed += 1;
+            cursorMs += Math.max(1, analysis.duration_ms);
+          } else {
+            notPlaced.push(path);
+          }
+          continue;
+        }
+        const assetId = assetIdByPath.get(path.trim());
+        const asset = assetId === undefined
+          ? undefined
+          : snapshot().video.media_assets.find((candidate) => candidate.id === assetId);
+        const durationMs = asset?.source.metadata?.duration_ms ?? 0;
+        if (type !== "video" || !asset || durationMs <= 0) {
+          // Stills have no length to place; they stay in the Media Library.
+          notPlaced.push(path);
+          continue;
+        }
+        if (childCueId !== null) {
+          notPlaced.push(path);
+          setMessage("Video clips go on the main Timeline. The file was added to the Media Library.");
+          continue;
+        }
+        const hasVideo = asset.source.metadata?.width != null && asset.source.metadata?.height != null;
+        const hasAudio = asset.source.metadata?.has_audio === true;
+        const videoLayerId = hasVideo ? await ensureLane("Video") : null;
+        const audioLayerId = hasAudio ? await ensureLane("Audio") : null;
+        if ((hasVideo && videoLayerId === null) || (hasAudio && audioLayerId === null) || !sameTimeline()) {
+          notPlaced.push(path);
+          continue;
+        }
+        if (await insertMediaAssetOnTimeline(asset.id, { startMs: cursorMs, videoLayerId, audioLayerId })) {
+          placed += 1;
+          cursorMs += durationMs;
+        } else {
+          notPlaced.push(path);
+        }
+      }
+      if (!sameTimeline()) return;
+      if (libraryOnly.length === 0 && failed.length === 0) {
+        setMessage(placed === 1 ? "Media placed on the Timeline and added to the Media Library."
+          : `${placed} media files placed on the Timeline and added to the Media Library.`);
+      } else {
+        const parts = [`${placed} placed on the Timeline.`];
+        if (libraryOnly.length > 0) parts.push(`Added to the Media Library only: ${libraryOnly.join(", ")}`);
+        if (failed.length > 0) parts.push(`Could not import: ${failed.join(", ")}`);
+        setMessage(parts.join(" "));
+      }
+    } catch (error) {
+      if (sameTimeline()) setMessage(String(error));
+    } finally {
+      timelineFileDropInFlight = false;
+    }
+  };
 
   const updateTimelineAudioClip = async (clip: TimelineAudioClipSummary) => {
     try {

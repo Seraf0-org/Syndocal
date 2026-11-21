@@ -4232,6 +4232,18 @@ const japaneseText: Record<string, string> = {
   "Drop audio on Sources, the Audio section header, or an Audio lane.":
     "音声ファイルをソース、音声セクションのヘッダー、または音声レーンへドロップしてください。",
   "Drop one audio file at a time.": "音声ファイルは1つずつドロップしてください。",
+  "Unsupported file type. Drop video, audio or image files, or a .sdc project.":
+    "対応していないファイル形式です。動画・音声・画像ファイル、または .sdc プロジェクトをドロップしてください。",
+  "Drop video or image files to start a show.": "ショーを始めるには動画か画像ファイルをドロップしてください。",
+  "Clip Slots take video or image files. Drop audio on the Timeline or the Media Library.":
+    "クリップスロットには動画か画像ファイルを入れられます。音声はタイムラインかメディアライブラリへドロップしてください。",
+  "Drop media on the Media Library, the Timeline, or a Clip Slot.":
+    "メディアはメディアライブラリ、タイムライン、またはクリップスロットへドロップしてください。",
+  "A Timeline media drop is already in progress.": "タイムラインへのメディア配置を処理中です。",
+  "Media placed on the Timeline and added to the Media Library.":
+    "メディアをタイムラインに配置し、メディアライブラリにも追加しました。",
+  "Video clips go on the main Timeline. The file was added to the Media Library.":
+    "映像クリップはメインのタイムラインに配置します。ファイルはメディアライブラリに追加しました。",
   "This drop did not provide a local file. Use the file picker to import it.":
     "ローカルファイルを取得できませんでした。ファイル選択から読み込んでください。",
   "An audio import is already in progress.": "音声ファイルを読み込み中です。",
@@ -4735,6 +4747,18 @@ const japaneseText: Record<string, string> = {
 };
 
 const japanesePatterns: Array<[RegExp, (...matches: string[]) => string]> = [
+  [/^Skipped unsupported files: (.+)$/,
+    (names) => `対応していないファイルをスキップしました: ${names}`],
+  [/^(\d+) media files placed on the Timeline and added to the Media Library\.$/,
+    (count) => `${count}件のメディアをタイムラインに配置し、メディアライブラリにも追加しました。`],
+  [/^(\d+) placed on the Timeline\.(?: Added to the Media Library only: (.+?))?(?: Could not import: (.+))?$/,
+    (count, libraryOnly, failed) => [
+      `${count}件をタイムラインに配置しました。`,
+      libraryOnly ? `メディアライブラリにのみ追加: ${libraryOnly}` : "",
+      failed ? ` 読み込めなかったファイル: ${failed}` : "",
+    ].join("")],
+  [/^Every (Video|Audio) lane is locked\. Unlock one to place this media\.$/,
+    (kind) => `${kind === "Video" ? "映像" : "音声"}レーンがすべてロックされています。配置するにはロックを解除してください。`],
   [/^Outputs were not taken automatically: (.+)$/,
     (detail) => `出力を自動で引き受けられませんでした: ${detail}`],
   [/^(.+)\. NDI source identity is '(.+)'; the receiver reconnects only to this exact source\.$/,

@@ -6,7 +6,7 @@ export interface FileDropWebView {
   removeEventListener(type: "message", listener: (event: MessageEvent) => void): void;
 }
 
-export const unsupportedFileDropMessage = "Drop a .sdc project, visual media, or Audio clip on its matching surface.";
+export const unsupportedFileDropMessage = "Unsupported file type. Drop video, audio or image files, or a .sdc project.";
 
 export function installNativeFileDrop<Context>(options: {
   document: Document;

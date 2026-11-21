@@ -29,7 +29,9 @@ bcdec_rs = "=0.2.0"
 crossbeam-queue = "0.3"
 gdtf = { path = "crates/gdtf" }
 grafton-ndi = { version = "=0.11.0", default-features = false }
-image = { version = "=0.24.9", default-features = false, features = ["jpeg", "png"] }
+# BMP and WebP decode in pure Rust inside `image` (no new crates); keep this
+# list in step with STILL_IMAGE_EXTENSIONS in app/src/mediaFileTypes.ts.
+image = { version = "=0.24.9", default-features = false, features = ["bmp", "jpeg", "png", "webp"] }
 hap-parser = "=0.2.0"
 ffmpeg-next = { version = "=8.1.0", default-features = false }
 flate2 = "=1.1.9"
@@ -46,12 +48,16 @@ rayon = "=1.10.0"
 rfd = "0.17"
 roxmltree = "0.20"
 rosc = "0.11"
-rodio = "=0.21.1"
+# AIFF is listed in the timeline import filter, so playback must decode it too.
+rodio = { version = "=0.21.1", features = ["symphonia-aiff"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 serde_path_to_error = "=0.1.20"
 serialport = "4.7"
 sha2 = "=0.10.9"
+# Same pure-Rust decoder rodio plays timeline audio with; timeline analysis
+# decodes in-process so it never depends on an ffmpeg executable on PATH.
+symphonia = { version = "=0.5.5", default-features = false, features = ["aac", "aiff", "flac", "isomp4", "mp3", "ogg", "pcm", "vorbis", "wav"] }
 spout2-rs = { version = "=0.1.1", default-features = false, features = ["dx"] }
 tauri = { version = "=2.5.1", features = ["unstable"] }
 tauri-build = "=2.2.0"

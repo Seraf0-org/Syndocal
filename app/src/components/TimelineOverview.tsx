@@ -4267,6 +4267,7 @@ export function TimelineOverview(props: TimelineOverviewProps) {
       <div
         class="timelineOverviewFrame"
         classList={{ timelineOverviewLayered: !props.legacyMode }}
+        data-timeline-file-drop=""
       >
         <Show
           when={!props.legacyMode}

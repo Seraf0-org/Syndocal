@@ -46,7 +46,7 @@ const locale = new URL(location.href).searchParams.get("locale") || "en";
 const calls = [], requests = [], listeners = new Set();
 const [status, setStatus] = createSignal("");
 let context = 1;
-const actions = Object.fromEntries(["firstShow", "importMedia", "assignSlots", "openProject", "addAudio"].map(name => [name, (...args) => calls.push({name,args})]));
+const actions = Object.fromEntries(["firstShow", "importMedia", "assignSlots", "openProject", "placeOnTimeline"].map(name => [name, (...args) => calls.push({name,args})]));
 actions.message = message => { calls.push({name:"message",args:[message]}); setStatus(message); };
 const webview = {
   postMessageWithAdditionalObjects(message, files) { requests.push({message, files:files.map(file=>file.name)}); },
@@ -114,10 +114,17 @@ try {
    assert.deepEqual(await fx("return f.calls.at(-1)"),{name:name==="perform"?"firstShow":"importMedia",args:[paths]});
    assert.equal(await fx("return f.calls.length"),count+1,"one gesture makes exactly one validated-path call");
    assert.equal((await drag(selector,"dragover")).highlighted,true,"hover works again after drop"); await drag(selector,"dragleave");
-   for(const rejected of [["C:\\bad.exe"],[paths[0],"C:\\bad.exe"],["C:\\audio.wav"]]) {
-    await drag(selector);await fx("f.reply(arg)",rejected);
-    assert.deepEqual(await fx("return f.calls.at(-1)"),{name:"message",args:[await fx("return f.unsupportedFileDropMessage")]},"unsupported/mixed rejected before import");
-   }
+   await drag(selector);await fx("f.reply(arg)",["C:\\bad.exe"]);
+   assert.deepEqual(await fx("return f.calls.at(-1)"),{name:"message",args:[await fx("return f.unsupportedFileDropMessage")]},"unsupported-only drop rejected before import");
+   // Mixed drops import the supported files and name exactly what was skipped.
+   await drag(selector);await fx("f.reply(arg)",[paths[0],"C:\\bad.exe"]);
+   await page.waitForFunction(()=>window.__dropFixture.calls.at(-1)?.name==="message");
+   assert.deepEqual(await fx("return f.calls.slice(-2)"),[{name:name==="perform"?"firstShow":"importMedia",args:[[paths[0]]]},{name:"message",args:["Skipped unsupported files: bad.exe"]}]);
+   // Audio joins the Media Library; a first show needs pictures.
+   await drag(selector);await fx("f.reply(arg)",["C:\\audio.wav"]);
+   assert.deepEqual(await fx("return f.calls.at(-1)"),name==="perform"
+    ? {name:"message",args:["Drop video or image files to start a show."]}
+    : {name:"importMedia",args:[["C:\\audio.wav"]]});
   }
   assert.equal((await drag("[data-internal]","dragover")).prevented,true,"external Files reach off-target rejection instead of WebView navigation");
   const count=await fx("return f.calls.length");
@@ -136,13 +143,17 @@ try {
    const beforeAudioDrop = await fx("return f.calls.length");
    assert.equal((await drag(selector, "drop", ["track.WAV"])).prevented, true);
    await fx("f.reply(arg)", [audioPath]);
-   const args = selector.startsWith("svg") ? [8, audioPath, 3000] : [null, audioPath];
-   assert.deepEqual(await fx("return f.calls.at(-1)"), {name:"addAudio",args});
+   const call = await fx("return f.calls.at(-1)");
+   assert.equal(call.name, "placeOnTimeline");
+   assert.deepEqual(call.args.slice(0, 2), [[audioPath], selector.startsWith("svg") ? {id:8, kind:"Audio"} : null]);
+   assert.equal(call.args[2] ?? null, selector.startsWith("svg") ? 3000 : null, "lane drops carry the pointer time");
    assert.equal(await fx("return f.calls.length"), beforeAudioDrop + 1);
   }
   await drag("[data-timeline-source-shelf]", "drop", ["track.WAV", "clip.mp4"]);
   await fx("f.reply(arg)", [audioPath, paths[0]]);
-  assert.deepEqual(await fx("return f.calls.at(-1)"), {name:"message",args:["Drop one audio file at a time."]});
+  const mixed = await fx("return f.calls.at(-1)");
+  assert.equal(mixed.name, "placeOnTimeline", "audio and video drop together on the Timeline");
+  assert.deepEqual(mixed.args.slice(0, 2), [[audioPath, paths[0]], null]);
   await fx("f.route(arg,'[data-video-clip-slot-layer-id]')",paths);assert.deepEqual(await fx("return f.calls.at(-1)"),{name:"assignSlots",args:[paths,3,4]});
   await fx("f.route(arg,'[data-internal]')",paths);assert.equal(await fx("return f.calls.at(-1).name"),"message","off-surface visual rejected");
   const detachedCount=await fx("return f.calls.length");

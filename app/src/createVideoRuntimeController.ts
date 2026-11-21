@@ -7,6 +7,7 @@ import { videoFrameToDataUrl } from "./videoFrameCanvas";
 import { normalizeVideoClipRuntimeSnapshot, normalizeVideoLayerTransitionRuntimeSnapshot } from "./videoRuntimeCollectionWire";
 import { defaultColorAdjust, defaultFxAdjust, defaultTransform } from "./videoLayerDefaults";
 import { patchVideoGroup } from "./videoLayerGroups";
+import { mediaFileType } from "./mediaFileTypes";
 import {
   mediaAssetImportReportMessage,
   mediaAssetRelinkOutcomeMessage,
@@ -1036,9 +1037,38 @@ export function createVideoRuntimeController(options: VideoRuntimeControllerOpti
       }
     } catch (error) { setMessageIfAuthorityCurrent(sideEffectAuthority, String(error)); }
   };
+  /**
+   * Library import for dropped files. Stills and time-based media are
+   * different MediaAsset kinds (a PNG probed as a "video" file would have no
+   * duration and could never be placed), so each kind is its own batch; the
+   * returned report merges both, with each entry's `path` identifying it.
+   */
   const importMediaFilesFromPaths = async (paths: readonly string[]) => {
     const normalizedPaths = paths.map((path) => path.trim()).filter(Boolean);
     if (normalizedPaths.length === 0) return null;
+    const stills = normalizedPaths.filter((path) => mediaFileType(path) === "still");
+    const files = normalizedPaths.filter((path) => mediaFileType(path) !== "still");
+    const reports: MediaAssetImportReport[] = [];
+    for (const [kind, batch] of [["File", files], ["StillImage", stills]] as const) {
+      if (batch.length === 0) continue;
+      const report = await importMediaBatchFromPaths(kind, batch);
+      if (!report) return null;
+      reports.push(report);
+    }
+    if (reports.length <= 1) return reports[0] ?? null;
+    const merged: MediaAssetImportReport = {
+      ...reports[reports.length - 1],
+      prepared: reports.reduce((sum, report) => sum + report.prepared, 0),
+      imported: reports.reduce((sum, report) => sum + report.imported, 0),
+      reused: reports.reduce((sum, report) => sum + report.reused, 0),
+      skipped: reports.reduce((sum, report) => sum + report.skipped, 0),
+      failed: reports.reduce((sum, report) => sum + report.failed, 0),
+      entries: reports.flatMap((report) => report.entries),
+    };
+    options.setMessage(mediaAssetImportReportMessage(merged));
+    return merged;
+  };
+  const importMediaBatchFromPaths = async (kind: "File" | "StillImage", normalizedPaths: string[]) => {
     const authority = options.getCurrentProjectAuthority();
     let sideEffectAuthority = authority;
     const preparedStart = await preflightAndBeginMediaAssetOperation(
@@ -1050,7 +1080,7 @@ export function createVideoRuntimeController(options: VideoRuntimeControllerOpti
     try {
       const staged = await prepareFinalizeAndCommitMediaAssets({
         invoke: options.invoke,
-        kind: "File",
+        kind,
         paths: normalizedPaths,
         expectedEpoch: sideEffectAuthority.project_epoch,
         expectedAuthority: sideEffectAuthority,
@@ -1064,6 +1094,8 @@ export function createVideoRuntimeController(options: VideoRuntimeControllerOpti
       options.setMediaAssetImportReport(staged.committed ?? staged.report);
       options.setMessage(mediaAssetImportReportMessage(staged.committed ?? staged.report));
       await options.refreshSnapshot();
+      // For this commit command `report` is the commit's own report, which
+      // carries the final asset id of every imported or reused entry.
       return staged.report;
     } catch (error) {
       setMessageIfAuthorityCurrent(sideEffectAuthority, String(error));

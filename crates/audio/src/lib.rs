@@ -42,6 +42,8 @@ pub enum AudioError {
     FfmpegDecode(String),
     #[error("ffmpeg returned malformed f32 PCM audio")]
     InvalidDecodedAudio,
+    #[error("could not decode audio file (unsupported or damaged format): {0}")]
+    Decode(String),
     #[error("invalid WAV file: {0}")]
     Invalid(&'static str),
 }
@@ -67,23 +69,166 @@ pub fn analyze_audio_file_with_points(
     path: impl AsRef<Path>,
     max_points: usize,
 ) -> Result<AudioAnalysisSummary, AudioError> {
-    let path = path.as_ref();
-    if path.extension().is_some() && !is_wav_path(path) {
-        return analyze_audio_file_with_ffmpeg_binary(path, max_points, ffmpeg_binary_from_env());
-    }
-    match analyze_wav_file_with_points(path, max_points) {
-        Ok(analysis) => Ok(analysis),
-        Err(wav_error) if should_try_ffmpeg_after_wav_error(path, &wav_error) => {
-            let ffmpeg_result =
-                analyze_audio_file_with_ffmpeg_binary(path, max_points, ffmpeg_binary_from_env());
-            if is_wav_path(path) {
-                ffmpeg_result.or(Err(wav_error))
-            } else {
-                ffmpeg_result
-            }
+    analyze_audio_file_with_fallback_binary(path.as_ref(), max_points, ffmpeg_binary_from_env())
+}
+
+/// Decode order: the built-in PCM WAV parser (WAV or extensionless paths
+/// only), then symphonia in-process (the same decoder rodio plays timeline
+/// audio with), and only then an `ffmpeg` executable as a last resort. The
+/// first two never need anything installed, so macOS/Windows builds analyze
+/// MP3/AAC/FLAC/OGG/AIFF and WAVE_FORMAT_EXTENSIBLE WAV without ffmpeg on PATH.
+fn analyze_audio_file_with_fallback_binary(
+    path: &Path,
+    max_points: usize,
+    ffmpeg_binary: PathBuf,
+) -> Result<AudioAnalysisSummary, AudioError> {
+    let wav_error = if path.extension().is_none() || is_wav_path(path) {
+        match analyze_wav_file_with_points(path, max_points) {
+            Ok(analysis) => return Ok(analysis),
+            Err(error @ AudioError::Read(_)) => return Err(error),
+            Err(error) => Some(error),
         }
-        Err(wav_error) => Err(wav_error),
+    } else {
+        None
+    };
+    let symphonia_error = match decode_mono_with_symphonia(path) {
+        Ok(decoded) => {
+            let duration_ms = frames_to_ms(decoded.samples.len(), decoded.sample_rate);
+            return Ok(analyze_mono_samples(
+                path,
+                decoded.sample_rate,
+                decoded.channels,
+                duration_ms,
+                decoded.samples,
+                max_points,
+            ));
+        }
+        Err(error @ AudioError::Read(_)) => return Err(error),
+        Err(error) => error,
+    };
+    match analyze_audio_file_with_ffmpeg_binary(path, max_points, ffmpeg_binary) {
+        Ok(analysis) => Ok(analysis),
+        // A missing/failed ffmpeg is only the optional last resort; report why
+        // the built-in decoders rejected the file instead of "failed to run ffmpeg".
+        Err(_) => Err(match wav_error {
+            Some(wav_error) => AudioError::Decode(format!("{wav_error}; {symphonia_error}")),
+            None => symphonia_error,
+        }),
     }
+}
+
+struct DecodedMonoAudio {
+    sample_rate: u32,
+    channels: u16,
+    samples: Vec<f32>,
+}
+
+fn decode_mono_with_symphonia(path: &Path) -> Result<DecodedMonoAudio, AudioError> {
+    use symphonia::core::{
+        audio::SampleBuffer,
+        codecs::{DecoderOptions, CODEC_TYPE_NULL},
+        errors::Error as SymphoniaError,
+        formats::FormatOptions,
+        io::MediaSourceStream,
+        meta::MetadataOptions,
+        probe::Hint,
+    };
+
+    let decode_error = |error: SymphoniaError| AudioError::Decode(error.to_string());
+    let file = fs::File::open(path)?;
+    let source = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(extension) = path.extension().and_then(|extension| extension.to_str()) {
+        hint.with_extension(extension);
+    }
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            source,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .map_err(decode_error)?;
+    let mut format = probed.format;
+    let track = format
+        .tracks()
+        .iter()
+        .find(|track| track.codec_params.codec != CODEC_TYPE_NULL)
+        .ok_or_else(|| AudioError::Decode("no supported audio track".to_string()))?;
+    let track_id = track.id;
+    let mut sample_rate = track.codec_params.sample_rate.unwrap_or(0);
+    let mut channels = track
+        .codec_params
+        .channels
+        .map(|channels| channels.count())
+        .unwrap_or(0);
+    let mut samples = Vec::new();
+    if let Some(frames) = track.codec_params.n_frames {
+        // Pre-size from the container's frame count, capped so a corrupt
+        // header cannot request an absurd allocation up front.
+        samples.reserve(frames.min(48_000 * 60 * 30) as usize);
+    }
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .map_err(decode_error)?;
+    let mut buffer: Option<SampleBuffer<f32>> = None;
+    loop {
+        let packet = match format.next_packet() {
+            Ok(packet) => packet,
+            // End of stream (symphonia reports EOF as an IoError) or a chained
+            // stream boundary: the first logical stream is the clip.
+            Err(SymphoniaError::IoError(_)) | Err(SymphoniaError::ResetRequired) => break,
+            Err(error) => return Err(decode_error(error)),
+        };
+        if packet.track_id() != track_id {
+            continue;
+        }
+        let decoded = match decoder.decode(&packet) {
+            Ok(decoded) => decoded,
+            // Skip a malformed packet like rodio playback does.
+            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(error) => return Err(decode_error(error)),
+        };
+        let spec = *decoded.spec();
+        let frame_channels = spec.channels.count();
+        if frame_channels == 0 || spec.rate == 0 {
+            continue;
+        }
+        sample_rate = spec.rate;
+        channels = frame_channels;
+        let needed = decoded.capacity() * frame_channels;
+        let reusable = buffer
+            .as_ref()
+            .is_some_and(|buffer| buffer.capacity() >= needed);
+        if !reusable {
+            buffer = Some(SampleBuffer::new(decoded.capacity() as u64, spec));
+        }
+        let buffer = buffer.as_mut().expect("sample buffer was just allocated");
+        buffer.copy_interleaved_ref(decoded);
+        samples.extend(buffer.samples().chunks_exact(frame_channels).map(|frame| {
+            let mixed = frame.iter().sum::<f32>() / frame_channels as f32;
+            if mixed.is_finite() {
+                mixed.clamp(-1.0, 1.0)
+            } else {
+                0.0
+            }
+        }));
+    }
+    if sample_rate == 0 || channels == 0 {
+        return Err(AudioError::Decode(
+            "stream did not report a sample rate or channel layout".to_string(),
+        ));
+    }
+    if samples.is_empty() {
+        return Err(AudioError::Decode(
+            "no audio samples were decoded".to_string(),
+        ));
+    }
+    Ok(DecodedMonoAudio {
+        sample_rate,
+        channels: u16::try_from(channels).unwrap_or(u16::MAX),
+        samples,
+    })
 }
 
 pub fn analyze_wav_file_with_points(
@@ -188,20 +333,6 @@ fn decode_f32le_mono_samples(bytes: &[u8]) -> Result<Vec<f32>, AudioError> {
             }
         })
         .collect())
-}
-
-fn should_try_ffmpeg_after_wav_error(path: &Path, error: &AudioError) -> bool {
-    match error {
-        AudioError::Read(_) | AudioError::MissingFormat | AudioError::MissingData => false,
-        AudioError::Invalid(_) if is_wav_path(path) => false,
-        AudioError::NotWave
-        | AudioError::UnsupportedFormat(_)
-        | AudioError::UnsupportedBitDepth(_)
-        | AudioError::Invalid(_) => true,
-        AudioError::FfmpegIo(_) | AudioError::FfmpegDecode(_) | AudioError::InvalidDecodedAudio => {
-            false
-        }
-    }
 }
 
 fn is_wav_path(path: &Path) -> bool {
@@ -678,6 +809,170 @@ mod tests {
         assert_eq!(analysis.channels, 1);
         assert_eq!(analysis.waveform.len(), 2);
         assert!(analysis.waveform.iter().all(|point| point.peak <= 1.0));
+    }
+
+    fn missing_ffmpeg() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "syndocal-audio-missing-ffmpeg-{}{}",
+            std::process::id(),
+            std::env::consts::EXE_SUFFIX
+        ))
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join(name)
+    }
+
+    fn write_temp_audio(name: &str, bytes: &[u8]) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("syndocal-audio-{}-{name}", std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn compressed_formats_decode_without_an_ffmpeg_executable() {
+        // Regression: macOS builds have no ffmpeg on PATH, so MP3 import used to
+        // fail with "failed to run ffmpeg: No such file or directory".
+        for name in [
+            "tone.mp3",
+            "tone.flac",
+            "tone.ogg",
+            "tone.m4a",
+            "tone.aac",
+            "tone.aiff",
+            "tone.aifc",
+        ] {
+            let analysis =
+                analyze_audio_file_with_fallback_binary(&fixture(name), 16, missing_ffmpeg())
+                    .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(analysis.channels, 2, "{name}");
+            assert!(
+                matches!(analysis.sample_rate, 8_000 | 22_050),
+                "{name}: {}",
+                analysis.sample_rate
+            );
+            assert!(
+                (400..=600).contains(&analysis.duration_ms)
+                    || (950..=1_100).contains(&analysis.duration_ms),
+                "{name}: {} ms",
+                analysis.duration_ms
+            );
+            assert!(!analysis.waveform.is_empty(), "{name}");
+            assert!(
+                analysis.waveform.iter().any(|point| point.peak > 0.5),
+                "{name} decoded to silence"
+            );
+        }
+    }
+
+    #[test]
+    fn extensible_24bit_wav_decodes_without_an_ffmpeg_executable() {
+        // DAWs (Logic, Ableton, Pro Tools) commonly write WAVE_FORMAT_EXTENSIBLE
+        // 24-bit, which the built-in PCM parser rejects.
+        let frames = 4_000usize;
+        let mut data = Vec::new();
+        for index in 0..frames {
+            let value = ((index as f32 * 0.05).sin() * 4_000_000.0) as i32;
+            let bytes = value.to_le_bytes();
+            for _channel in 0..2 {
+                data.extend_from_slice(&bytes[..3]);
+            }
+        }
+        let wav = build_extensible_wav(8_000, 2, 24, &data);
+        assert!(matches!(
+            analyze_wav_file_with_points_bytes(&wav),
+            Err(AudioError::UnsupportedFormat(0xFFFE))
+        ));
+        let path = write_temp_audio("extensible.wav", &wav);
+        let analysis = analyze_audio_file_with_fallback_binary(&path, 16, missing_ffmpeg());
+        let _ = std::fs::remove_file(&path);
+        let analysis = analysis.unwrap();
+        assert_eq!((analysis.sample_rate, analysis.channels), (8_000, 2));
+        assert_eq!(analysis.duration_ms, 500);
+        assert!(analysis.waveform.iter().any(|point| point.peak > 0.3));
+    }
+
+    #[test]
+    fn damaged_wav_reports_both_decoders_without_mentioning_ffmpeg() {
+        // A data chunk that claims more bytes than the file holds is rejected by
+        // both the built-in parser and symphonia (so rodio could not play it
+        // either); the error must explain that instead of a missing ffmpeg.
+        let data = vec![0x40u8; 8_000 * 2];
+        let mut wav = build_wav(8_000, 1, 16, &data);
+        let data_size_offset = wav.len() - data.len() - 4;
+        wav[data_size_offset..data_size_offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        let path = write_temp_audio("oversized.wav", &wav);
+        let error =
+            analyze_audio_file_with_fallback_binary(&path, 16, missing_ffmpeg()).unwrap_err();
+        let _ = std::fs::remove_file(&path);
+        let message = error.to_string();
+        assert!(matches!(error, AudioError::Decode(_)), "{message}");
+        assert!(
+            message.contains("chunk extends past end of file"),
+            "{message}"
+        );
+        assert!(!message.contains("ffmpeg"), "{message}");
+    }
+
+    #[test]
+    fn unsupported_audio_reports_the_decoder_error_not_a_missing_ffmpeg() {
+        let path = write_temp_audio("garbage.mp3", &[0x5Au8; 4_096]);
+        let error =
+            analyze_audio_file_with_fallback_binary(&path, 16, missing_ffmpeg()).unwrap_err();
+        let _ = std::fs::remove_file(&path);
+        assert!(matches!(error, AudioError::Decode(_)), "{error}");
+        assert!(!error.to_string().contains("ffmpeg"), "{error}");
+    }
+
+    #[test]
+    fn missing_audio_file_reports_a_read_error() {
+        let error = analyze_audio_file_with_fallback_binary(
+            &std::env::temp_dir().join("syndocal-audio-definitely-missing.mp3"),
+            16,
+            missing_ffmpeg(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, AudioError::Read(_)), "{error}");
+    }
+
+    fn analyze_wav_file_with_points_bytes(bytes: &[u8]) -> Result<(), AudioError> {
+        let (format, _) = parse_wav(bytes)?;
+        validate_format(format)
+    }
+
+    fn build_extensible_wav(sample_rate: u32, channels: u16, bits: u16, data: &[u8]) -> Vec<u8> {
+        let block_align = channels * bits / 8;
+        let byte_rate = sample_rate * u32::from(block_align);
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        fmt.extend_from_slice(&channels.to_le_bytes());
+        fmt.extend_from_slice(&sample_rate.to_le_bytes());
+        fmt.extend_from_slice(&byte_rate.to_le_bytes());
+        fmt.extend_from_slice(&block_align.to_le_bytes());
+        fmt.extend_from_slice(&bits.to_le_bytes());
+        fmt.extend_from_slice(&22u16.to_le_bytes());
+        fmt.extend_from_slice(&bits.to_le_bytes());
+        fmt.extend_from_slice(&0x3u32.to_le_bytes()); // front left | front right
+                                                      // KSDATAFORMAT_SUBTYPE_PCM
+        fmt.extend_from_slice(&[
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38,
+            0x9B, 0x71,
+        ]);
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&((4 + 8 + fmt.len() + 8 + data.len()) as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&fmt);
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(data);
+        wav
     }
 
     #[test]

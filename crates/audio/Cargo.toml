@@ -7,3 +7,8 @@ license.workspace = true
 [dependencies]
 protocol.workspace = true
 thiserror.workspace = true
+symphonia.workspace = true
+
+[dev-dependencies]
+# Parity check: everything timeline analysis accepts must also play.
+rodio.workspace = true

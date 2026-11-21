@@ -279,6 +279,8 @@ name = "audio"
 version = "1.2.0-rc.3"
 dependencies = [
  "protocol",
+ "rodio",
+ "symphonia",
  "thiserror 1.0.69",
 ]
 

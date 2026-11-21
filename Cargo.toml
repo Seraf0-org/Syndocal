@@ -29,7 +29,9 @@ bcdec_rs = "=0.2.0"
 crossbeam-queue = "0.3"
 gdtf = { path = "crates/gdtf" }
 grafton-ndi = { version = "=0.11.0", default-features = false }
-image = { version = "=0.24.9", default-features = false, features = ["jpeg", "png"] }
+# BMP and WebP decode in pure Rust inside `image` (no new crates); keep this
+# list in step with STILL_IMAGE_EXTENSIONS in app/src/mediaFileTypes.ts.
+image = { version = "=0.24.9", default-features = false, features = ["bmp", "jpeg", "png", "webp"] }
 hap-parser = "=0.2.0"
 ffmpeg-next = { version = "=8.1.0", default-features = false }
 flate2 = "=1.1.9"

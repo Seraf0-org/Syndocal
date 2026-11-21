@@ -27805,15 +27805,27 @@ struct UserTemplateFile {
     dj_track_triggers: Vec<protocol::DjTrackTriggerMapping>,
 }
 
-const VIDEO_FILE_EXTENSIONS: &[&str] = &[
-    "mp4", "m4v", "mov", "mkv", "avi", "webm", "hap", "hapq", "wav", "wave", "mp3", "m4a", "aac",
-    "flac", "ogg", "opus", "aif", "aiff",
+// One list of importable media types, mirrored from app/src/mediaFileTypes.ts
+// (`media_file_type_lists_match_the_frontend` keeps the two identical). Every
+// entry decodes in-process on Windows and macOS: video through the bundled
+// libav, audio through symphonia (analysis and rodio playback), stills through
+// the enabled `image` features. opus/wma/mka and TIFF are deliberately absent.
+#[cfg(test)]
+const VIDEO_ONLY_FILE_EXTENSIONS: &[&str] = &[
+    "mp4", "m4v", "mov", "qt", "mkv", "avi", "webm", "mxf", "mpg", "mpeg", "m2v", "m2ts", "mts",
+    "ts", "wmv", "asf", "flv", "f4v", "3gp", "3g2", "ogv", "dv", "gif", "hap", "hapq",
 ];
-const STILL_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg"];
+/// Video-file MediaAssets also carry audio-only files.
+const VIDEO_FILE_EXTENSIONS: &[&str] = &[
+    "mp4", "m4v", "mov", "qt", "mkv", "avi", "webm", "mxf", "mpg", "mpeg", "m2v", "m2ts", "mts",
+    "ts", "wmv", "asf", "flv", "f4v", "3gp", "3g2", "ogv", "dv", "gif", "hap", "hapq", "wav",
+    "wave", "mp3", "m4a", "aac", "flac", "aiff", "aif", "aifc", "ogg", "oga",
+];
+const STILL_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "bmp", "webp"];
 const ISF_FILE_EXTENSIONS: &[&str] = &["fs", "frag", "glsl", "isf"];
 const VISUALIZER_MODEL_ASSET_CACHE_LIMIT: usize = 64;
 const AUDIO_FILE_EXTENSIONS: &[&str] = &[
-    "wav", "mp3", "m4a", "aac", "flac", "aiff", "aif", "ogg", "opus",
+    "wav", "wave", "mp3", "m4a", "aac", "flac", "aiff", "aif", "aifc", "ogg", "oga",
 ];
 const ARTNET_MAX_UNIVERSE: u16 = 32_767;
 const SACN_MAX_UNIVERSE: u16 = 63_999;
@@ -136614,6 +136626,10 @@ mod art_rdm_request_tests {
 #[cfg(test)]
 #[path = "tests/media_audio_playback_tests.rs"]
 mod media_audio_playback_tests;
+
+#[cfg(test)]
+#[path = "tests/media_file_types_tests.rs"]
+mod media_file_types_tests;
 
 #[cfg(test)]
 include!("tests/live_audio_input_tests.rs");
